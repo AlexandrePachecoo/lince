@@ -7,8 +7,11 @@ câmeras de CFTV já instaladas na loja.
 evento (JSON) e um clipe de ~15 s. O sistema não decide nada sozinho: todo alerta
 passa por triagem humana.
 
-> **Status:** pré-implementação. Só a arquitetura e o ambiente existem.
-> Leia [`docs/arquitetura.md`](docs/arquitetura.md) antes de escrever código.
+> **Status:** estágio 1 do agente (ingestão RTSP, §3.1) implementado. Detecção,
+> tracking, regras, clipe, API e dashboard ainda não existem.
+> Leia [`docs/arquitetura.md`](docs/arquitetura.md) antes de escrever código, e
+> [`CLAUDE.md`](CLAUDE.md) para as convenções — em especial a regra de que toda
+> função nova precisa de teste automatizado.
 
 ---
 
@@ -36,6 +39,18 @@ pnpm infra:ps                      # ambos devem aparecer como healthy
 
 Comandos auxiliares: `pnpm infra:down` (para), `pnpm infra:logs` (acompanha),
 `pnpm infra:reset` (apaga os volumes e recomeça do zero).
+
+## Rodar o agente
+
+Não é preciso ter câmera: `pnpm rtsp:up` sobe câmeras RTSP sintéticas.
+
+```bash
+pnpm rtsp:up
+cd apps/agent && uv sync
+uv run pytest                                                    # sem rede
+uv run pytest -m rtsp                                            # ponta a ponta
+uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 --stats
+```
 
 **Primeira vez, ou numa máquina nova?** O passo a passo completo — instalação por
 sistema operacional, verificação e troubleshooting — está em
