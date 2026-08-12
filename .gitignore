@@ -1,0 +1,50 @@
+# --- Node -------------------------------------------------------------------
+node_modules/
+dist/
+build/
+.turbo/
+*.tsbuildinfo
+npm-debug.log*
+pnpm-debug.log*
+
+# --- Python (apps/agent) ----------------------------------------------------
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- Segredos ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# --- Pesos de modelo --------------------------------------------------------
+# Nunca versionar. O modelo é distribuído pela nuvem com checksum e rollback
+# (ADR-006); um .pt no git seria uma segunda fonte da verdade.
+*.pt
+*.onnx
+*.engine
+*.weights
+models/
+
+# --- Mídia ------------------------------------------------------------------
+# Clipe de evento é dado pessoal (R-9). Não entra no repositório em hipótese
+# alguma, nem como fixture.
+clips/
+*.mp4
+*.mkv
+*.ts
+
+# --- Prisma -----------------------------------------------------------------
+prisma/*.db
+prisma/*.db-journal
+
+# --- Editor / SO ------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/

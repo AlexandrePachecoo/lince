@@ -1,0 +1,32 @@
+{
+  "name": "lince",
+  "image": "mcr.microsoft.com/devcontainers/universal:2-linux",
+
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+
+  "postCreateCommand": "bash scripts/setup.sh",
+
+  "forwardPorts": [3000, 5173, 5432, 6379],
+  "portsAttributes": {
+    "3000": { "label": "API (Fastify)" },
+    "5173": { "label": "Dashboard (Vite)" },
+    "5432": { "label": "PostgreSQL" },
+    "6379": { "label": "Redis" }
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "Prisma.prisma",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "ms-azuretools.vscode-docker",
+        "bierner.markdown-mermaid"
+      ]
+    }
+  }
+}

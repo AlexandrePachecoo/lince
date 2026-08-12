@@ -1,0 +1,50 @@
+# Infraestrutura de DESENVOLVIMENTO do control plane (nuvem).
+#
+# Este arquivo NÃO é o compose do box da loja. O box (agente + redis local +
+# tailscale + watchtower, §3.8 da arquitetura) mora em arquivo próprio e sobe
+# em hardware com GPU — misturar os dois confunde dois ambientes que têm
+# requisitos e ciclos de vida diferentes.
+#
+# Uso:  pnpm infra:up   (ou  docker compose -f infra/docker-compose.yml up -d)
+
+name: lince-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lince-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lince}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD em infra/.env}
+      POSTGRES_DB: ${POSTGRES_DB:-lince}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lince} -d ${POSTGRES_DB:-lince}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: lince-redis
+    restart: unless-stopped
+    # appendonly: BullMQ perde jobs enfileirados se o Redis reiniciar sem AOF.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  pgdata:
+  redisdata:
