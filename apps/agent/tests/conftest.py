@@ -40,6 +40,58 @@ def fmp4_stream() -> bytes:
 
 
 @pytest.fixture(scope="session")
+def fmp4_sessao_longa() -> bytes:
+    """40 s de fMP4 real, um fragmento por segundo.
+
+    O `fmp4_stream` tem 5 s — não cabe uma janela de 30 s com pré e pós-roll. Aqui
+    `-g 10` a 10 fps dá 40 fragmentos de 1 s, que é resolução suficiente para
+    exercitar poda, seleção de janela e teto de bytes com bytes de verdade em vez de
+    fragmento inventado. A 64x64 o ffmpeg gera isto em menos de um segundo.
+    """
+    result = subprocess.run(  # noqa: S603
+        [
+            *(_ffmpeg(), "-hide_banner", "-loglevel", "error"),
+            *("-f", "lavfi", "-i", "testsrc2=size=64x64:rate=10"),
+            *("-frames:v", "400", "-c:v", "libx264", "-preset", "ultrafast"),
+            *("-tune", "zerolatency", "-g", "10", "-pix_fmt", "yuv420p", "-an"),
+            *("-movflags", "+frag_keyframe+empty_moov+default_base_moof"),
+            *("-f", "mp4", "pipe:1"),
+        ],
+        capture_output=True,
+        timeout=120,
+        check=True,
+    )
+    assert result.stdout, "ffmpeg não produziu bytes"
+    return result.stdout
+
+
+@pytest.fixture(scope="session")
+def fmp4_outra_resolucao() -> bytes:
+    """Uma segunda execução do ffmpeg, com `moov` incompatível com o das outras.
+
+    A resolução diferente é o que torna a incompatibilidade observável: concatenar
+    este init com fragmentos de 64x64 (ou o inverso) produz mídia que o decoder não
+    consegue interpretar. Serve para medir o que acontece de fato quando duas
+    sessões se misturam — que é o desastre que o `session_id` existe para evitar.
+    """
+    result = subprocess.run(  # noqa: S603
+        [
+            *(_ffmpeg(), "-hide_banner", "-loglevel", "error"),
+            *("-f", "lavfi", "-i", "testsrc2=size=96x96:rate=10"),
+            *("-frames:v", "100", "-c:v", "libx264", "-preset", "ultrafast"),
+            *("-tune", "zerolatency", "-g", "10", "-pix_fmt", "yuv420p", "-an"),
+            *("-movflags", "+frag_keyframe+empty_moov+default_base_moof"),
+            *("-f", "mp4", "pipe:1"),
+        ],
+        capture_output=True,
+        timeout=120,
+        check=True,
+    )
+    assert result.stdout, "ffmpeg não produziu bytes"
+    return result.stdout
+
+
+@pytest.fixture(scope="session")
 def rtsp_url() -> str:
     url = os.environ.get("RTSP_TEST_URL", "rtsp://localhost:8554/cam1")
     probe = shutil.which("ffprobe")

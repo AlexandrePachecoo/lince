@@ -20,6 +20,7 @@ nada.
 
 from __future__ import annotations
 
+import itertools
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -27,6 +28,16 @@ from typing import Final
 
 _HEADER_SIZE: Final = 8
 _LARGE_HEADER_SIZE: Final = 16
+
+_sessoes = itertools.count(1)
+"""Contador de execuções do ffmpeg no processo.
+
+Cada `Fmp4Parser` é uma execução, e o estágio 5 precisa distinguir uma da outra:
+depois de uma reconexão chega um `init` novo, com timeline própria, e fragmentos
+das duas execuções são inconcatenáveis. Não dá para inferir isso da ordem de
+chegada — `on_init_segment` é chamado inline na thread leitora enquanto o
+fragmento atravessa a fila até a thread despachante, então o fragmento velho pode
+chegar depois do init novo (§3.5)."""
 MAX_BUFFERED_BYTES: Final = 32 * 1024 * 1024
 """Teto de segurança do buffer interno. Um fragmento de substream é da ordem de
 centenas de KB; chegar a 32 MB sem fechar um box significa stream corrompido, e
@@ -47,6 +58,9 @@ class InitSegment:
     """Unidades por segundo do timeline de mídia. Com
     `-use_wallclock_as_timestamps 1`, esse timeline é o relógio da borda."""
 
+    session_id: int = 0
+    """Qual execução do ffmpeg produziu este init. Ver `_sessoes`."""
+
 
 @dataclass(frozen=True, slots=True)
 class Fragment:
@@ -61,6 +75,10 @@ class Fragment:
     """`time.monotonic()` na chegada. O `base_media_decode_time` é a referência
     precisa; este campo existe para o watchdog, que só precisa saber se algo
     chegou."""
+
+    session_id: int = 0
+    """Qual execução do ffmpeg produziu este fragmento. Concatenar fragmentos de
+    sessões diferentes produz arquivo que não abre. Ver `_sessoes`."""
 
     @property
     def start_seconds(self) -> float:
@@ -178,6 +196,11 @@ class Fmp4Parser:
         self._init_boxes = bytearray()
         self._init: InitSegment | None = None
         self._pending_moof: bytes | None = None
+        self._session_id = next(_sessoes)
+
+    @property
+    def session_id(self) -> int:
+        return self._session_id
 
     @property
     def init_segment(self) -> InitSegment | None:
@@ -223,6 +246,7 @@ class Fmp4Parser:
                 base_media_decode_time=parse_base_media_decode_time(moof),
                 timescale=self._init.timescale,
                 received_at=received_at,
+                session_id=self._session_id,
             )
 
         if self._init is None:
@@ -236,4 +260,4 @@ class Fmp4Parser:
             raise Fmp4ParseError("moof antes de qualquer ftyp/moov")
         data = bytes(self._init_boxes)
         self._init_boxes.clear()
-        return InitSegment(data=data, timescale=parse_timescale(data))
+        return InitSegment(data=data, timescale=parse_timescale(data), session_id=self._session_id)

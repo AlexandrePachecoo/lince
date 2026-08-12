@@ -65,6 +65,58 @@ def build_ingest_command(
     return argv
 
 
+def build_clip_command(destination: str, *, ffmpeg_bin: str = "ffmpeg") -> list[str]:
+    """Argv do remux do clipe: fMP4 pela stdin, MP4 progressivo no destino (§3.5).
+
+    Note o que **não** está aqui: nem `-ss`, nem `-t`, nem codec. A concatenação de
+    `init + fragmentos` que chega pela stdin já contém exatamente a janela pedida —
+    a seleção aconteceu sobre os fragmentos, que são a unidade de corte. `-ss` com
+    `-c copy` ancoraria no keyframe mais próximo e não acrescentaria precisão
+    nenhuma; só mascararia o alinhamento que o §3.5 assume explícito.
+
+    O que este passo entrega, e que a concatenação crua não tem:
+
+    - `+faststart` move o `moov` para antes do `mdat`. O fMP4 toca no ffmpeg, mas
+      tropeça no player do dashboard, que quer o índice antes da mídia.
+    - `-avoid_negative_ts make_zero` zera o primeiro timestamp. Captura ao vivo não
+      nasce em zero, e um arquivo cujo primeiro sample está lá na casa do epoch
+      quebra barra de progresso e cálculo de duração em qualquer player.
+    - Um `moov` de verdade, com a tabela de samples, e portanto a duração real que
+      vai no evento.
+    - Validação **do contêiner**: entrada sem `moov` (fragmento solto, gatilho antes
+      do init chegar) faz o ffmpeg sair diferente de zero, e o evento vira
+      `clip_failed` em vez de subir um arquivo que ninguém consegue abrir.
+
+    O que este passo **não** pega, medido e não suposto (`test_clip_remux.py`):
+
+    - **Mídia de sessões diferentes.** `init` de uma execução com fragmentos de
+      outra sai com código 0 e stderr vazio, produzindo um arquivo que abre e mostra
+      lixo. O ffmpeg valida o contêiner, não a coerência da mídia — por isso o
+      `session_id` do `ClipBuffer` é a **única** defesa contra isso, e não uma
+      redundância.
+    - **Truncamento na cauda.** Um `mdat` cortado no meio vira um arquivo mais curto,
+      silenciosamente, também com código 0. Aqui a proteção vem de antes: o
+      `Fmp4Parser` só emite `Fragment` com `moof` e `mdat` completos, então o buffer
+      nunca chega a ter meio fragmento.
+    """
+    return [
+        *(ffmpeg_bin, "-hide_banner", "-nostats"),
+        *("-loglevel", "error"),
+        # A entrada é um pipe: não-buscável, e o demuxer precisa saber o formato de
+        # antemão porque não pode voltar para reanalisar.
+        *("-f", "mp4", "-i", "pipe:0"),
+        *("-map", "0:v:0"),
+        # Redundante com o `-allowed_media_types video` da ingestão, e de propósito:
+        # o clipe é o único artefato que sai da loja, e áudio de mercado é dado
+        # pessoal que ninguém pediu (R-9).
+        *("-an", "-sn", "-dn"),
+        *("-c", "copy"),
+        *("-movflags", "+faststart"),
+        *("-avoid_negative_ts", "make_zero"),
+        *("-f", "mp4", "-y", destination),
+    ]
+
+
 def _hwaccel_args(hwaccel: HwAccel) -> list[str]:
     match hwaccel:
         case HwAccel.NONE:

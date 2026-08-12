@@ -56,10 +56,14 @@ cd apps/agent && uv run ruff check src tests && uv run ruff format --check src t
 
 | Componente | Situação |
 |---|---|
-| `apps/agent` | Estágio 1 (ingestão RTSP, §3.1). Sem YOLO, tracking, regras ou clipe |
+| `apps/agent` | Estágios 1 (ingestão RTSP, §3.1) e 5 (clipe, §3.5). Sem YOLO, tracking nem regras |
 | `apps/api` | vazio |
 | `apps/dashboard` | vazio |
 | `packages/shared` | vazio — vai abrigar o contrato agente↔nuvem da §5 |
+
+O estágio 5 está completo e testado como unidade, mas **ainda não está ligado**: nada
+alimenta o `ClipBuffer` pelos `IngestCallbacks`, e ninguém consome o `ClipResult`. A
+fiação espera o estágio 6 (fila local e envio, §3.6) definir quem recebe o clipe.
 
 `packages/shared` é onde o contrato da §5 (payload de evento, heartbeat, formato de
 configuração) mora em **um lugar só**. Duplicar essa definição entre a API e o

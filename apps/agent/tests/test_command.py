@@ -8,6 +8,7 @@ import pytest
 from lince_agent.config import DecodeOptions, HwAccel, PixelFormat
 from lince_agent.ffmpeg.command import (
     MOVFLAGS,
+    build_clip_command,
     build_ingest_command,
     build_probe_command,
     is_live_source,
@@ -185,3 +186,54 @@ def test_probe_pede_json_do_primeiro_stream_de_video():
     assert value_after(command, "-select_streams") == "v:0"
     assert value_after(command, "-of") == "json"
     assert command[-1] == RTSP
+
+
+def test_comando_de_clipe_nao_recodifica():
+    """`-c copy` é o que torna o corte barato o bastante para caber no §3.7. Num
+    box com a GPU ocupada pela inferência, recodificar 15 s de vídeo a cada evento
+    competiria justamente com a detecção."""
+    command = build_clip_command("/tmp/clipe.mp4")
+    assert value_after(command, "-c") == "copy"
+    assert "-c:v" not in command
+    assert "libx264" not in command
+
+
+def test_comando_de_clipe_pede_faststart_e_timestamp_zerado():
+    """`+faststart` põe o `moov` antes do `mdat`, que é o que o player do dashboard
+    exige; `make_zero` evita um arquivo cuja barra de progresso começa no epoch."""
+    command = build_clip_command("/tmp/clipe.mp4")
+    assert value_after(command, "-movflags") == "+faststart"
+    assert value_after(command, "-avoid_negative_ts") == "make_zero"
+
+
+def test_comando_de_clipe_nao_corta_por_tempo():
+    """Sem `-ss` e sem `-t` de propósito: a seleção já aconteceu sobre fragmentos,
+    que são a unidade de corte. `-ss` com `-c copy` ancoraria no keyframe mais
+    próximo e só mascararia o alinhamento que o §3.5 assume explícito."""
+    command = build_clip_command("/tmp/clipe.mp4")
+    assert "-ss" not in command
+    assert "-t" not in command
+
+
+def test_comando_de_clipe_descarta_audio():
+    """R-9: o clipe é o único artefato que sai da loja. Áudio de mercado é dado
+    pessoal que ninguém pediu, e a ingestão já o recusa no demuxer."""
+    command = build_clip_command("/tmp/clipe.mp4")
+    assert "-an" in command
+    assert "-sn" in command
+    assert "-dn" in command
+
+
+def test_comando_de_clipe_le_da_stdin():
+    """Os bytes já estão em RAM. Um arquivo bruto intermediário seria vídeo em
+    disco que o NFR-3 não pede — e que sobreviveria a um crash."""
+    command = build_clip_command("/tmp/clipe.mp4")
+    assert value_after(command, "-i") == "pipe:0"
+    assert value_after(command, "-f") == "mp4", "pipe não é buscável: o formato tem que vir dado"
+    assert command[-1] == "/tmp/clipe.mp4"
+
+
+def test_comando_de_clipe_nao_desliga_a_stdin():
+    """`-nostdin` está na ingestão e **não** pode estar aqui: é justamente pela
+    stdin que a concatenação chega."""
+    assert "-nostdin" not in build_clip_command("/tmp/clipe.mp4")

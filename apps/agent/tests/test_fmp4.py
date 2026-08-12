@@ -153,3 +153,34 @@ def test_box_incompleto_apenas_aguarda():
 def test_moof_sem_init_e_erro():
     with pytest.raises(Fmp4ParseError, match="ftyp/moov"):
         Fmp4Parser().feed(b"\x00\x00\x00\x08moof", received_at=0.0)
+
+
+def test_init_e_fragmentos_do_mesmo_parser_compartilham_a_sessao(fmp4_stream: bytes):
+    """Um parser é uma execução do ffmpeg, e o `session_id` é o nome dela.
+
+    O buffer do §3.5 concatena init mais fragmentos: os dois precisam concordar
+    sobre de qual execução vieram, senão a checagem de sessão rejeitaria tudo.
+    """
+    items = parse_all(fmp4_stream)
+    assert len({item.session_id for item in items}) == 1
+
+
+def test_parsers_distintos_carimbam_sessoes_distintas(fmp4_stream: bytes):
+    """Cada reconexão cria um parser novo — e um `init` novo, com `tfdt` que
+    recomeça de outra origem. Fragmentos de execuções diferentes **não** podem ser
+    concatenados: o arquivo não abre, ou abre mostrando lixo.
+
+    Sem este campo os fragmentos são indistinguíveis, e a corrida que o motiva não
+    é hipótese: `on_init_segment` é chamado inline na thread leitora, enquanto o
+    fragmento atravessa a `DropOldestQueue` até a thread despachante. Um fragmento
+    da sessão velha pode chegar depois do init novo.
+    """
+    primeira = parse_all(fmp4_stream)
+    segunda = parse_all(fmp4_stream)
+
+    sessao_primeira = {item.session_id for item in primeira}
+    sessao_segunda = {item.session_id for item in segunda}
+    assert sessao_primeira.isdisjoint(sessao_segunda)
+
+    # Os bytes são idênticos: só o carimbo distingue as duas execuções.
+    assert [item.data for item in primeira] == [item.data for item in segunda]

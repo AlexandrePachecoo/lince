@@ -149,11 +149,77 @@ class SupervisionOptions:
 
 
 @dataclass(frozen=True, slots=True)
+class ClipOptions:
+    """Buffer circular e corte do clipe (§3.5).
+
+    Por câmera, não por loja: o §3.4 exige limiares por câmera, e aqui isso é
+    concreto — uma câmera de saída com GOP de 10 s precisa de outra tolerância de
+    pós-roll que a do corredor.
+    """
+
+    window_s: float = 30.0
+    """Quanto de vídeo o buffer retém. Precisa cobrir o corte inteiro com folga:
+    durante a espera do pós-roll a poda continua rodando, e uma janela apertada
+    descartaria o pré-roll antes de o corte acontecer."""
+
+    pre_roll_s: float = 5.0
+    post_roll_s: float = 10.0
+    """Os 10 s são incompressíveis por definição do produto e consomem dois terços
+    do orçamento do §3.7. É por isso que o alerta sobe antes do clipe."""
+
+    post_roll_grace_s: float = 5.0
+    """Tolerância além do pós-roll antes de desistir e cortar o que houver. Sem
+    ela, uma câmera de GOP longo que parou de entregar seguraria o clipe para
+    sempre — e o alerta não pode esperar (§3.7)."""
+
+    max_bytes: int = 16 * 1024 * 1024
+    """Teto rígido de RAM por câmera (§3.5). Vence a janela de tempo: RAM é limite
+    físico, 30 s é desejo de produto. Quando morde, o pré-roll sai curto e isso é
+    registrado no evento em vez de silenciado."""
+
+    max_disk_bytes: int = 2 * 1024**3
+    """Teto do diretório de clipes pendentes. Ao estourar, o clipe mais antigo é
+    apagado e o evento sobrevive sem ele (§3.6)."""
+
+    remux_timeout_s: float = 30.0
+    pending_requests: int = 8
+    """Gatilhos aguardando corte. Cheia, descarta e conta: uma rajada não pode
+    crescer memória nem bloquear o motor de regras."""
+
+    def __post_init__(self) -> None:
+        if self.pre_roll_s <= 0:
+            raise ValueError(f"pre_roll_s deve ser positivo, recebi {self.pre_roll_s}")
+        if self.post_roll_s <= 0:
+            raise ValueError(f"post_roll_s deve ser positivo, recebi {self.post_roll_s}")
+        if self.post_roll_grace_s < 0:
+            raise ValueError(f"post_roll_grace_s não pode ser negativo: {self.post_roll_grace_s}")
+        necessario = self.pre_roll_s + self.post_roll_s + self.post_roll_grace_s
+        if self.window_s < necessario:
+            raise ValueError(
+                f"window_s de {self.window_s}s não cobre pré-roll + pós-roll + tolerância "
+                f"({necessario}s): o buffer descartaria o pré-roll antes do corte"
+            )
+        if self.max_bytes <= 0:
+            raise ValueError(f"max_bytes deve ser positivo, recebi {self.max_bytes}")
+        if self.max_disk_bytes <= 0:
+            raise ValueError(f"max_disk_bytes deve ser positivo, recebi {self.max_disk_bytes}")
+        if self.pending_requests <= 0:
+            raise ValueError(f"pending_requests deve ser positivo, recebi {self.pending_requests}")
+
+    @property
+    def clip_duration_s(self) -> float:
+        """Duração nominal. A efetiva vai no evento e costuma diferir: o corte se
+        alinha ao keyframe e o buffer pode não ter o pré-roll inteiro."""
+        return self.pre_roll_s + self.post_roll_s
+
+
+@dataclass(frozen=True, slots=True)
 class CameraConfig:
     camera_id: str
     url: str
     decode: DecodeOptions = field(default_factory=DecodeOptions)
     supervision: SupervisionOptions = field(default_factory=SupervisionOptions)
+    clip: ClipOptions = field(default_factory=ClipOptions)
 
     def __post_init__(self) -> None:
         if not self.camera_id:
