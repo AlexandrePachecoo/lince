@@ -1,0 +1,40 @@
+[project]
+name = "lince-agent"
+version = "0.0.0"
+description = "Agente da borda — ingestão RTSP, detecção, tracking, regras e clipe"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.1",
+]
+
+[project.scripts]
+lince-agent = "lince_agent.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lince_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Testes que precisam do MediaMTX rodando ficam de fora por padrão:
+#   pnpm rtsp:up && uv run pytest -m rtsp
+addopts = "-m 'not rtsp'"
+markers = [
+    "rtsp: exige um servidor RTSP em RTSP_TEST_URL (ver infra/docker-compose.rtsp.yml)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

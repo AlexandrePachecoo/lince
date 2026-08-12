@@ -13,6 +13,10 @@
     "infra:down": "docker compose -f infra/docker-compose.yml down",
     "infra:logs": "docker compose -f infra/docker-compose.yml logs -f",
     "infra:ps": "docker compose -f infra/docker-compose.yml ps",
-    "infra:reset": "docker compose -f infra/docker-compose.yml down -v"
+    "infra:reset": "docker compose -f infra/docker-compose.yml down -v",
+    "rtsp:up": "docker compose -f infra/docker-compose.rtsp.yml up -d",
+    "rtsp:down": "docker compose -f infra/docker-compose.rtsp.yml down",
+    "rtsp:ps": "docker compose -f infra/docker-compose.rtsp.yml ps",
+    "rtsp:logs": "docker compose -f infra/docker-compose.rtsp.yml logs -f"
   }
 }

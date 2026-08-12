@@ -1,0 +1,103 @@
+# Câmeras RTSP sintéticas para desenvolvimento do estágio 1 (§3.1 da arquitetura).
+#
+# Arquivo separado do infra/docker-compose.yml pelo mesmo motivo que o compose do
+# box da loja é separado: ciclo de vida próprio. As câmeras sobem e descem o tempo
+# todo durante o desenvolvimento do agente; Postgres e Redis, não.
+#
+# Uso:  pnpm rtsp:up   (ou  docker compose -f infra/docker-compose.rtsp.yml up -d)
+#
+# Simulação das falhas do §3.1:
+#
+#   docker stop lince-cam1     câmera offline — o processo ffmpeg do agente morre
+#   docker start lince-cam1    volta; o supervisor deve reconectar sozinho
+#   docker pause lince-cam1    stream travado com socket vivo — só o watchdog pega
+#   docker unpause lince-cam1  destrava
+
+name: lince-rtsp
+
+# Publisher: uma câmera sintética. testsrc2 tem movimento, que é o que importa
+# para o pipeline; -re publica em tempo real (sem isso, publica na velocidade
+# máxima e não sobra nada de realista para testar).
+x-camera: &camera
+  image: bluenviron/mediamtx:latest-ffmpeg
+  entrypoint: ffmpeg
+  restart: unless-stopped
+  depends_on:
+    mediamtx:
+      condition: service_started
+
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: lince-mediamtx
+    restart: unless-stopped
+    environment:
+      MTX_LOGLEVEL: info
+    ports:
+      - "${RTSP_PORT:-8554}:8554"
+
+  # Câmera de referência: 640x480 a 15 fps, keyframe a cada 2 s.
+  # -g 30 define a granularidade do fragmento fMP4 e, portanto, a precisão do
+  # corte do estágio 5 — é o parâmetro que os testes de alinhamento exercitam.
+  cam1:
+    <<: *camera
+    container_name: lince-cam1
+    command:
+      - -hide_banner
+      - -loglevel
+      - warning
+      - -re
+      - -f
+      - lavfi
+      - -i
+      - testsrc2=size=640x480:rate=15
+      - -c:v
+      - libx264
+      - -preset
+      - ultrafast
+      # zerolatency desliga B-frames e lookahead: GOP previsível, como o de
+      # câmera CFTV de verdade.
+      - -tune
+      - zerolatency
+      - -g
+      - "30"
+      - -pix_fmt
+      - yuv420p
+      - -an
+      - -f
+      - rtsp
+      - -rtsp_transport
+      - tcp
+      - rtsp://mediamtx:8554/cam1
+
+  # Câmera de GOP longo: keyframe a cada 10 s. Existe para provar que o pré-roll
+  # de 5 s do §3.5 degrada de forma controlada quando a câmera é mal configurada
+  # (o fragmento passa a ser maior que a janela pedida).
+  cam2:
+    <<: *camera
+    container_name: lince-cam2
+    command:
+      - -hide_banner
+      - -loglevel
+      - warning
+      - -re
+      - -f
+      - lavfi
+      - -i
+      - testsrc2=size=640x480:rate=15
+      - -c:v
+      - libx264
+      - -preset
+      - ultrafast
+      - -tune
+      - zerolatency
+      - -g
+      - "150"
+      - -pix_fmt
+      - yuv420p
+      - -an
+      - -f
+      - rtsp
+      - -rtsp_transport
+      - tcp
+      - rtsp://mediamtx:8554/cam2

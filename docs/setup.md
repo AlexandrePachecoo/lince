@@ -3,9 +3,9 @@
 Passo a passo para deixar o ambiente de desenvolvimento funcionando do zero.
 Tempo esperado: ~15 minutos, quase tudo download.
 
-> **O que este guia entrega:** Postgres e Redis rodando e as ferramentas da borda
-> instaladas. Ainda **não existe código de aplicação** no repositório — nem API,
-> nem dashboard, nem agente. Este é o ambiente onde eles vão ser escritos.
+> **O que este guia entrega:** Postgres e Redis rodando, as ferramentas da borda
+> instaladas e o **estágio 1 do agente** (ingestão RTSP) funcionando contra câmeras
+> sintéticas. API e dashboard ainda não existem.
 
 ---
 
@@ -181,7 +181,66 @@ troubleshooting.
 | `pnpm infra:logs` | acompanha os logs (Ctrl+C sai) |
 | `pnpm infra:down` | para os containers, **preserva** os dados |
 | `pnpm infra:reset` | para e **apaga os volumes** — banco zerado |
+| `pnpm rtsp:up` | sobe as câmeras RTSP sintéticas (ver abaixo) |
+| `pnpm rtsp:down` | derruba as câmeras |
+| `pnpm rtsp:logs` | logs do MediaMTX e dos publishers |
 | `bash scripts/setup.sh` | reexecuta o setup; seguro a qualquer momento |
+
+---
+
+## Rodando o agente da borda
+
+O estágio 1 da arquitetura (§3.1) já existe: um processo `ffmpeg` por câmera lendo
+RTSP, entregando frames decodificados para a detecção e fragmentos comprimidos para
+o buffer do clipe. Ainda não há YOLO, tracking nem corte.
+
+Você não precisa de câmera nenhuma para trabalhar nele. `pnpm rtsp:up` sobe um
+servidor RTSP local com duas câmeras sintéticas em 640x480 a 15 fps:
+
+| Câmera | URL | Para quê |
+|---|---|---|
+| cam1 | `rtsp://localhost:8554/cam1` | keyframe a cada 2 s — a câmera de referência |
+| cam2 | `rtsp://localhost:8554/cam2` | keyframe a cada 10 s — câmera mal configurada |
+
+```bash
+pnpm rtsp:up
+cd apps/agent
+uv sync
+uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 --stats
+```
+
+A saída mostra, por segundo: estado da câmera, frames entregues e a taxa efetiva
+(deve estabilizar em 3,00 fps), fragmentos acumulados e há quanto tempo chegou o
+último frame. `Ctrl+C` encerra.
+
+### Testes
+
+```bash
+cd apps/agent
+uv run pytest              # unitários; não precisam de rede nem de câmera
+uv run pytest -m rtsp      # ponta a ponta; exige `pnpm rtsp:up`
+```
+
+Os marcados com `rtsp` são os únicos que verificam o que só existe em execução: que
+os dois pipes do ffmpeg fluem ao mesmo tempo sem travar um ao outro, e que os
+fragmentos coletados formam um MP4 reproduzível.
+
+### Simulando as falhas do §3.1
+
+As duas falhas de câmera que a arquitetura prevê saem dos containers:
+
+```bash
+docker stop lince-cam1     # câmera offline: o ffmpeg morre
+                           # → reconnecting, backoff crescente, depois offline
+docker start lince-cam1    # → volta para ok sozinho
+
+docker pause lince-cam1    # stream travado com o socket vivo
+                           # → só o watchdog pega; o -timeout do ffmpeg não
+docker unpause lince-cam1
+```
+
+A segunda é a que engana e a razão de existir um watchdog: o socket continua
+aberto, o ffmpeg não reclama, e nenhum frame sai.
 
 ---
 
@@ -197,6 +256,9 @@ troubleshooting.
 | Postgres preso em `starting` | volume corrompido de uma tentativa anterior | `pnpm infra:reset` e suba de novo (**apaga os dados**) |
 | Prisma não conecta, mas o container está `healthy` | senha diferente entre `POSTGRES_PASSWORD` e `DATABASE_URL` | acerte as duas e rode `pnpm infra:reset` — a senha do Postgres só é aplicada na criação do volume |
 | `ffmpeg` instalado mas sem NVDEC | build sem suporte a CUDA | irrelevante sem GPU; no box de referência use um build com `--enable-cuda-nvcc` |
+| `uv run pytest -m rtsp` pula tudo | câmeras sintéticas não estão de pé | `pnpm rtsp:up` e espere uns 5 s |
+| Agente em `reconnecting` com `404 Not Found` | o MediaMTX está no ar mas nenhum publisher está publicando naquele caminho | `pnpm rtsp:ps` — o container `lince-cam1` precisa estar `Up` |
+| `bind: address already in use` na 8554 | outro servidor RTSP na máquina | mude `RTSP_PORT` em `infra/.env` |
 
 ---
 
@@ -205,9 +267,11 @@ troubleshooting.
 ```
 apps/api/          API Fastify + Prisma (control plane)   — vazio
 apps/dashboard/    Dashboard React PWA (triagem)          — vazio
-apps/agent/        Agente da borda em Python              — vazio
+apps/agent/        Agente da borda em Python              — estágio 1 (§3.1)
+  src/lince_agent/ffmpeg/    montagem do comando, processo, pipes, parser fMP4
+  src/lince_agent/ingest/    supervisão: reconexão, watchdog, saúde
 packages/shared/   Contrato agente ↔ nuvem (§5)           — vazio
-infra/             docker-compose de desenvolvimento
+infra/             docker-compose de desenvolvimento e das câmeras sintéticas
 scripts/setup.sh   bootstrap idempotente
 docs/              arquitetura e ADRs
 ```
