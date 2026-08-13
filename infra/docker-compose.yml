@@ -6,6 +6,10 @@
 # requisitos e ciclos de vida diferentes.
 #
 # Uso:  pnpm infra:up   (ou  docker compose -f infra/docker-compose.yml up -d)
+#
+# O Redis daqui também é o alvo dos testes marcados com `redis` do agente
+# (`uv run pytest -m redis`), que usam o banco 15 e prefixo próprio por teste. Não é
+# o Redis do box — é o mesmo software cumprindo dois papéis em desenvolvimento.
 
 name: lince-dev
 

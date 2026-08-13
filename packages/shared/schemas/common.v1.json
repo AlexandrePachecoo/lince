@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/common/v1.json",
+  "title": "Definições compartilhadas do contrato agente ↔ nuvem",
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Identificador opaco de tenant, loja ou câmera."
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+      "description": "UUID gerado na borda. É a chave de idempotência do §5.4 e também o nome do arquivo do clipe no disco do box, então o formato é restrito de propósito."
+    },
+    "instant": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+      "description": "ISO-8601 UTC com milissegundos. Precisão maior seria inventada: o gatilho é limitado pelo GOP e pela amostragem de 3 fps."
+    },
+    "clip_status": {
+      "enum": ["ok", "clip_failed"],
+      "description": "Mesmos literais do §3.5. `clip_failed` não é fracasso do evento — o alerta sobe do mesmo jeito, só a triagem fica prejudicada."
+    },
+    "clip": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "$ref": "#/$defs/clip_status" },
+        "duration_s": { "type": "number", "minimum": 0 },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "pre_roll_s": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Pré-roll **medido**, não o pedido. O §3.5 exige registrar o efetivo, e a entidade CLIPE do §6 guarda os dois: um triador que recebe 1 s de pré-roll precisa saber que foi limitação da câmera, não da regra."
+        },
+        "post_roll_s": { "type": "number", "minimum": 0 },
+        "pre_roll_requested_s": { "type": "number", "minimum": 0 },
+        "post_roll_requested_s": { "type": "number", "minimum": 0 },
+        "fragments": { "type": "integer", "minimum": 0 },
+        "truncated_pre_roll": { "type": "boolean" },
+        "truncated_post_roll": { "type": "boolean" },
+        "session_lost": {
+          "type": "boolean",
+          "description": "Houve reconexão da câmera entre o gatilho e o corte, então o clipe tem só o que já estava congelado."
+        },
+        "error": { "type": ["string", "null"], "maxLength": 500 }
+      }
+    }
+  }
+}

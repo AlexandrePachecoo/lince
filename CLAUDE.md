@@ -56,18 +56,29 @@ cd apps/agent && uv run ruff check src tests && uv run ruff format --check src t
 
 | Componente | Situação |
 |---|---|
-| `apps/agent` | Estágios 1 (ingestão RTSP, §3.1) e 5 (clipe, §3.5). Sem YOLO, tracking nem regras |
+| `apps/agent` | Estágios 1 (ingestão, §3.1), 5 (clipe, §3.5) e 6 (fila e envio, §3.6), ligados por `runtime.py`. Sem YOLO, tracking nem regras |
 | `apps/api` | vazio |
 | `apps/dashboard` | vazio |
-| `packages/shared` | vazio — vai abrigar o contrato agente↔nuvem da §5 |
+| `packages/shared` | JSON Schema do evento e do PATCH do clipe (§5). Heartbeat e config ainda não |
 
-O estágio 5 está completo e testado como unidade, mas **ainda não está ligado**: nada
-alimenta o `ClipBuffer` pelos `IngestCallbacks`, e ninguém consome o `ClipResult`. A
-fiação espera o estágio 6 (fila local e envio, §3.6) definir quem recebe o clipe.
+O caminho **gatilho → clipe → fila local → nuvem → clipe apagado do disco** funciona
+ponta a ponta. O que ainda não existe é quem puxa o gatilho: sem os estágios 2 a 4,
+quem dispara é andaime (`--trigger-after`, `--trigger-every`, `SIGUSR1`), e os
+eventos que ele produz sobem marcados como `source: "manual"` — de propósito, para
+não contaminarem a métrica de falso positivo por câmera (R-1).
 
-`packages/shared` é onde o contrato da §5 (payload de evento, heartbeat, formato de
-configuração) mora em **um lugar só**. Duplicar essa definição entre a API e o
-agente é o erro mais caro que dá para cometer neste projeto.
+Onde encostar em cada coisa:
+
+- **Motor de regras (§3.4)** chama `AgentRuntime.trigger(camera_id, source=RULE, …)`.
+  Nada mais precisa mudar para o evento chegar à nuvem.
+- **Detecção (§3.2)** entra em `AgentRuntime._ao_receber_frame`, que hoje só conta.
+- **Heartbeat (§5.3)** já tem os dados reunidos em `AgentHealth`; falta o transporte,
+  que depende do registro da §5.1.
+
+`packages/shared` é onde o contrato da §5 mora em **um lugar só**. Duplicar essa
+definição entre a API e o agente é o erro mais caro que dá para cometer neste
+projeto. O agente valida o payload real contra o schema em
+`tests/test_contrato_evento.py` — é esse teste que impede a divergência.
 
 ## Comandos
 
@@ -77,9 +88,14 @@ pnpm rtsp:up                  # câmeras RTSP sintéticas (MediaMTX)
 
 cd apps/agent
 uv sync
-uv run pytest                 # padrão: sem rede, sem câmera
+uv run pytest                 # padrão: sem rede, sem câmera, sem infra
 uv run pytest -m rtsp         # ponta a ponta; exige `pnpm rtsp:up`
+uv run pytest -m redis        # fila local durável; exige `pnpm infra:up`
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 --stats
+
+# caminho inteiro até a nuvem, sem uma API do outro lado:
+uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 \
+  --outbox redis --dry-run --trigger-every 20 --stats
 ```
 
 ## Convenções
@@ -110,3 +126,14 @@ Não reintroduza nenhuma destas — cada uma custou depuração e tem teste guar
   meio do GOP e quebra o descarte do buffer circular.
 - **`rawvideo` não tem framing.** O tamanho do frame é contrato; errá-lo embaralha
   tudo sem levantar erro.
+- **`HTTPError` do `urllib` é levantado _e_ é a resposta.** Tem `.code`, `.headers` e
+  `.read()`. Tratá-lo só como exceção joga fora o status, e é o status que decide
+  entre reenviar e mandar para a fila morta.
+- **`PUT` de arquivo sem `Content-Length` vira `Transfer-Encoding: chunked`**, que o
+  R2 recusa numa URL pré-assinada. E o corpo precisa ser **reaberto** a cada
+  tentativa: um arquivo já lido está no fim, e o reenvio sobe zero byte sem erro.
+- **Score de ZSET 0.0 é falsy.** `if not zscore(...)` tira da fila um item agendado
+  para o instante zero, em silêncio. Sempre `is None`.
+- **Teste de fila com a nuvem aceitando é corrida.** O sender drena entre o gatilho e
+  a asserção. Nos testes de fila o link fica caído por padrão; quem quer o caminho
+  completo pede o cliente que aceita, explicitamente.

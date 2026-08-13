@@ -5,6 +5,9 @@ description = "Agente da borda — ingestão RTSP, detecção, tracking, regras 
 requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.1",
+    # Fila local durável do §3.6 (ADR-004). Em Python 3.12 não puxa dependência
+    # transitiva nenhuma, o que mantém a imagem do box enxuta.
+    "redis>=5.0",
 ]
 
 [project.scripts]
@@ -12,6 +15,10 @@ lince-agent = "lince_agent.__main__:main"
 
 [dependency-groups]
 dev = [
+    # Só de desenvolvimento: o agente monta dicionários puros e o schema do §5 é
+    # verificado no teste. Validar em runtime custaria dependência no box para
+    # conferir um formato que o próprio agente acabou de produzir.
+    "jsonschema>=4.23",
     "pytest>=8.3",
     "ruff>=0.8",
 ]
@@ -25,11 +32,14 @@ packages = ["src/lince_agent"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Testes que precisam do MediaMTX rodando ficam de fora por padrão:
-#   pnpm rtsp:up && uv run pytest -m rtsp
-addopts = "-m 'not rtsp'"
+# Testes que precisam de infraestrutura ficam de fora por padrão. O resto tem que
+# rodar com `uv run pytest` numa máquina limpa:
+#   pnpm rtsp:up  && uv run pytest -m rtsp
+#   pnpm infra:up && uv run pytest -m redis
+addopts = "-m 'not rtsp and not redis'"
 markers = [
     "rtsp: exige um servidor RTSP em RTSP_TEST_URL (ver infra/docker-compose.rtsp.yml)",
+    "redis: exige um Redis em LINCE_REDIS_URL (ver infra/docker-compose.yml)",
 ]
 
 [tool.ruff]

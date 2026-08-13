@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import os
+import signal
+import threading
+import time
+
 import pytest
 
 from lince_agent import __main__ as cli
-from lince_agent.config import HwAccel, PixelFormat
+from lince_agent.config import HwAccel, OutboxOptions, PixelFormat
 from lince_agent.ffmpeg.fmp4 import Fragment, InitSegment
 from lince_agent.ffmpeg.probe import ProbeError, StreamInfo
 from lince_agent.ingest.state import CameraHealth, CameraStatus
+from lince_agent.outbox.state import OutboxStats, SenderStats
+from lince_agent.outbox.store import MemoryOutbox
+from lince_agent.runtime import AgentHealth
 
 
 def test_padroes_batem_com_a_arquitetura():
@@ -82,6 +90,142 @@ def test_camera_inalcancavel_sai_com_erro(monkeypatch):
 
     monkeypatch.setattr(cli, "probe_stream", falha)
     assert cli.main(["--camera", "rtsp://x/y"]) == 1
+
+
+def test_fila_em_ram_avisa_que_nao_e_duravel(caplog):
+    """`--outbox memory` é andaime. Sem o aviso alto, é fácil rodar meia hora achando
+    que a fila é durável e descobrir no primeiro restart que não era (ADR-004)."""
+    args = cli.build_parser().parse_args(["--camera", "rtsp://x", "--outbox", "memory"])
+
+    with caplog.at_level("WARNING"):
+        fila = cli._monta_fila(args, OutboxOptions())
+
+    assert isinstance(fila, MemoryOutbox)
+    assert "restart" in caplog.text
+
+
+def test_primeiro_gatilho_respeita_after_e_every():
+    def quando(argv: list[str]) -> float | None:
+        return cli._primeiro_gatilho(cli.build_parser().parse_args(["--camera", "rtsp://x", *argv]))
+
+    assert quando([]) is None
+    assert quando(["--trigger-after", "5"]) is not None
+    assert quando(["--trigger-every", "20"]) is not None
+
+
+class RuntimeFalso:
+    def __init__(self) -> None:
+        self.gatilhos: list[str] = []
+        self.parado = False
+
+    camera_ids = ("cam1", "cam2")
+
+    def start(self) -> None:
+        pass
+
+    def stop(self, timeout: float = 30.0) -> None:
+        self.parado = True
+
+    def trigger(self, camera_id: str) -> str:
+        self.gatilhos.append(camera_id)
+        return f"evento-{len(self.gatilhos)}"
+
+    def health(self) -> AgentHealth:
+        return AgentHealth(cameras=(saude(),))
+
+
+def test_gatilho_de_andaime_atinge_todas_as_cameras():
+    runtime = RuntimeFalso()
+
+    cli._dispara(runtime, "teste")
+
+    assert runtime.gatilhos == ["cam1", "cam2"]
+
+
+def test_trigger_after_dispara_uma_vez_e_para(monkeypatch, tmp_path):
+    """O andaime tem que produzir evento sem o estágio 4 existir — é assim que o
+    caminho gatilho → clipe → fila → nuvem é exercitado hoje."""
+    runtime = RuntimeFalso()
+    monkeypatch.setattr(cli, "AgentRuntime", lambda *a, **k: runtime)
+    monkeypatch.setattr(cli, "probe_stream", lambda *a, **k: StreamInfo("h264", 640, 480, 15, 15))
+
+    cli.main(
+        [
+            *("--camera", "rtsp://x/y", "--clips-dir", str(tmp_path)),
+            *("--trigger-after", "0", "--duration", "0.1", "--dry-run"),
+        ]
+    )
+
+    assert runtime.gatilhos == ["cam1", "cam2"], "um gatilho por câmera, uma vez só"
+    assert runtime.parado, "o agente tem que ser desmontado mesmo saindo por --duration"
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGUSR1"), reason="SIGUSR1 não existe nesta plataforma")
+def test_sigusr1_dispara_um_evento(monkeypatch, tmp_path):
+    """`kill -USR1` é como se testa uma câmera recém-instalada sem esperar alguém
+    passar na frente dela.
+
+    O handler só marca um `Event`; quem chama `trigger()` é o laço principal. Handler
+    de sinal interrompe qualquer thread em qualquer ponto, inclusive segurando o lock
+    que o próprio `trigger` iria querer.
+    """
+    runtime = RuntimeFalso()
+    monkeypatch.setattr(cli, "AgentRuntime", lambda *a, **k: runtime)
+    monkeypatch.setattr(cli, "probe_stream", lambda *a, **k: StreamInfo("h264", 640, 480, 15, 15))
+    anterior = signal.getsignal(signal.SIGUSR1)
+
+    def manda_sinal() -> None:
+        # Espera o handler existir em vez de dormir um tempo fixo: o sinal enviado
+        # antes da instalação mataria o processo de teste (SIGUSR1 default é terminar).
+        limite = time.monotonic() + 5.0
+        while time.monotonic() < limite:
+            if signal.getsignal(signal.SIGUSR1) is not anterior:
+                os.kill(os.getpid(), signal.SIGUSR1)
+                return
+            time.sleep(0.01)
+
+    threading.Thread(target=manda_sinal, daemon=True).start()
+    try:
+        cli.main(
+            [
+                *("--camera", "rtsp://x/y", "--clips-dir", str(tmp_path)),
+                *("--duration", "2", "--dry-run"),
+            ]
+        )
+    finally:
+        signal.signal(signal.SIGUSR1, anterior)
+
+    assert runtime.gatilhos == ["cam1", "cam2"]
+
+
+def test_dry_run_nao_fala_com_a_nuvem_e_libera_o_upload(tmp_path):
+    """O `--dry-run` precisa devolver `clip_upload_url`, senão o caminho do clipe nunca
+    é exercitado — que é justamente o que se quer ver rodando sem uma API do lado."""
+    clipe = tmp_path / "e1.mp4"
+    clipe.write_bytes(b"mp4")
+    cliente = cli.ClienteSeco()
+
+    aceite = cliente.post_event({"camera_id": "cam1", "clip": {"status": "ok"}}, event_id="e1")
+
+    assert aceite.status == 202
+    assert aceite.body["clip_upload_url"]
+    assert cliente.put_clip(aceite.body["clip_upload_url"], clipe).status == 200
+    assert cliente.patch_event("e1", {"clip": {"status": "ok"}}).status == 200
+
+
+def test_linha_da_fila_mostra_o_que_o_heartbeat_vai_mostrar():
+    """São os campos de fila do §5.3. Ver `mais antigo` crescendo na tela é como se
+    percebe um link caído antes de o TTL começar a descartar."""
+    saude_agente = AgentHealth(
+        outbox=OutboxStats(depth=3, events=2, clips=1, ready=1, oldest_age_s=42.0),
+        sender=SenderStats(sent=7, failures=2),
+        clip_disk_bytes=2048,
+    )
+
+    linha = cli._format_outbox(saude_agente.outbox, saude_agente)
+
+    for pedaço in ("3 pendentes", "2 ev + 1 clipes", "42.0", "enviados=7", "falhas=2"):
+        assert pedaço in linha
 
 
 def test_dumper_grava_init_e_fragmentos(tmp_path):

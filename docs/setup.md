@@ -4,8 +4,9 @@ Passo a passo para deixar o ambiente de desenvolvimento funcionando do zero.
 Tempo esperado: ~15 minutos, quase tudo download.
 
 > **O que este guia entrega:** Postgres e Redis rodando, as ferramentas da borda
-> instaladas e o **estágio 1 do agente** (ingestão RTSP) funcionando contra câmeras
-> sintéticas. API e dashboard ainda não existem.
+> instaladas e o agente funcionando contra câmeras sintéticas — ingestão (§3.1),
+> corte do clipe (§3.5) e fila local com envio (§3.6). API e dashboard ainda não
+> existem, então o envio é exercitado com `--dry-run`.
 
 ---
 
@@ -184,15 +185,20 @@ troubleshooting.
 | `pnpm rtsp:up` | sobe as câmeras RTSP sintéticas (ver abaixo) |
 | `pnpm rtsp:down` | derruba as câmeras |
 | `pnpm rtsp:logs` | logs do MediaMTX e dos publishers |
+| `uv run pytest -m redis` | testes da fila local; exige `pnpm infra:up` |
 | `bash scripts/setup.sh` | reexecuta o setup; seguro a qualquer momento |
 
 ---
 
 ## Rodando o agente da borda
 
-O estágio 1 da arquitetura (§3.1) já existe: um processo `ffmpeg` por câmera lendo
-RTSP, entregando frames decodificados para a detecção e fragmentos comprimidos para
-o buffer do clipe. Ainda não há YOLO, tracking nem corte.
+Três estágios existem e estão ligados: **ingestão** (§3.1, um `ffmpeg` por câmera
+lendo RTSP), **clipe** (§3.5, buffer circular de 30 s em RAM e corte em `-c copy`) e
+**fila local com envio** (§3.6, Redis + `POST /v1/events`, `PUT` do clipe e `PATCH`).
+Falta o miolo: YOLO, tracking e o motor de regras (§3.2 a §3.4).
+
+Como nada dispara evento sozinho sem o motor de regras, o gatilho é andaime:
+`--trigger-after S`, `--trigger-every S` e `kill -USR1 <pid>`.
 
 Você não precisa de câmera nenhuma para trabalhar nele. `pnpm rtsp:up` sobe um
 servidor RTSP local com duas câmeras sintéticas em 640x480 a 15 fps:
@@ -213,17 +219,48 @@ A saída mostra, por segundo: estado da câmera, frames entregues e a taxa efeti
 (deve estabilizar em 3,00 fps), fragmentos acumulados e há quanto tempo chegou o
 último frame. `Ctrl+C` encerra.
 
+### Vendo o caminho inteiro até a nuvem
+
+```bash
+pnpm infra:up          # o Redis daqui serve de fila local em desenvolvimento
+uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 \
+  --outbox redis --redis-url redis://localhost:6379/0 \
+  --dry-run --trigger-every 20 --stats
+```
+
+Uma segunda linha de status aparece, com a fila: quantos eventos e clipes estão
+pendentes, a idade do mais antigo e quantos já subiram. Vinte segundos depois do
+primeiro gatilho você vê a sequência `POST → PUT → PATCH` no log e o diretório de
+clipes voltar a ficar vazio — é o NFR-3 acontecendo: o único arquivo de vídeo do
+sistema é temporário.
+
+O `--dry-run` aceita tudo sem falar com ninguém. Sem ele, o agente aponta para
+`--api-url` de verdade, que ainda não existe: a fila vai encher, e é justamente
+assim que dá para ver o comportamento de link caído.
+
+Sem Redis à mão, `--outbox memory` roda tudo em RAM — mas ele avisa alto que não é
+durável, porque um restart perde os eventos que não subiram.
+
 ### Testes
 
 ```bash
 cd apps/agent
-uv run pytest              # unitários; não precisam de rede nem de câmera
+uv run pytest              # unitários; não precisam de rede, câmera nem infra
 uv run pytest -m rtsp      # ponta a ponta; exige `pnpm rtsp:up`
+uv run pytest -m redis     # fila durável; exige `pnpm infra:up`
 ```
 
-Os marcados com `rtsp` são os únicos que verificam o que só existe em execução: que
-os dois pipes do ffmpeg fluem ao mesmo tempo sem travar um ao outro, e que os
-fragmentos coletados formam um MP4 reproduzível.
+Os marcados são os únicos que dependem de infraestrutura, e cada um cobre o que só
+existe em execução. Os de `rtsp` provam que os dois pipes do ffmpeg fluem ao mesmo
+tempo sem travar um ao outro e que os fragmentos formam um MP4 reproduzível. Os de
+`redis` provam o que uma reimplementação em memória poderia modelar diferente:
+atomicidade da reserva de item, ordenação por score e sobrevivência do estado ao
+processo. A mesma suíte de contrato roda nas duas filas, e é isso que impede uma de
+ganhar correção que a outra não recebe.
+
+Por padrão os testes usam o banco 15 (`LINCE_REDIS_URL`, default
+`redis://localhost:6379/15`), com prefixo próprio por teste e sem nunca dar
+`FLUSHDB` — sua stack de desenvolvimento no banco 0 fica intacta.
 
 ### Simulando as falhas do §3.1
 
@@ -257,6 +294,8 @@ aberto, o ffmpeg não reclama, e nenhum frame sai.
 | Prisma não conecta, mas o container está `healthy` | senha diferente entre `POSTGRES_PASSWORD` e `DATABASE_URL` | acerte as duas e rode `pnpm infra:reset` — a senha do Postgres só é aplicada na criação do volume |
 | `ffmpeg` instalado mas sem NVDEC | build sem suporte a CUDA | irrelevante sem GPU; no box de referência use um build com `--enable-cuda-nvcc` |
 | `uv run pytest -m rtsp` pula tudo | câmeras sintéticas não estão de pé | `pnpm rtsp:up` e espere uns 5 s |
+| `uv run pytest -m redis` pula tudo | Redis fora do ar ou em outra porta | `pnpm infra:up`, ou aponte `LINCE_REDIS_URL` |
+| Agente com `fila local recusou o evento` | Redis local fora do ar | é a fronteira de durabilidade do ADR-004: o evento se perde e o contador sobe. Suba o Redis ou use `--outbox memory` |
 | Agente em `reconnecting` com `404 Not Found` | o MediaMTX está no ar mas nenhum publisher está publicando naquele caminho | `pnpm rtsp:ps` — o container `lince-cam1` precisa estar `Up` |
 | `bind: address already in use` na 8554 | outro servidor RTSP na máquina | mude `RTSP_PORT` em `infra/.env` |
 
@@ -267,20 +306,24 @@ aberto, o ffmpeg não reclama, e nenhum frame sai.
 ```
 apps/api/          API Fastify + Prisma (control plane)   — vazio
 apps/dashboard/    Dashboard React PWA (triagem)          — vazio
-apps/agent/        Agente da borda em Python              — estágio 1 (§3.1)
+apps/agent/        Agente da borda em Python              — estágios 1, 5 e 6
   src/lince_agent/ffmpeg/    montagem do comando, processo, pipes, parser fMP4
   src/lince_agent/ingest/    supervisão: reconexão, watchdog, saúde
-packages/shared/   Contrato agente ↔ nuvem (§5)           — vazio
+  src/lince_agent/clip/      buffer circular em RAM, corte, teto de disco
+  src/lince_agent/outbox/    fila local, política de retry, cliente HTTP, envio
+  src/lince_agent/runtime.py composição: é aqui que os estágios viram um processo
+packages/shared/   Contrato agente ↔ nuvem em JSON Schema (§5)
 infra/             docker-compose de desenvolvimento e das câmeras sintéticas
 scripts/setup.sh   bootstrap idempotente
 docs/              arquitetura e ADRs
 ```
 
 Os diretórios vazios existem de propósito: a fronteira entre borda e nuvem está
-desenhada desde o começo. Em particular, `packages/shared` é onde o contrato da §5
-(payload de evento, heartbeat, formato de configuração) vai morar em um lugar só —
-duplicar essa definição entre a API e o agente é o erro mais caro que dá para
-cometer neste projeto.
+desenhada desde o começo. `packages/shared` é onde o contrato da §5 (payload de
+evento, heartbeat, formato de configuração) mora em um lugar só — duplicar essa
+definição entre a API e o agente é o erro mais caro que dá para cometer neste
+projeto. Os schemas são JSON Schema, e não tipos TypeScript, porque o agente é
+Python: um formato neutro é o que permite aos dois lados consumirem a mesma fonte.
 
 ## Próximo passo
 

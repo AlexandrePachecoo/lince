@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/event/v1.json",
+  "title": "POST /v1/events",
+  "description": "Evento de possível ocorrência produzido pela borda. Nunca carrega vídeo nem imagem: o clipe sobe direto para o R2 por URL pré-assinada (§4.4).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "tenant_id",
+    "store_id",
+    "camera_id",
+    "occurred_at",
+    "reported_at",
+    "source",
+    "versions",
+    "clip"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "event_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/event_id" },
+    "tenant_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+    "store_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+    "camera_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+    "occurred_at": {
+      "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/instant",
+      "description": "Instante do gatilho, convertido do relógio monotônico da borda. Não muda no reenvio: um evento que sobe seis horas depois, porque o link caiu, continua dizendo quando aconteceu."
+    },
+    "reported_at": {
+      "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/instant",
+      "description": "Relógio de parede da borda no momento de enfileirar. Comparado com occurred_at, deixa a nuvem medir a deriva da âncora do agente sem que ele precise adivinhar nada."
+    },
+    "source": {
+      "enum": ["rule", "manual"],
+      "description": "`manual` é gatilho humano — teste de câmera na instalação, hoje o andaime da CLI. A nuvem precisa distinguir para não contaminar a métrica de falso positivo por câmera (NFR-2, R-1)."
+    },
+    "rule": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Versão da REGRA_CONFIG vigente no gatilho (§6). Sem ela não é possível interpretar uma taxa histórica de falso positivo: metade dos eventos nasceu sob outros limiares."
+        }
+      }
+    },
+    "versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent"],
+      "properties": {
+        "agent": { "type": "string", "maxLength": 64 },
+        "model": { "type": ["string", "null"], "maxLength": 64 },
+        "config": { "type": ["string", "null"], "maxLength": 64 }
+      }
+    },
+    "clip": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/clip" }
+  }
+}

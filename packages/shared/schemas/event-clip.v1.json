@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/event-clip/v1.json",
+  "title": "PATCH /v1/events/{event_id}",
+  "description": "Desfecho do clipe, enviado depois do PUT no R2 (§5.2). Separado do POST porque o alerta é disparado antes de o clipe terminar de subir (§2.3) — é isso que protege o NFR-1 quando o link da loja está lento.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "clip"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "clip": {
+      "allOf": [{ "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/clip" }],
+      "description": "`ok` significa upload confirmado no R2. `clip_failed` significa que a borda desistiu — tentativas esgotadas, clipe despejado pelo teto de disco ou vencido pelo TTL. O evento permanece válido nos dois casos."
+    },
+    "object_key": {
+      "type": ["string", "null"],
+      "maxLength": 512,
+      "description": "Chave do objeto no R2, quando o upload aconteceu. A URL pré-assinada é emitida pela API, então ela já conhece a chave; o campo existe para conciliação."
+    }
+  }
+}

@@ -92,6 +92,27 @@ def fmp4_outra_resolucao() -> bytes:
 
 
 @pytest.fixture(scope="session")
+def redis_url() -> str:
+    """URL de um Redis de verdade, ou `skip`.
+
+    Aponta para o banco 15 do Redis de desenvolvimento por padrão — separado do 0, que
+    é onde o control plane guarda as filas do BullMQ. Os testes ainda assim usam
+    prefixo próprio e nunca `FLUSHDB`: apagar o banco inteiro de quem está com a
+    stack de dev no ar é o tipo de gentileza que ninguém esquece.
+    """
+    url = os.environ.get("LINCE_REDIS_URL", "redis://localhost:6379/15")
+    redis = pytest.importorskip("redis", reason="pacote redis não instalado")
+    cliente = redis.Redis.from_url(url, socket_timeout=2.0, socket_connect_timeout=2.0)
+    try:
+        cliente.ping()
+    except redis.exceptions.RedisError as erro:
+        pytest.skip(f"sem Redis em {url} ({erro}) — rode `pnpm infra:up`")
+    finally:
+        cliente.close()
+    return url
+
+
+@pytest.fixture(scope="session")
 def rtsp_url() -> str:
     url = os.environ.get("RTSP_TEST_URL", "rtsp://localhost:8554/cam1")
     probe = shutil.which("ffprobe")

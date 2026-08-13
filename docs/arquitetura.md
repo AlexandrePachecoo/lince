@@ -359,11 +359,30 @@ e ele é apagado do disco local após o upload ser confirmado.
 Cada evento nasce com um **UUID gerado na borda**. Esse ID é a chave de
 idempotência: reenviar o mesmo evento nunca cria duplicata na nuvem.
 
-A fila local (SQLite ou Redis no próprio box — decisão a fechar; SQLite ganha em
-durabilidade contra queda de energia, Redis ganha em simplicidade operacional já que
-o compose sobe Redis de qualquer forma) guarda o evento antes do envio. Com a
-internet caída, o pipeline continua rodando normalmente: detecta, avalia regras,
-gera clipe e acumula na fila.
+A fila local guarda o evento antes do envio. Com a internet caída, o pipeline
+continua rodando normalmente: detecta, avalia regras, gera clipe e acumula na fila.
+
+**Decidido: Redis no próprio box** (ADR-004), fechando a pendência §10.9. Custo
+assumido: com `appendonly yes` e o `appendfsync everysec` padrão, uma queda de
+energia leva junto até ~1 s de fila. Na prática é o último evento antes do apagão —
+e um apagão na loja já derruba as câmeras junto. Em troca, o compose do box não
+ganha mais um mecanismo de persistência e o estado sobrevive a restart do agente,
+que é o caso comum (atualização por watchtower, §3.8).
+
+Estruturas, e o porquê de cada uma:
+
+| Chave | Tipo | Papel |
+|---|---|---|
+| `…:event:{id}` | HASH | payload congelado e o estado do item |
+| `…:events` / `…:clips` | ZSET | agenda: `event_id` → quando pode sair |
+| `…:births` | ZSET | nascimento, para o TTL |
+| `…:dead` | ZSET | fila morta, aparada por posto |
+
+ZSET e não LIST porque **o backoff é um agendamento**: com lista, adiar um item
+exigiria segurá-lo na memória do processo, e uma queda perderia justamente o evento
+que estava sendo reenviado. A reserva de um item é um script Lua que empurra o score
+para frente em vez de remover — se o agente cair no meio de uma tentativa, o lease
+vence e o evento volta sozinho.
 
 - **Ordem de envio:** eventos primeiro, clipes depois. O metadado é pequeno e
   destrava o alerta; o clipe é grande e pode esperar.
@@ -645,7 +664,7 @@ modelo permite rollback. Nada disso resolve o problema — apenas dá as alavanc
 | ADR-001 | `0001-processamento-na-borda.md` | Processar na loja em vez de tudo na nuvem: custo mensal ~4x menor, independência do link da loja, enquadramento LGPD mais simples | CAPEX de hardware por loja e parque físico distribuído para manter |
 | ADR-002 | `0002-regras-separadas-do-modelo.md` | O modelo só responde "onde estão pessoas e objetos"; zonas, tempos e limiares são configuração versionada em banco, por câmera | Duas fontes de comportamento (modelo e regras) para depurar quando um evento sai errado |
 | ADR-003 | `0003-configuracao-puxada.md` | O agente consulta a nuvem a cada 30 s; a nuvem nunca inicia conexão com a loja | Latência de até 30 s para uma mudança de configuração chegar; tráfego de poll constante |
-| ADR-004 | `0004-fila-local-no-agente.md` | Fila local durável no agente para continuar detectando com a internet caída | Estado durável na borda para gerenciar: TTL, teto de disco, fila morta |
+| ADR-004 | `0004-fila-local-no-agente.md` | Fila local durável no agente, em **Redis** no próprio box, para continuar detectando com a internet caída | Estado durável na borda para gerenciar (TTL, teto de disco, fila morta) e ~1 s de fila perdido numa queda de energia (`appendfsync everysec`) |
 | ADR-005 | `0005-amostragem-3fps.md` | Inferência sobre frames amostrados a 3 fps | Risco de perder travessias rápidas da linha de saída; **a validar por benchmark** |
 | ADR-006 | `0006-modelo-versionado-com-rollback.md` | Modelo versionado e distribuído pela nuvem, com rollback | Complexidade de distribuição, checksum e compatibilidade agente↔modelo |
 | ADR-007 | `0007-container-por-loja.md` | Um container de inferência por loja, não por câmera, para não recarregar o modelo na VRAM | Falha do container derruba todas as câmeras da loja de uma vez |
@@ -679,5 +698,11 @@ Lista viva do que só se resolve com hardware e vídeo da loja piloto:
 6. Janela de supressão de duplicados.
 7. Taxa de ID switch do tracker escolhido em vídeo real de corredor cheio.
 8. Consumo de RAM do buffer circular de 30 s × N câmeras.
-9. Escolha final entre SQLite e Redis para a fila local.
+9. ~~Escolha final entre SQLite e Redis para a fila local.~~ **Fechada: Redis** (§3.6, ADR-004).
 10. Comportamento do estágio de detecção quando a GPU cai: fallback em CPU ou parada com alerta.
+11. Rolls de clipe por câmera. Hoje o `ClipRecorder` tem um pré/pós-roll para o
+    agente inteiro e a subida falha se as câmeras divergirem. Uma câmera de saída com
+    GOP longo pode precisar de outra tolerância que a do corredor (§3.4) — resolver
+    exige passar as opções por câmera no `attach`.
+12. Compose do box da loja (§3.8): agente, redis local, tailscale e watchtower. Hoje
+    os testes da fila usam o Redis de desenvolvimento do control plane.

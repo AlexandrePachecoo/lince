@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/event-accepted/v1.json",
+  "title": "Resposta do POST /v1/events",
+  "description": "O que a API devolve ao aceitar um evento. Está no contrato, e não só na implementação da API, por causa de uma premissa que o agente depende e que não é óbvia: como o POST é idempotente por event_id, o agente repete o POST para obter uma URL de upload nova quando a anterior expira (§5.4). Uma API que devolvesse 200 sem clip_upload_url no reenvio deixaria o clipe preso na fila para sempre.",
+  "type": "object",
+  "required": ["schema_version", "event_id"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "event_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/event_id" },
+    "clip_upload_url": {
+      "type": ["string", "null"],
+      "maxLength": 2048,
+      "description": "URL pré-assinada para o PUT direto no R2 (§4.4). Ausente ou nula quando o evento subiu com clip_failed — não há o que enviar. Presente também no reenvio de um evento que a nuvem já conhece, porque é assim que o agente renova uma URL vencida."
+    },
+    "clip_object_key": {
+      "type": ["string", "null"],
+      "maxLength": 512,
+      "description": "Chave do objeto no R2, para o agente devolver no PATCH e a nuvem conciliar."
+    },
+    "clip_upload_expires_in_s": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "Validade da URL. O agente usa para não gastar uma tentativa num PUT que já vai falhar; expirada, ele repõe o evento em vez de tentar o upload."
+    },
+    "suppressed_by": {
+      "type": ["string", "null"],
+      "description": "Quando a nuvem agrupou este evento em um alerta existente (§4.6). Informativo: o agente sobe o clipe do mesmo jeito, quem decide o que notificar é a nuvem."
+    }
+  }
+}

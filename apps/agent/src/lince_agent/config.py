@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 
 
 class PixelFormat(StrEnum):
@@ -214,6 +215,102 @@ class ClipOptions:
 
 
 @dataclass(frozen=True, slots=True)
+class RetryOptions:
+    """Política de reenvio para a nuvem (§5.4).
+
+    Os números são maiores que os da reconexão de câmera de propósito. Uma câmera que
+    caiu precisa voltar rápido, porque enquanto ela está fora não há detecção. Um
+    evento na fila não perde nada esperando: ele já aconteceu, o clipe já está em
+    disco, e martelar uma API que devolve `5xx` só atrasa a recuperação dela.
+    """
+
+    base_s: float = 2.0
+    cap_s: float = 300.0
+    jitter_s: float = 2.0
+    """Sem jitter, a fila represada de uma noite offline dispara inteira no mesmo
+    instante em que o link volta — e derruba de novo o que acabou de voltar."""
+
+    auth_floor_s: float = 60.0
+    """Piso de espera para `401`/`403`. Credencial expirada só se resolve com
+    intervenção humana ou rotação pela nuvem; tentar a cada 2 s não adianta e enche o
+    log justamente quando alguém está depurando o problema."""
+
+    max_clip_attempts: int = 5
+    """Tentativas de upload do clipe antes de desistir e marcar `clip_failed`. O
+    evento **não** tem teto de tentativas: ele só sai da fila por sucesso ou por TTL,
+    porque perder o alerta é pior que insistir (§3.6)."""
+
+    def __post_init__(self) -> None:
+        if self.base_s <= 0:
+            raise ValueError(f"base_s deve ser positivo, recebi {self.base_s}")
+        if self.cap_s < self.base_s:
+            raise ValueError(f"cap_s ({self.cap_s}) não pode ser menor que base_s ({self.base_s})")
+        if self.jitter_s < 0:
+            raise ValueError(f"jitter_s não pode ser negativo: {self.jitter_s}")
+        if self.max_clip_attempts <= 0:
+            raise ValueError(
+                f"max_clip_attempts deve ser positivo, recebi {self.max_clip_attempts}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class OutboxOptions:
+    """Fila local e envio (§3.6, ADR-004).
+
+    A fila é Redis, e a consequência está escrita: com `appendonly yes` e o
+    `appendfsync everysec` padrão, uma queda de energia leva junto até ~1 s de fila.
+    Para a loja isso é, no pior caso, o último evento antes do apagão — que é
+    justamente quando ninguém está olhando o celular.
+    """
+
+    redis_url: str = "redis://localhost:6379/0"
+    key_prefix: str = "lince"
+    """Prefixo de todas as chaves, junto com o `store_id`. Nada global: o mesmo Redis
+    pode servir a mais de um agente em desenvolvimento, e NFR-6 vale também aqui."""
+
+    event_ttl_s: float = 24 * 3600
+    """Alertar sobre um furto de ontem tem valor operacional baixo e ocupa a fila de
+    triagem, que é o recurso escasso do lado humano (§3.6)."""
+
+    clip_ttl_s: float = 6 * 3600
+    """Menor que o do evento de propósito: clipes são descartados antes dos eventos
+    (§3.6, R-13). O alerta sem vídeo ainda é triável; o vídeo sem alerta não existe."""
+
+    lease_s: float = 120.0
+    """Quanto um item fica reservado durante uma tentativa. Precisa cobrir o upload
+    mais lento aceitável: um lease curto demais faria outra tentativa começar em cima
+    de um `PUT` ainda em andamento."""
+
+    dead_letter_max: int = 500
+    """Teto da fila morta. Ela existe para diagnóstico, não para retenção."""
+
+    idle_poll_s: float = 1.0
+    """Espera do sender quando não há nada pronto. É `Event.wait`, então um item novo
+    ou um `stop()` acordam antes do prazo."""
+
+    socket_timeout_s: float = 2.0
+    """Timeout do cliente Redis. Curto porque o enfileiramento acontece na thread do
+    recorder: um Redis pendurado não pode segurar o corte do próximo clipe."""
+
+    retry: RetryOptions = field(default_factory=RetryOptions)
+
+    def __post_init__(self) -> None:
+        if not self.redis_url:
+            raise ValueError("redis_url é obrigatória")
+        if not self.key_prefix:
+            raise ValueError("key_prefix é obrigatório: chave sem prefixo colide entre agentes")
+        if self.clip_ttl_s > self.event_ttl_s:
+            raise ValueError(
+                f"clip_ttl_s ({self.clip_ttl_s}s) não pode passar de event_ttl_s "
+                f"({self.event_ttl_s}s): o §3.6 exige descartar clipe antes de evento"
+            )
+        if self.lease_s <= 0:
+            raise ValueError(f"lease_s deve ser positivo, recebi {self.lease_s}")
+        if self.dead_letter_max <= 0:
+            raise ValueError(f"dead_letter_max deve ser positivo, recebi {self.dead_letter_max}")
+
+
+@dataclass(frozen=True, slots=True)
 class CameraConfig:
     camera_id: str
     url: str
@@ -226,3 +323,67 @@ class CameraConfig:
             raise ValueError("camera_id é obrigatório")
         if not self.url:
             raise ValueError("url é obrigatória")
+
+
+@dataclass(frozen=True, slots=True)
+class CloudOptions:
+    """Endereço e credencial do control plane (§5.1, §5.2)."""
+
+    api_url: str = "http://localhost:3000"
+    token: str | None = None
+    """Bearer estático por enquanto. O provisionamento por token de bootstrap e a
+    rotação da §5.1 dependem do `POST /v1/agents/register`, que ainda não existe."""
+
+    timeout_s: float = 10.0
+    upload_timeout_s: float = 120.0
+    """Maior que o das chamadas JSON porque sobe megabytes por um link de loja. Ainda
+    assim finito: sem timeout, um upload pendurado seguraria a fila inteira, já que a
+    thread de envio é uma só."""
+
+
+@dataclass(frozen=True, slots=True)
+class AgentConfig:
+    """O agente inteiro: as câmeras da loja, onde ficam os clipes e para onde subir.
+
+    Em produção isto vem da nuvem (§5.2). Hoje vem da linha de comando, e a fronteira
+    é justamente esta classe — nada abaixo dela sabe de onde a configuração veio, que
+    é o que o §3.9 exige para o mesmo artefato rodar na loja e na nuvem.
+    """
+
+    tenant_id: str
+    store_id: str
+    cameras: tuple[CameraConfig, ...]
+    clips_dir: Path
+    outbox: OutboxOptions = field(default_factory=OutboxOptions)
+    cloud: CloudOptions = field(default_factory=CloudOptions)
+    ffmpeg_bin: str = "ffmpeg"
+
+    def __post_init__(self) -> None:
+        if not self.tenant_id or not self.store_id:
+            raise ValueError("tenant_id e store_id são obrigatórios (NFR-6)")
+        if not self.cameras:
+            raise ValueError("o agente precisa de ao menos uma câmera")
+
+        ids = [camera.camera_id for camera in self.cameras]
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"camera_id repetido em {ids}: os clipes iriam para o buffer errado")
+
+        # O buffer circular é por câmera, mas o recorder e o diretório de clipes são do
+        # agente inteiro. Divergir nestes campos não tem representação possível, e
+        # falhar na subida é melhor que cortar silenciosamente com o pós-roll da câmera
+        # errada — um clipe curto demais chega ao triador sem o momento do evento.
+        comuns = {
+            campo: {getattr(camera.clip, campo) for camera in self.cameras}
+            for campo in ("pre_roll_s", "post_roll_s", "post_roll_grace_s", "remux_timeout_s")
+        }
+        divergentes = {campo: valores for campo, valores in comuns.items() if len(valores) > 1}
+        if divergentes:
+            raise ValueError(
+                f"as câmeras divergem em {divergentes}, mas o corte é um só para o agente. "
+                "Rolls por câmera exigem mudar o ClipRecorder (pendência registrada)"
+            )
+
+    @property
+    def clip(self) -> ClipOptions:
+        """As opções de corte válidas para o agente, já validadas como uniformes."""
+        return self.cameras[0].clip

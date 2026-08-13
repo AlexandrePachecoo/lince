@@ -15,6 +15,7 @@ import contextlib
 import logging
 import re
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -30,11 +31,21 @@ SUFIXO = ".mp4"
 class ClipStore:
     """Onde os clipes esperam o upload, com teto de disco."""
 
-    def __init__(self, directory: Path, *, max_bytes: int = 2 * 1024**3) -> None:
+    def __init__(
+        self,
+        directory: Path,
+        *,
+        max_bytes: int = 2 * 1024**3,
+        on_evict: Callable[[str], None] | None = None,
+    ) -> None:
         if max_bytes <= 0:
             raise ValueError(f"max_bytes deve ser positivo, recebi {max_bytes}")
         self._directory = Path(directory)
         self._max_bytes = max_bytes
+        # Sem este aviso o despejo é invisível para o resto do agente: a fila continua
+        # agendando o upload de um arquivo que não existe mais, gasta as tentativas e
+        # só então marca `clip_failed`. Com ele, o evento é corrigido na hora (§3.6).
+        self._on_evict = on_evict
         self._lock = threading.Lock()
         self._directory.mkdir(parents=True, exist_ok=True)
 
@@ -57,7 +68,13 @@ class ClipStore:
         with self._lock:
             if not path.exists():
                 raise FileNotFoundError(f"clipe não existe: {path}")
-            self._aplica_teto()
+            despejados = self._aplica_teto()
+
+        # Fora do lock: o callback vai mexer na fila local, e chamar código de outro
+        # componente segurando um lock é como se constroem os travamentos que só
+        # aparecem sob carga.
+        for event_id in despejados:
+            self._avisa_despejo(event_id)
 
     def discard(self, event_id: str) -> bool:
         """Apaga o clipe, se existir. Devolve se havia algo para apagar.
@@ -81,9 +98,18 @@ class ClipStore:
     def _clipes(self) -> list[Path]:
         return [caminho for caminho in self._directory.glob(f"*{SUFIXO}") if caminho.is_file()]
 
-    def _aplica_teto(self) -> None:
+    def _avisa_despejo(self, event_id: str) -> None:
+        if self._on_evict is None:
+            return
+        try:
+            self._on_evict(event_id)
+        except Exception:  # noqa: BLE001 - o teto de disco não pode falhar por causa do aviso
+            log.exception("callback de despejo falhou para %s", event_id)
+
+    def _aplica_teto(self) -> list[str]:
         clipes = sorted(self._clipes(), key=lambda caminho: caminho.stat().st_mtime)
         total = sum(caminho.stat().st_size for caminho in clipes)
+        despejados: list[str] = []
 
         # Sobra sempre ao menos um: um clipe sozinho maior que o teto significa teto
         # mal dimensionado, e apagá-lo deixaria o evento sem vídeo sem resolver nada.
@@ -93,8 +119,10 @@ class ClipStore:
             with contextlib.suppress(OSError):
                 mais_antigo.unlink()
             total -= tamanho
+            despejados.append(mais_antigo.stem)
             log.warning(
                 "teto de disco de clipes atingido: %s descartado (%d bytes)",
                 mais_antigo.name,
                 tamanho,
             )
+        return despejados

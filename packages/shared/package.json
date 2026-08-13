@@ -1,0 +1,12 @@
+{
+  "name": "@lince/shared",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Contrato entre o agente da borda e o control plane (§5 da arquitetura)",
+  "files": [
+    "schemas"
+  ],
+  "exports": {
+    "./schemas/*": "./schemas/*"
+  }
+}

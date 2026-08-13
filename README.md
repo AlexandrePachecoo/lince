@@ -7,8 +7,10 @@ câmeras de CFTV já instaladas na loja.
 evento (JSON) e um clipe de ~15 s. O sistema não decide nada sozinho: todo alerta
 passa por triagem humana.
 
-> **Status:** estágio 1 do agente (ingestão RTSP, §3.1) implementado. Detecção,
-> tracking, regras, clipe, API e dashboard ainda não existem.
+> **Status:** agente com os estágios 1 (ingestão RTSP, §3.1), 5 (clipe, §3.5) e 6
+> (fila local e envio, §3.6) ligados ponta a ponta — o caminho gatilho → clipe →
+> fila → nuvem funciona, com gatilho de andaime no lugar do motor de regras.
+> Detecção, tracking, regras, API e dashboard ainda não existem.
 > Leia [`docs/arquitetura.md`](docs/arquitetura.md) antes de escrever código, e
 > [`CLAUDE.md`](CLAUDE.md) para as convenções — em especial a regra de que toda
 > função nova precisa de teste automatizado.
@@ -21,7 +23,7 @@ passa por triagem humana.
 apps/api/          API Fastify + Prisma (control plane)
 apps/dashboard/    Dashboard React PWA (triagem no celular)
 apps/agent/        Agente da borda em Python (YOLO, ByteTrack, ffmpeg)
-packages/shared/   Contrato agente ↔ nuvem (§5 da arquitetura)
+packages/shared/   Contrato agente ↔ nuvem em JSON Schema (§5 da arquitetura)
 infra/             docker-compose de desenvolvimento (Postgres + Redis)
 docs/              Arquitetura e ADRs
 ```
@@ -47,10 +49,23 @@ Não é preciso ter câmera: `pnpm rtsp:up` sobe câmeras RTSP sintéticas.
 ```bash
 pnpm rtsp:up
 cd apps/agent && uv sync
-uv run pytest                                                    # sem rede
-uv run pytest -m rtsp                                            # ponta a ponta
+uv run pytest                                                    # sem rede, sem infra
+uv run pytest -m rtsp                                            # exige `pnpm rtsp:up`
+uv run pytest -m redis                                           # exige `pnpm infra:up`
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 --stats
 ```
+
+Para ver o caminho inteiro — corte do clipe, fila local e envio — sem uma API do
+outro lado:
+
+```bash
+uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 \
+  --outbox redis --dry-run --trigger-every 20 --stats
+```
+
+O gatilho é andaime: o motor de regras (§3.4) ainda não existe, então `--trigger-after`,
+`--trigger-every` e `kill -USR1` ocupam o lugar dele. Os eventos que eles produzem
+sobem marcados como `source: "manual"`.
 
 **Primeira vez, ou numa máquina nova?** O passo a passo completo — instalação por
 sistema operacional, verificação e troubleshooting — está em

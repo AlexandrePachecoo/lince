@@ -26,6 +26,7 @@ import threading
 import time
 from collections.abc import Callable
 
+from lince_agent.backoff import backoff_delay as _backoff_delay
 from lince_agent.config import CameraConfig, SupervisionOptions
 from lince_agent.ffmpeg.process import FfmpegIngest, IngestCallbacks, IngestProcess
 from lince_agent.ingest.state import CameraHealth, CameraStatus
@@ -41,16 +42,14 @@ def backoff_delay(
     *,
     jitter: Callable[[], float] = random.random,
 ) -> float:
-    """Backoff exponencial com jitter aditivo, com teto.
-
-    O jitter não é enfeite: quando o switch da loja cai, as oito câmeras falham no
-    mesmo instante. Sem jitter elas voltam no mesmo instante, batem no mesmo
-    instante e repetem o padrão a cada tentativa.
-    """
-    if consecutive_failures <= 0:
-        return 0.0
-    exponential = options.backoff_base_s * (2 ** (consecutive_failures - 1))
-    return min(exponential, options.backoff_cap_s) + jitter() * options.backoff_jitter_s
+    """A política de `backoff.py` lida com as opções de supervisão desta camada."""
+    return _backoff_delay(
+        consecutive_failures,
+        base_s=options.backoff_base_s,
+        cap_s=options.backoff_cap_s,
+        jitter_s=options.backoff_jitter_s,
+        jitter=jitter,
+    )
 
 
 class CameraSupervisor:
