@@ -32,10 +32,12 @@ from lince_agent.config import (
     CameraConfig,
     CloudOptions,
     DecodeOptions,
+    DetectionOptions,
     HwAccel,
     OutboxOptions,
     PixelFormat,
 )
+from lince_agent.detect.state import DetectorStats
 from lince_agent.ffmpeg.capabilities import select_hwaccel
 from lince_agent.ffmpeg.probe import ProbeError, probe_stream
 from lince_agent.ffmpeg.process import IngestCallbacks
@@ -113,6 +115,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="aceita tudo sem falar com a nuvem; só registra o que teria enviado",
     )
 
+    estagio2 = parser.add_argument_group("estágio 2 — detecção (§3.2)")
+    estagio2.add_argument(
+        "--model",
+        type=Path,
+        default=_env_path("LINCE_MODEL_PATH"),
+        metavar="ONNX",
+        help="modelo .onnx; sem ele o agente ingere e grava clipe, mas não detecta nada",
+    )
+    estagio2.add_argument(
+        "--input-size",
+        type=int,
+        default=640,
+        help="lado da entrada do modelo; conferido contra o que o .onnx declara",
+    )
+    estagio2.add_argument(
+        "--provider",
+        action="append",
+        dest="providers",
+        metavar="NOME",
+        help="provider do ONNX Runtime, em ordem de preferência; repetível. "
+        "O default tenta CUDA e cai para CPU (§10.10)",
+    )
+    padrao = DetectionOptions()
+    estagio2.add_argument("--score-threshold", type=float, default=padrao.score_threshold)
+    estagio2.add_argument("--iou-threshold", type=float, default=padrao.iou_threshold)
+    estagio2.add_argument(
+        "--no-detect",
+        action="store_true",
+        help="ignora o modelo e roda com NullDetector, como uma câmera inelegível (R-3)",
+    )
+
     andaime = parser.add_argument_group("andaime do gatilho (o estágio 4 não existe)")
     andaime.add_argument("--trigger-after", type=float, metavar="S", help="um gatilho após S s")
     andaime.add_argument(
@@ -154,6 +187,36 @@ class ClienteSeco:
         return CloudResponse(status=200)
 
 
+def _env_path(nome: str) -> Path | None:
+    valor = os.environ.get(nome)
+    return Path(valor) if valor else None
+
+
+def _monta_deteccao(args: argparse.Namespace) -> DetectionOptions:
+    """Traduz as flags em `DetectionOptions`, avisando quando o estágio fica desligado.
+
+    O aviso importa porque um agente sem modelo é indistinguível de um agente com
+    modelo até alguém reparar que nenhum alerta saiu naquela loja.
+    """
+    if args.no_detect or args.model is None:
+        if not args.no_detect:
+            log.warning(
+                "sem --model: o agente ingere, mantém o buffer e responde a gatilho manual, "
+                "mas não detecta nada (§3.2). Rode `bash scripts/modelo.sh` para baixar um."
+            )
+        return DetectionOptions(enabled=False)
+
+    padrao = DetectionOptions()
+    return DetectionOptions(
+        enabled=True,
+        model_path=args.model,
+        input_size=args.input_size,
+        providers=tuple(args.providers) if args.providers else padrao.providers,
+        score_threshold=args.score_threshold,
+        iou_threshold=args.iou_threshold,
+    )
+
+
 def _monta_fila(args: argparse.Namespace, options: OutboxOptions) -> OutboxStore:
     if args.outbox == "memory":
         log.warning(
@@ -191,6 +254,29 @@ def _format_outbox(fila: OutboxStats, saude: AgentHealth) -> str:
         f"{fila.payload_bytes / 1024:6.1f} KiB + {saude.clip_disk_bytes / 1024:8.1f} KiB em disco  "
         f"enviados={envio.sent} clipes={envio.clips_uploaded} "
         f"falhas={envio.failures} mortos={fila.dead} vencidos={envio.expired}"
+    )
+
+
+def _format_deteccao(stats: DetectorStats) -> str:
+    """A linha do estágio 2: o que o §5.3 pede por câmera, mais o modelo que produziu.
+
+    `inference_fps` perto de 3 e `descartados` em zero é o estado saudável. Descarte
+    subindo com a fila cheia é GPU que não acompanha a taxa amostrada — o sinal de
+    saturação do R-4, e é para vê-lo cedo que a profundidade da fila sai junto.
+    """
+    if not stats.enabled:
+        return "[detecção] desligada (sem modelo)"
+
+    info = stats.info
+    modelo = "?" if info is None else f"{info.model_version} em {info.provider}"
+    por_camera = "  ".join(
+        f"{camera.camera_id}={camera.inference_fps:4.2f} fps "
+        f"({camera.detections} caixas, {camera.dropped} descartados)"
+        for camera in stats.cameras
+    )
+    return (
+        f"[detecção] {modelo}  fila {stats.queue_depth}/{stats.queue_size}  "
+        f"inferidos={stats.frames_inferred} erros={stats.errors}  {por_camera}"
     )
 
 
@@ -262,6 +348,7 @@ def main(argv: list[str] | None = None) -> int:
         clips_dir=args.clips_dir,
         outbox=opcoes_fila,
         cloud=CloudOptions(api_url=args.api_url, token=args.api_token),
+        detection=_monta_deteccao(args),
     )
     fila = _monta_fila(args, opcoes_fila)
     cliente = (
@@ -313,6 +400,7 @@ def main(argv: list[str] | None = None) -> int:
                 saude = runtime.health()
                 for camera in saude.cameras:
                     print(_format_health(camera, decode.frame_bytes), flush=True)  # noqa: T201
+                print(_format_deteccao(saude.detector), flush=True)  # noqa: T201
                 print(_format_outbox(saude.outbox, saude), flush=True)  # noqa: T201
             finished.wait(1.0)
     finally:
@@ -322,8 +410,10 @@ def main(argv: list[str] | None = None) -> int:
     saude = runtime.health()
     frames = sum(camera.frames for camera in saude.cameras)
     log.info(
-        "encerrado: %d frames, %d eventos enviados, %d ainda na fila",
+        "encerrado: %d frames, %d inferidos, %d caixas, %d eventos enviados, %d ainda na fila",
         frames,
+        saude.detector.frames_inferred,
+        saude.detector.detections,
         saude.sender.sent,
         saude.outbox.depth,
     )

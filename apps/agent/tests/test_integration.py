@@ -9,6 +9,8 @@ entrega a taxa pedida, e que os fragmentos formam vídeo reproduzível.
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import threading
 import time
@@ -215,3 +217,85 @@ def test_camera_inexistente_vira_reconnecting_e_depois_offline():
         assert saude.restarts >= 2, "o supervisor precisa continuar tentando"
     finally:
         supervisor.stop()
+
+
+# --- estágio 2: detecção contra vídeo com pessoas ---------------------------
+
+
+@pytest.fixture
+def camera_com_pessoas() -> str:
+    """A cam3 do compose: um vídeo com gente andando, em loop.
+
+    As cam1 e cam2 são `testsrc2` — padrão de barras. Um teste de detecção contra
+    barras de cor concordaria com qualquer coisa, inclusive com um detector quebrado.
+    """
+    url = os.environ.get("RTSP_PESSOAS_URL", "rtsp://localhost:8554/cam3")
+    probe = shutil.which("ffprobe")
+    if probe is None:
+        pytest.skip("ffprobe não encontrado no PATH")
+    check = subprocess.run(  # noqa: S603
+        [probe, "-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp", "-i", url],
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if check.returncode != 0:
+        pytest.skip(f"sem cam3 em {url} — rode `bash scripts/modelo.sh && pnpm rtsp:up`")
+    return url
+
+
+@pytest.mark.modelo
+def test_pessoas_de_verdade_viram_caixas_dentro_do_frame(camera_com_pessoas: str, model_path):
+    """O caminho inteiro do §3.2 com peças reais: RTSP → ffmpeg → letterbox → ONNX →
+    NMS → caixas no espaço do frame da câmera.
+
+    Duas asserções, e a segunda é a que importa. Que apareçam pessoas prova que o
+    modelo roda. Que as caixas caiam **dentro** de 640x480 prova que o letterbox foi
+    desfeito: uma caixa em y=520 estaria na faixa cinza de preenchimento, e o §3.4
+    testaria um ponto que não existe no frame contra um polígono desenhado sobre ele.
+    """
+    from lince_agent.config import DetectionOptions
+    from lince_agent.detect.onnx import OnnxDetector
+    from lince_agent.detect.worker import DetectorWorker
+
+    decode = DecodeOptions(sample_fps=3.0, width=640, height=480)
+    opcoes = DetectionOptions(
+        enabled=True, model_path=model_path, providers=("CPUExecutionProvider",), queue_size=4
+    )
+    detector = OnnxDetector(model_path, opcoes)
+    resultados = []
+    achou = threading.Event()
+
+    def guarda(resultado) -> None:
+        resultados.append(resultado)
+        if resultado.detections:
+            achou.set()
+
+    worker = DetectorWorker(detector, options=opcoes, on_result=guarda)
+    ingest = FfmpegIngest(
+        camera_com_pessoas,
+        decode,
+        IngestCallbacks(on_frame=lambda frame: worker.submit("cam3", frame)),
+    )
+
+    worker.start()
+    ingest.start()
+    try:
+        assert achou.wait(JANELA_S * 3), (
+            "nenhuma pessoa detectada em 30 s de vídeo com pessoas — "
+            f"{len(resultados)} frames inferidos"
+        )
+    finally:
+        ingest.stop()
+        worker.stop(timeout=JANELA_S)
+
+    caixas = [caixa for resultado in resultados for caixa in resultado.detections]
+    assert all(caixa.class_id == 0 for caixa in caixas), "só pessoas passam pelo filtro de classe"
+    assert all(0 <= caixa.x1 < caixa.x2 <= decode.width for caixa in caixas)
+    assert all(0 <= caixa.y1 < caixa.y2 <= decode.height for caixa in caixas), (
+        "caixa fora da moldura: o letterbox não foi desfeito"
+    )
+
+    stats = worker.stats()
+    assert stats.errors == 0
+    assert stats.info is not None and stats.info.model_version.startswith("yolox")

@@ -28,6 +28,7 @@ configuração e chama o que está aqui.
 
 from __future__ import annotations
 
+import functools
 import logging
 import threading
 import time
@@ -40,6 +41,9 @@ from lince_agent.clip.recorder import ClipRecorder
 from lince_agent.clip.state import BufferStats, ClipResult, ClipStatus, RecorderStats
 from lince_agent.clip.store import ClipStore
 from lince_agent.config import AgentConfig, CameraConfig
+from lince_agent.detect.detector import Detector, NullDetector
+from lince_agent.detect.state import DetectionResult, DetectorStats
+from lince_agent.detect.worker import DetectorWorker
 from lince_agent.ffmpeg.process import IngestCallbacks
 from lince_agent.ffmpeg.rawframe import Frame
 from lince_agent.ingest.state import CameraHealth
@@ -72,10 +76,16 @@ class AgentHealth:
 
     cameras: tuple[CameraHealth, ...] = ()
     buffers: tuple[BufferStats, ...] = ()
+    detector: DetectorStats = field(default_factory=DetectorStats)
     recorder: RecorderStats = field(default_factory=RecorderStats)
     outbox: OutboxStats = field(default_factory=OutboxStats)
     sender: SenderStats = field(default_factory=SenderStats)
     uptime_s: float = 0.0
+    frames_ingested: int = 0
+    """Frames que chegaram da ingestão, contando os das câmeras que o R-3 marcou como
+    inelegíveis para IA. Comparado com `detector.frames_in`, mostra quanto do decode
+    está sendo pago sem virar inferência — que é o dimensionamento do §3.1."""
+
     clip_disk_bytes: int = 0
     clock_reanchors: int = 0
     enqueue_failures: int = 0
@@ -101,6 +111,7 @@ class AgentRuntime:
         | None = None,
         recorder: ClipRecorder | None = None,
         sender: OutboxSender | None = None,
+        detector: Detector | None = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -135,7 +146,19 @@ class AgentRuntime:
             wall_clock=wall_clock,
         )
 
+        self._detector = detector or _monta_detector(config)
+        self._deteccao = DetectorWorker(
+            self._detector,
+            options=config.detection,
+            on_result=self._ao_detectar,
+            clock=clock,
+        )
+
         self._lock = threading.Lock()
+        self._detecta = {camera.camera_id: camera.detect for camera in config.cameras}
+        """Elegibilidade para IA por câmera (R-3). A câmera inelegível continua
+        ingerindo e alimentando o buffer do clipe; só não gasta inferência."""
+
         self._supervisores: dict[str, CameraSupervisor] = {}
         self._buffers: dict[str, ClipBuffer] = {}
         self._rascunhos: dict[str, EventDraft] = {}
@@ -156,19 +179,26 @@ class AgentRuntime:
             # a própria janela e o próprio teto de RAM, porque uma câmera de saída com
             # bitrate alto não pode espremer o buffer das outras (§3.5, R-4).
             buffer = ClipBuffer(camera.camera_id, camera.clip)
+            # O `on_frame` da ingestão entrega só o `Frame`, que não sabe de que câmera
+            # veio — a origem é o supervisor que está sendo montado agora. Amarrar o
+            # `camera_id` aqui é o que permite ao §5.3 separar `inference_fps` e
+            # `dropped_frames` por câmera com uma fila de detecção só (ADR-007).
             callbacks = IngestCallbacks(
-                on_frame=self._ao_receber_frame,
+                on_frame=functools.partial(self._ao_receber_frame, camera.camera_id),
                 on_init_segment=buffer.on_init_segment,
                 on_fragment=buffer.on_fragment,
             )
             self._buffers[camera.camera_id] = buffer
             self._supervisores[camera.camera_id] = self._supervisor_factory(camera, callbacks)
             self._recorder.attach(camera.camera_id, buffer)
+            if camera.detect:
+                self._deteccao.register(camera.camera_id)
 
         # Consumidores antes de produtores: um clipe cortado antes de o sender existir
         # ficaria esperando o próximo poll ocioso, e o NFR-1 já gastou 10 s no pós-roll.
         self._sender.start()
         self._recorder.start()
+        self._deteccao.start()
         for supervisor in self._supervisores.values():
             supervisor.start()
 
@@ -184,6 +214,7 @@ class AgentRuntime:
         """
         for supervisor in self._supervisores.values():
             supervisor.stop(timeout=timeout)
+        self._deteccao.stop(timeout=timeout)
         self._recorder.stop(timeout=timeout)
         self._sender.stop(timeout=timeout)
         self._iniciado_em = None
@@ -302,10 +333,27 @@ class AgentRuntime:
         log.warning("clipe de %s despejado pelo teto de disco antes de subir", event_id)
         self._store.give_up_clip(event_id, reason="teto de disco de clipes")
 
-    def _ao_receber_frame(self, frame: Frame) -> None:
-        """Por enquanto só conta. É onde o estágio 2 (detecção) entra."""
+    def _ao_receber_frame(self, camera_id: str, frame: Frame) -> None:
+        """Entrega o frame ao estágio 2. Roda na thread despachante do ffmpeg.
+
+        `submit` não bloqueia, e não pode: enquanto esta thread não volta para o pipe,
+        o buffer de 64 KB do kernel enche e o ffmpeg trava **inteiro** — junto com a
+        saída de fragmentos que alimenta o buffer do clipe e com a leitura do RTSP.
+        Quando a inferência não acompanha, quem paga é a fila do §3.2, descartando o
+        frame mais antigo.
+        """
         with self._lock:
             self._frames += 1
+        if self._detecta.get(camera_id, True):
+            self._deteccao.submit(camera_id, frame)
+
+    def _ao_detectar(self, resultado: DetectionResult) -> None:
+        """Recebe as caixas de um frame. Roda na thread de detecção.
+
+        Por enquanto só passa. **É onde o estágio 3 (tracking, §3.3) entra** — e daí o
+        §3.4 chama `trigger` com `source=RULE`, que é o que enfim tira o andaime da CLI
+        do caminho. Nada mais precisa mudar para o evento chegar à nuvem.
+        """
 
     def _guarda_rascunho(self, rascunho: EventDraft) -> None:
         with self._lock:
@@ -331,9 +379,12 @@ class AgentRuntime:
         with self._lock:
             falhas = self._enqueue_failures
             inicio = self._iniciado_em
+            frames = self._frames
         return AgentHealth(
             cameras=tuple(sup.health() for sup in self._supervisores.values()),
             buffers=tuple(buffer.stats() for buffer in self._buffers.values()),
+            detector=self._deteccao.stats(),
+            frames_ingested=frames,
             recorder=self._recorder.stats(),
             outbox=self._store.stats(now_ms=agora_ms),
             sender=self._sender.stats(),
@@ -342,3 +393,26 @@ class AgentRuntime:
             clock_reanchors=self._anchor.reanchors,
             enqueue_failures=falhas,
         )
+
+
+def _monta_detector(config: AgentConfig) -> Detector:
+    """Escolhe o detector a partir da configuração, sem `if gpu` em lugar nenhum.
+
+    Sem modelo no disco o agente sobe assim mesmo, com `NullDetector`: continua
+    ingerindo, mantendo o buffer circular e respondendo a gatilho manual. É o que
+    mantém o §3.9 verdadeiro — o mesmo artefato roda numa máquina de desenvolvimento
+    sem GPU e no box da loja, e o que muda é configuração externa.
+
+    Um modelo que não abre **derruba a subida** em vez de degradar para `NullDetector`.
+    Um agente que ingere, grava clipe e nunca detecta nada é pior que um que não sobe:
+    ele parece saudável no heartbeat e some do radar até alguém reparar que aquela loja
+    nunca alertou.
+    """
+    if not config.detection.enabled or config.detection.model_path is None:
+        return NullDetector()
+
+    # Import adiado: `onnxruntime` leva perto de um segundo para carregar e reserva
+    # arenas de memória. Um agente com a detecção desligada não deve pagar por isso.
+    from lince_agent.detect.onnx import OnnxDetector
+
+    return OnnxDetector(config.detection.model_path, config.detection)

@@ -269,12 +269,36 @@ instante da travessia da linha de saída (~333 ms entre frames avaliados). Se a
 validação mostrar que travessias rápidas escapam, a mitigação é aumentar a taxa
 apenas nas câmeras de saída, não globalmente. **A validar por benchmark.**
 
+**Runtime: ONNX Runtime, modelo como arquivo `.onnx`** (ADR-009). O modelo vira um
+artefato único e versionável, que é exatamente o que o `GET /v1/models/current` do
+§5.2 distribui com checksum e o que o ADR-006 precisa para fazer rollback. O fallback
+de GPU deixa de ser código e vira uma lista ordenada de *execution providers* em
+configuração — não existe `if gpu` em lugar nenhum, o que mantém o §3.9 verdadeiro. O
+provider que de fato pegou vai no heartbeat, porque pedido não é obtido: um box com o
+driver quebrado aceita `CUDAExecutionProvider` na lista e roda em CPU calado.
+
+**A licença do runtime não é a licença do modelo.** O ONNX Runtime é MIT, mas pesos
+exportados da linhagem Ultralytics são AGPL-3.0 — para um SaaS comercial isso exigiria
+licença enterprise ou abrir o código. O default do agente é YOLOX (Apache-2.0). Trocar
+o modelo alvo é trocar a licença junto, e a convenção de pré-processamento também:
+YOLOX preenche o letterbox no canto superior esquerdo, em BGR e sem normalizar,
+enquanto a linhagem YOLOv5/v8 centraliza, usa RGB e normaliza. Nenhuma dessas
+diferenças levanta erro — todas produzem caixas plausíveis e deslocadas.
+
+**O letterbox não redimensiona.** O ffmpeg do estágio 1 já tem um filtro `scale` na
+cadeia, então o agente exige que o maior lado do frame seja exatamente a entrada do
+modelo e só preenche o resto com cinza. No caso de referência (640x480 para um modelo
+de 640) são 160 linhas e nada mais. É o que dispensa OpenCV do box inteiro, e a
+divergência é recusada na subida em vez de uma vez por frame.
+
 **Falhas esperadas**
 
 | Falha | Comportamento |
 |---|---|
 | Fila de entrada crescendo (GPU saturada) | Descarte de frames mais antigos (política *drop oldest*); profundidade de fila vai no heartbeat |
 | GPU indisponível / driver caiu | Fallback para CPU em taxa reduzida **ou** parada do estágio com alerta técnico — decisão a fechar após benchmark |
+| Inferência levanta exceção | Contada em `errors` e seguida em frente; a thread é uma só para o agente (ADR-007), e morrer nela apagaria a detecção da loja inteira |
+| Câmera inadequada para IA (R-3) | Marcada como inelegível: continua ingerindo e alimentando o buffer do clipe, sem gastar inferência |
 | Oclusão, contraluz, aglomeração | Detecções perdidas; é aceito como perda de recall, tratado no estágio 3 |
 | Modelo novo pior que o anterior | Rollback de versão comandado pela nuvem (ADR-006) |
 
@@ -669,6 +693,7 @@ modelo permite rollback. Nada disso resolve o problema — apenas dá as alavanc
 | ADR-006 | `0006-modelo-versionado-com-rollback.md` | Modelo versionado e distribuído pela nuvem, com rollback | Complexidade de distribuição, checksum e compatibilidade agente↔modelo |
 | ADR-007 | `0007-container-por-loja.md` | Um container de inferência por loja, não por câmera, para não recarregar o modelo na VRAM | Falha do container derruba todas as câmeras da loja de uma vez |
 | ADR-008 | `0008-escopo-fora-do-v1.md` | Exclusões explícitas do v1 (§9) | Lacunas funcionais conhecidas frente a concorrentes |
+| ADR-009 | `0009-inferencia-em-onnx-runtime.md` | Inferência em ONNX Runtime com o modelo como `.onnx` avulso, e modelo de licença permissiva (YOLOX, Apache-2.0) em vez da linhagem Ultralytics (AGPL-3.0) | Pré-processamento e NMS escritos e testados à mão, e a convenção de entrada muda a cada família de modelo — errá-la não dá erro, desloca as caixas |
 
 ---
 
@@ -699,7 +724,12 @@ Lista viva do que só se resolve com hardware e vídeo da loja piloto:
 7. Taxa de ID switch do tracker escolhido em vídeo real de corredor cheio.
 8. Consumo de RAM do buffer circular de 30 s × N câmeras.
 9. ~~Escolha final entre SQLite e Redis para a fila local.~~ **Fechada: Redis** (§3.6, ADR-004).
-10. Comportamento do estágio de detecção quando a GPU cai: fallback em CPU ou parada com alerta.
+10. Comportamento do estágio de detecção quando a GPU cai: fallback em CPU ou parada
+    com alerta. O mecanismo já existe (lista de providers, §3.2) e o provider efetivo é
+    reportado; falta a política. **Primeiro dado real, numa máquina de desenvolvimento
+    sem GPU:** YOLOX-s a 640 custa ~450 ms por frame em CPU, ou seja ~2 fps para **uma**
+    câmera, contra os 3 fps amostrados. O fallback em CPU não é degradação suave — não
+    sustenta nem uma câmera, e o descarte começa imediatamente.
 11. Rolls de clipe por câmera. Hoje o `ClipRecorder` tem um pré/pós-roll para o
     agente inteiro e a subida falha se as câmeras divergirem. Uma câmera de saída com
     GOP longo pode precisar de outra tolerância que a do corredor (§3.4) — resolver

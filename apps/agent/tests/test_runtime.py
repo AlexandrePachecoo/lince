@@ -19,6 +19,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from deteccoes import DetectorFalso, DetectorQueFalha, pessoa
+from deteccoes import frame as quadro
 
 from lince_agent.clip.state import ClipResult, ClipStatus
 from lince_agent.clip.store import ClipStore
@@ -27,6 +29,7 @@ from lince_agent.config import (
     CameraConfig,
     ClipOptions,
     CloudOptions,
+    DetectionOptions,
     OutboxOptions,
     RetryOptions,
 )
@@ -157,7 +160,15 @@ def sessao(dados: bytes) -> tuple[InitSegment, list[Fragment]]:
 class Agente:
     """Runtime montado com dublês nas bordas e componentes reais no meio."""
 
-    def __init__(self, tmp_path, *, cameras: tuple[str, ...] = ("cam1",), cliente=None):
+    def __init__(
+        self,
+        tmp_path,
+        *,
+        cameras: tuple[str, ...] = ("cam1",),
+        cliente=None,
+        detector=None,
+        inelegiveis: tuple[str, ...] = (),
+    ):
         self.relogio = RelogioFalso()
         self.parede = RelogioFalso(1_700_000_000.0)
         self.store = MemoryOutbox(OPCOES_FILA)
@@ -174,7 +185,12 @@ class Agente:
             tenant_id="rede-abc",
             store_id="loja-01",
             cameras=tuple(
-                CameraConfig(camera_id=nome, url=f"rtsp://camera/{nome}", clip=CORTE)
+                CameraConfig(
+                    camera_id=nome,
+                    url=f"rtsp://camera/{nome}",
+                    clip=CORTE,
+                    detect=nome not in inelegiveis,
+                )
                 for nome in cameras
             ),
             clips_dir=tmp_path / "clipes",
@@ -201,6 +217,7 @@ class Agente:
             wall_clock=self.parede,
             supervisor_factory=self._fabrica,
             recorder=self.recorder,
+            detector=detector,
         )
         # O recorder foi construído com o `on_result` do teste, então encadeamos: o
         # runtime precisa continuar recebendo o resultado, senão nada é enfileirado.
@@ -224,6 +241,11 @@ class Agente:
         callbacks.on_init_segment(init)
         for fragmento in fragmentos:
             callbacks.on_fragment(fragmento)
+
+    def alimenta_frame(self, camera_id: str, quadro) -> None:
+        """Entrega um frame pelo mesmo callback que a thread despachante do ffmpeg
+        usaria. É por aqui que o estágio 2 recebe o que recebe em produção."""
+        self.supervisores[camera_id].callbacks.on_frame(quadro)
 
     def espera_clipe(self) -> ClipResult:
         assert self.chegou.wait(PRAZO_S), "o clipe não ficou pronto no prazo"
@@ -625,3 +647,98 @@ def test_gatilho_nao_espera_o_clipe(agente, sessao_longa):
     threading.Thread(target=dispara, daemon=True).start()
 
     assert voltou.wait(1.0), "o gatilho bloqueou esperando o pós-roll"
+
+
+# --- estágio 2: detecção ----------------------------------------------------
+
+
+def test_frame_chega_ao_detector_carimbado_com_a_camera_certa(tmp_path):
+    """O `on_frame` da ingestão entrega só o `Frame`, que não sabe de onde veio. Se o
+    `camera_id` não for amarrado na montagem do supervisor, o §5.3 perde a separação
+    por câmera — e é ela que revela **qual** câmera está saturando o box (R-4)."""
+    detector = DetectorFalso((pessoa(),))
+    montado = Agente(tmp_path, cameras=("cam1", "cam2"), detector=detector)
+    montado.runtime.start()
+    try:
+        montado.alimenta_frame("cam2", quadro(7))
+        assert detector.chamou.wait(PRAZO_S)
+        assert _ate(lambda: montado.runtime.health().detector.frames_inferred == 1)
+
+        por_camera = {
+            camera.camera_id: camera.frames_inferred
+            for camera in montado.runtime.health().detector.cameras
+        }
+        assert por_camera == {"cam1": 0, "cam2": 1}
+    finally:
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+def test_camera_inelegivel_ingere_mas_nao_gasta_inferencia(tmp_path):
+    """O R-3 prevê câmeras que a loja já tem e que não servem para IA — ângulo, altura,
+    contraluz na porta. Elas continuam alimentando o buffer circular e respondendo a
+    gatilho manual: o que some é o custo de GPU, não a câmera."""
+    detector = DetectorFalso()
+    montado = Agente(tmp_path, cameras=("cam1", "cam2"), detector=detector, inelegiveis=("cam2",))
+    montado.runtime.start()
+    try:
+        montado.alimenta_frame("cam2", quadro(1))
+        montado.alimenta_frame("cam1", quadro(1))
+        assert detector.chamou.wait(PRAZO_S)
+        assert _ate(lambda: montado.runtime.health().detector.frames_inferred == 1)
+
+        saude = montado.runtime.health()
+        assert [camera.camera_id for camera in saude.detector.cameras] == ["cam1"]
+        assert saude.frames_ingested == 2
+    finally:
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+def test_health_expoe_o_modelo_e_a_fila_do_estagio_2(tmp_path):
+    """Os campos que o §5.3 pede já reunidos no mesmo lugar que o resto — é o que vai
+    virar corpo de heartbeat quando o transporte existir."""
+    montado = Agente(tmp_path, detector=DetectorFalso())
+    montado.runtime.start()
+    try:
+        saude = montado.runtime.health().detector
+        assert saude.enabled is True
+        assert saude.info is not None and saude.info.provider == "CPUExecutionProvider"
+        assert saude.queue_size == DetectionOptions().queue_size
+    finally:
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+def test_sem_modelo_o_agente_sobe_e_continua_gravando_clipe(tmp_path, sessao_longa):
+    """O §3.9 exige o mesmo artefato numa máquina sem GPU e no box da loja. Sem modelo
+    o estágio 2 fica desligado, e o caminho gatilho → clipe → fila continua inteiro."""
+    init, fragmentos = sessao_longa
+    montado = Agente(tmp_path)  # sem detector: cai no NullDetector
+    montado.runtime.start()
+    try:
+        montado.alimenta("cam1", init, fragmentos[:20])
+        montado.alimenta_frame("cam1", quadro(1))
+        montado.relogio.agora = 1.0
+        montado.runtime.trigger("cam1", at=1.0)
+
+        resultado = montado.espera_clipe()
+        assert resultado.status is ClipStatus.OK
+        assert montado.runtime.health().detector.enabled is False
+    finally:
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+def test_detector_falho_nao_derruba_o_caminho_do_clipe(tmp_path, sessao_longa):
+    """Regra geral do §5.4 aplicada ao estágio 2: nada no caminho da detecção pode
+    parar o que já funciona. Uma placa que sumiu não pode levar junto o alerta."""
+    init, fragmentos = sessao_longa
+    montado = Agente(tmp_path, detector=DetectorQueFalha(falhas=99))
+    montado.runtime.start()
+    try:
+        montado.alimenta("cam1", init, fragmentos[:20])
+        montado.alimenta_frame("cam1", quadro(1))
+        assert _ate(lambda: montado.runtime.health().detector.errors == 1)
+
+        montado.relogio.agora = 1.0
+        montado.runtime.trigger("cam1", at=1.0)
+        assert montado.espera_clipe().status is ClipStatus.OK
+    finally:
+        montado.runtime.stop(timeout=PRAZO_S)

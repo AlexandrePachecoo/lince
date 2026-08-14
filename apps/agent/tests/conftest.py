@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -110,6 +111,20 @@ def redis_url() -> str:
     finally:
         cliente.close()
     return url
+
+
+@pytest.fixture(scope="session")
+def model_path() -> Path:
+    """Caminho do `.onnx` de verdade, ou `skip`.
+
+    O modelo é a única coisa do estágio 2 que não cabe numa máquina limpa: são dezenas
+    de megabytes que não vão para o git. Todo o resto do estágio — letterbox,
+    decodificação, NMS, fila, thread e contagem — roda contra dublês e sem marcador.
+    """
+    caminho = Path(os.environ.get("LINCE_MODEL_PATH", "models/yolox_s.onnx"))
+    if not caminho.is_file():
+        pytest.skip(f"sem modelo em {caminho} — rode `bash scripts/modelo.sh`")
+    return caminho
 
 
 @pytest.fixture(scope="session")

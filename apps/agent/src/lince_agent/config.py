@@ -311,12 +311,78 @@ class OutboxOptions:
 
 
 @dataclass(frozen=True, slots=True)
+class DetectionOptions:
+    """Estágio 2 (§3.2). Um modelo e uma fila para o agente inteiro (ADR-007)."""
+
+    enabled: bool = False
+    """Desligado por padrão: sem modelo no disco, o agente ainda é um gravador de
+    clipes útil, e o §3.9 exige que o mesmo artefato rode onde não há GPU."""
+
+    model_path: Path | None = None
+    """Arquivo `.onnx`. Hoje vem da configuração local; o `GET /v1/models/current` do
+    §5.2 vai entregar este arquivo com checksum e versão (ADR-006)."""
+
+    input_size: int = 640
+    """Lado do quadrado que o modelo consome. É conferido contra a forma declarada no
+    próprio `.onnx` na subida — divergir aqui decodifica caixas plausíveis e erradas."""
+
+    providers: tuple[str, ...] = ("CUDAExecutionProvider", "CPUExecutionProvider")
+    """Ordem de preferência do ONNX Runtime. É esta lista que implementa o fallback do
+    §3.2 sem nenhum `if gpu`: num box sem placa, ou com o driver quebrado, o runtime
+    simplesmente cai para o próximo da lista e o heartbeat reporta qual pegou (§10.10)."""
+
+    score_threshold: float = 0.35
+    """Confiança mínima. Baixar aumenta recall e alimenta o R-1; subir perde a pessoa
+    parcialmente ocluída, que o §3.3 esperava recuperar. **A validar por benchmark.**"""
+
+    iou_threshold: float = 0.45
+    classes: tuple[int, ...] = (0,)
+    """Índices COCO de interesse; 0 é `person`. O MVP só precisa de pessoas — as outras
+    79 classes seriam inferência paga e descartada três estágios depois."""
+
+    queue_size: int = 8
+    """Frames esperando inferência. Pequeno de propósito: o §3.2 manda descartar o mais
+    antigo quando a GPU não acompanha, e uma fila grande troca descarte por latência —
+    o frame inferido ficaria velho, e o §3.4 mede tempo em zona com ele."""
+
+    fps_window: int = 32
+    """Inferências consideradas no cálculo de `inference_fps`. Janela, e não média
+    desde a subida, para uma degradação recente aparecer no heartbeat."""
+
+    def __post_init__(self) -> None:
+        if self.enabled and self.model_path is None:
+            raise ValueError("detecção habilitada exige model_path")
+        if self.input_size <= 0 or self.input_size % 32:
+            raise ValueError(
+                f"input_size deve ser múltiplo positivo de 32, recebi {self.input_size}: "
+                "é o maior stride da grade de âncoras"
+            )
+        if not self.providers:
+            raise ValueError("providers não pode ser vazio: o ONNX Runtime não teria onde rodar")
+        for nome, valor in (
+            ("score_threshold", self.score_threshold),
+            ("iou_threshold", self.iou_threshold),
+        ):
+            if not 0.0 <= valor <= 1.0:
+                raise ValueError(f"{nome} deve estar entre 0 e 1, recebi {valor}")
+        if self.queue_size <= 0:
+            raise ValueError(f"queue_size deve ser positivo, recebi {self.queue_size}")
+        if self.fps_window < 2:
+            raise ValueError(f"fps_window precisa de ao menos 2 amostras, recebi {self.fps_window}")
+
+
+@dataclass(frozen=True, slots=True)
 class CameraConfig:
     camera_id: str
     url: str
     decode: DecodeOptions = field(default_factory=DecodeOptions)
     supervision: SupervisionOptions = field(default_factory=SupervisionOptions)
     clip: ClipOptions = field(default_factory=ClipOptions)
+
+    detect: bool = True
+    """Se esta câmera é elegível para IA. O R-3 prevê câmeras com ângulo, altura ou
+    contraluz que as tornam inúteis para detecção — elas continuam alimentando o buffer
+    do clipe e respondendo a gatilho manual, sem gastar inferência."""
 
     def __post_init__(self) -> None:
         if not self.camera_id:
@@ -356,6 +422,7 @@ class AgentConfig:
     clips_dir: Path
     outbox: OutboxOptions = field(default_factory=OutboxOptions)
     cloud: CloudOptions = field(default_factory=CloudOptions)
+    detection: DetectionOptions = field(default_factory=DetectionOptions)
     ffmpeg_bin: str = "ffmpeg"
 
     def __post_init__(self) -> None:
@@ -382,6 +449,39 @@ class AgentConfig:
                 f"as câmeras divergem em {divergentes}, mas o corte é um só para o agente. "
                 "Rolls por câmera exigem mudar o ClipRecorder (pendência registrada)"
             )
+
+        self._valida_deteccao()
+
+    def _valida_deteccao(self) -> None:
+        """Recusa na subida o que o estágio 2 recusaria a cada frame.
+
+        As duas exigências saem do `preprocess`: o maior lado do frame tem que bater com
+        a entrada do modelo (nenhum redimensionamento acontece em Python) e o formato
+        tem que ser BGR24. Descobrir isso em produção significaria um agente que ingere,
+        grava clipe, e nunca detecta nada — falhando uma vez por frame, num log que
+        ninguém lê. O conserto é no filtro do ffmpeg, e é de graça.
+        """
+        if not self.detection.enabled:
+            return
+
+        lado = self.detection.input_size
+        for camera in self.cameras:
+            if not camera.detect:
+                continue
+            maior = max(camera.decode.width, camera.decode.height)
+            if maior != lado:
+                raise ValueError(
+                    f"câmera {camera.camera_id} decodifica em "
+                    f"{camera.decode.width}x{camera.decode.height}, e o modelo consome {lado}: "
+                    f"o maior lado precisa ser exatamente {lado}. Ajuste DecodeOptions.width/"
+                    f"height — o ffmpeg já escala no filtro que existe (§3.1)"
+                )
+            if camera.decode.pixel_format is not PixelFormat.BGR24:
+                raise ValueError(
+                    f"câmera {camera.camera_id} entrega {camera.decode.pixel_format} e o "
+                    f"detector consome {PixelFormat.BGR24}. Marque a câmera com detect=False "
+                    "ou acrescente `format=bgr24` ao fim da cadeia de filtros"
+                )
 
     @property
     def clip(self) -> ClipOptions:

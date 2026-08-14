@@ -59,6 +59,25 @@ def test_put_nao_bloqueia_com_a_fila_cheia():
     assert concluido.wait(timeout=5.0), "put bloqueou com a fila cheia"
 
 
+def test_put_devolve_quem_foi_descartado():
+    """Só a fila sabe qual item morreu. O estágio 2 compartilha uma fila entre todas as
+    câmeras e o §5.3 pede `dropped_frames` **por câmera** — sem esta devolução, o
+    contador seria agregado e esconderia qual câmera está saturando o box (R-4)."""
+    fila: DropOldestQueue[int] = DropOldestQueue(2)
+    assert fila.put(1) is None
+    assert fila.put(2) is None
+    assert fila.put(3) == 1
+
+
+def test_put_em_fila_fechada_devolve_o_proprio_item():
+    """Fechada, a fila não aceita mais nada: o item não sobrevive ao `put`, e quem
+    contabiliza descarte precisa saber disso."""
+    fila: DropOldestQueue[int] = DropOldestQueue(2)
+    fila.close()
+    assert fila.put(9) == 9
+    assert len(fila) == 0
+
+
 def test_get_devolve_none_no_timeout():
     fila: DropOldestQueue[int] = DropOldestQueue(2)
     assert fila.get(timeout=0.01) is None

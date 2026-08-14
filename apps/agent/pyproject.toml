@@ -8,6 +8,10 @@ dependencies = [
     # Fila local durável do §3.6 (ADR-004). Em Python 3.12 não puxa dependência
     # transitiva nenhuma, o que mantém a imagem do box enxuta.
     "redis>=5.0",
+    # Inferência do §3.2 (ADR-009). MIT, e o modelo é um arquivo `.onnx` avulso — que
+    # é exatamente o que o `GET /v1/models/current` do §5.2 distribui com checksum.
+    # Um framework de treino traria gigabytes que só servem para treinar.
+    "onnxruntime>=1.20",
 ]
 
 [project.scripts]
@@ -36,10 +40,12 @@ testpaths = ["tests"]
 # rodar com `uv run pytest` numa máquina limpa:
 #   pnpm rtsp:up  && uv run pytest -m rtsp
 #   pnpm infra:up && uv run pytest -m redis
-addopts = "-m 'not rtsp and not redis'"
+#   bash scripts/modelo.sh && uv run pytest -m modelo
+addopts = "-m 'not rtsp and not redis and not modelo'"
 markers = [
     "rtsp: exige um servidor RTSP em RTSP_TEST_URL (ver infra/docker-compose.rtsp.yml)",
     "redis: exige um Redis em LINCE_REDIS_URL (ver infra/docker-compose.yml)",
+    "modelo: exige o .onnx em LINCE_MODEL_PATH (ver scripts/modelo.sh)",
 ]
 
 [tool.ruff]

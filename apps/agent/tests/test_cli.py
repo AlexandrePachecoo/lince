@@ -11,6 +11,7 @@ import pytest
 
 from lince_agent import __main__ as cli
 from lince_agent.config import HwAccel, OutboxOptions, PixelFormat
+from lince_agent.detect.state import CameraDetectionStats, DetectorInfo, DetectorStats
 from lince_agent.ffmpeg.fmp4 import Fragment, InitSegment
 from lince_agent.ffmpeg.probe import ProbeError, StreamInfo
 from lince_agent.ingest.state import CameraHealth, CameraStatus
@@ -247,3 +248,114 @@ def test_dumper_grava_init_e_fragmentos(tmp_path):
     nomes = sorted(p.name for p in tmp_path.glob("frag_*.mp4"))
     assert nomes[0] == "frag_00001.mp4"
     assert nomes[-1] == "frag_00011.mp4", "ordenação alfabética tem que bater com a temporal"
+
+
+# --- estágio 2: detecção ----------------------------------------------------
+
+
+def test_sem_model_a_deteccao_fica_desligada(caplog):
+    """Um agente sem modelo é indistinguível de um com modelo até alguém reparar que
+    nenhum alerta saiu daquela loja. O aviso é o que encurta essa distância."""
+    args = cli.build_parser().parse_args(["--camera", "rtsp://x/y"])
+    with caplog.at_level("WARNING"):
+        opcoes = cli._monta_deteccao(args)
+
+    assert opcoes.enabled is False
+    assert "não detecta nada" in caplog.text
+
+
+def test_no_detect_desliga_sem_reclamar(tmp_path, caplog):
+    """Desligar de propósito não é a mesma coisa que esquecer o modelo, e o log tem que
+    distinguir as duas."""
+    modelo = tmp_path / "yolox_s.onnx"
+    args = cli.build_parser().parse_args(
+        ["--camera", "rtsp://x/y", "--model", str(modelo), "--no-detect"]
+    )
+    with caplog.at_level("WARNING"):
+        opcoes = cli._monta_deteccao(args)
+
+    assert opcoes.enabled is False
+    assert "não detecta nada" not in caplog.text
+
+
+def test_model_liga_o_estagio_com_os_padroes_da_arquitetura(tmp_path):
+    modelo = tmp_path / "yolox_s.onnx"
+    args = cli.build_parser().parse_args(["--camera", "rtsp://x/y", "--model", str(modelo)])
+    opcoes = cli._monta_deteccao(args)
+
+    assert opcoes.enabled is True
+    assert opcoes.model_path == modelo
+    assert opcoes.input_size == 640
+    assert opcoes.providers[0] == "CUDAExecutionProvider", "o box da loja tem GPU (§3.1)"
+    assert opcoes.providers[-1] == "CPUExecutionProvider", "e cai para CPU (§10.10)"
+
+
+def test_provider_repetido_define_a_ordem_de_preferencia(tmp_path):
+    """A ordem é a política de fallback inteira do §3.2 — não há `if gpu` em lugar
+    nenhum, só esta lista."""
+    modelo = tmp_path / "m.onnx"
+    args = cli.build_parser().parse_args(
+        [
+            "--camera",
+            "rtsp://x/y",
+            "--model",
+            str(modelo),
+            "--provider",
+            "TensorrtExecutionProvider",
+            "--provider",
+            "CPUExecutionProvider",
+        ]
+    )
+    assert cli._monta_deteccao(args).providers == (
+        "TensorrtExecutionProvider",
+        "CPUExecutionProvider",
+    )
+
+
+def test_model_pode_vir_do_ambiente(tmp_path, monkeypatch):
+    """O agente de produção não recebe flags: a configuração vem de fora (§3.9)."""
+    monkeypatch.setenv("LINCE_MODEL_PATH", str(tmp_path / "do-ambiente.onnx"))
+    import importlib
+
+    importlib.reload(cli)
+    try:
+        args = cli.build_parser().parse_args(["--camera", "rtsp://x/y"])
+        assert args.model == tmp_path / "do-ambiente.onnx"
+    finally:
+        monkeypatch.delenv("LINCE_MODEL_PATH")
+        importlib.reload(cli)
+
+
+def test_linha_de_deteccao_desligada_diz_por_que():
+    assert "sem modelo" in cli._format_deteccao(DetectorStats())
+
+
+def test_linha_de_deteccao_mostra_modelo_fila_e_camera():
+    """`inference_fps` perto de 3 e descarte em zero é o estado saudável; a fila sai
+    junto para o R-4 aparecer antes de o descarte começar."""
+    stats = DetectorStats(
+        enabled=True,
+        info=DetectorInfo(
+            model_version="yolox_s@abc123",
+            input_size=640,
+            provider="CUDAExecutionProvider",
+            classes=(0,),
+        ),
+        queue_depth=1,
+        queue_size=8,
+        errors=0,
+        cameras=(
+            CameraDetectionStats(
+                camera_id="saida",
+                frames_in=90,
+                frames_inferred=88,
+                dropped=2,
+                detections=41,
+                inference_fps=2.97,
+            ),
+        ),
+    )
+    linha = cli._format_deteccao(stats)
+
+    for pedaço in ("yolox_s@abc123", "CUDAExecutionProvider", "1/8", "saida", "2.97", "41", "2"):
+        assert pedaço in linha

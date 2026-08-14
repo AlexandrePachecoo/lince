@@ -56,24 +56,30 @@ cd apps/agent && uv run ruff check src tests && uv run ruff format --check src t
 
 | Componente | Situação |
 |---|---|
-| `apps/agent` | Estágios 1 (ingestão, §3.1), 5 (clipe, §3.5) e 6 (fila e envio, §3.6), ligados por `runtime.py`. Sem YOLO, tracking nem regras |
+| `apps/agent` | Estágios 1 (ingestão, §3.1), 2 (detecção, §3.2), 5 (clipe, §3.5) e 6 (fila e envio, §3.6), ligados por `runtime.py`. Sem tracking nem regras |
 | `apps/api` | vazio |
 | `apps/dashboard` | vazio |
 | `packages/shared` | JSON Schema do evento e do PATCH do clipe (§5). Heartbeat e config ainda não |
 
 O caminho **gatilho → clipe → fila local → nuvem → clipe apagado do disco** funciona
-ponta a ponta. O que ainda não existe é quem puxa o gatilho: sem os estágios 2 a 4,
-quem dispara é andaime (`--trigger-after`, `--trigger-every`, `SIGUSR1`), e os
-eventos que ele produz sobem marcados como `source: "manual"` — de propósito, para
-não contaminarem a métrica de falso positivo por câmera (R-1).
+ponta a ponta, e o detector já emite caixas de pessoas por frame. O que ainda não
+existe é quem puxa o gatilho: sem os estágios 3 e 4, quem dispara é andaime
+(`--trigger-after`, `--trigger-every`, `SIGUSR1`), e os eventos que ele produz sobem
+marcados como `source: "manual"` — de propósito, para não contaminarem a métrica de
+falso positivo por câmera (R-1).
 
 Onde encostar em cada coisa:
 
+- **Tracking (§3.3)** entra em `AgentRuntime._ao_detectar`, que recebe um
+  `DetectionResult` por frame e hoje só passa.
 - **Motor de regras (§3.4)** chama `AgentRuntime.trigger(camera_id, source=RULE, …)`.
-  Nada mais precisa mudar para o evento chegar à nuvem.
-- **Detecção (§3.2)** entra em `AgentRuntime._ao_receber_frame`, que hoje só conta.
-- **Heartbeat (§5.3)** já tem os dados reunidos em `AgentHealth`; falta o transporte,
-  que depende do registro da §5.1.
+  Nada mais precisa mudar para o evento chegar à nuvem. O ponto de referência da
+  travessia já está em `Detection.base_central`.
+- **Heartbeat (§5.3)** já tem os dados reunidos em `AgentHealth`, agora incluindo
+  `inference_fps` e `dropped_frames` por câmera; falta o transporte, que depende do
+  registro da §5.1.
+- **Download de modelo (§5.2)** substitui o caminho local em `DetectionOptions.model_path`.
+  O `model_version` já é nome + checksum, no formato que o ADR-006 quer.
 
 `packages/shared` é onde o contrato da §5 mora em **um lugar só**. Duplicar essa
 definição entre a API e o agente é o erro mais caro que dá para cometer neste
@@ -84,14 +90,20 @@ projeto. O agente valida o payload real contra o schema em
 
 ```bash
 pnpm infra:up                 # Postgres e Redis
+bash scripts/modelo.sh        # modelo .onnx e vídeo com pessoas (fora do git)
 pnpm rtsp:up                  # câmeras RTSP sintéticas (MediaMTX)
 
 cd apps/agent
 uv sync
-uv run pytest                 # padrão: sem rede, sem câmera, sem infra
+uv run pytest                 # padrão: sem rede, sem câmera, sem infra, sem modelo
 uv run pytest -m rtsp         # ponta a ponta; exige `pnpm rtsp:up`
 uv run pytest -m redis        # fila local durável; exige `pnpm infra:up`
+uv run pytest -m modelo       # o .onnx de verdade; exige `bash scripts/modelo.sh`
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 --stats
+
+# detecção contra vídeo com pessoas de verdade (cam3):
+uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 \
+  --model models/yolox_s.onnx --stats
 
 # caminho inteiro até a nuvem, sem uma API do outro lado:
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 \
@@ -137,3 +149,21 @@ Não reintroduza nenhuma destas — cada uma custou depuração e tem teste guar
 - **Teste de fila com a nuvem aceitando é corrida.** O sender drena entre o gatilho e
   a asserção. Nos testes de fila o link fica caído por padrão; quem quer o caminho
   completo pede o cliente que aceita, explicitamente.
+- **Cada família de modelo tem sua própria convenção de entrada.** YOLOX preenche o
+  letterbox no canto **superior esquerdo**, consome **BGR** e recebe **0..255**; a
+  linhagem YOLOv5/v8 centraliza, quer RGB e 0..1. Errar qualquer uma das três não dá
+  erro: o modelo devolve caixas plausíveis e deslocadas, e o sintoma aparece no §3.4
+  como zona errada. É por isso que `PreprocessSpec` é dado explícito e que existe o
+  teste de ida e volta em `test_detect_preprocess.py`.
+- **A saída do YOLOX não são caixas.** São deslocamentos relativos a uma grade de
+  âncoras, com `wh` em log. Sem somar a grade e exponenciar, as caixas saem coladas no
+  canto superior esquerdo — e o número de âncoras tem que bater com o `input_size`,
+  senão a decodificação é silenciosamente absurda.
+- **`np.clip(a[:, [0, 2]], …, out=a[:, [0, 2]])` não escreve nada.** Indexação por
+  lista produz cópia; o `out=` aponta para um temporário e o recorte se perde em
+  silêncio. Fatia com passo (`a[:, 0::2]`) é vista, e a atribuição funciona.
+- **União zero na IoU vira `nan`, e `nan <= limiar` é falso.** A caixa degenerada
+  sobrevive a toda supressão, sempre e sem sinal.
+- **Vídeo de teste com pessoas não é detalhe.** `testsrc2` é padrão de barras: um teste
+  de detecção contra ele concorda com qualquer coisa, inclusive com um detector
+  quebrado. A `cam3` existe para isso.

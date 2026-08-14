@@ -187,26 +187,48 @@ troubleshooting.
 | `pnpm rtsp:logs` | logs do MediaMTX e dos publishers |
 | `uv run pytest -m redis` | testes da fila local; exige `pnpm infra:up` |
 | `bash scripts/setup.sh` | reexecuta o setup; seguro a qualquer momento |
+| `bash scripts/modelo.sh` | baixa o modelo e o vídeo da cam3; idempotente |
 
 ---
 
 ## Rodando o agente da borda
 
-Três estágios existem e estão ligados: **ingestão** (§3.1, um `ffmpeg` por câmera
-lendo RTSP), **clipe** (§3.5, buffer circular de 30 s em RAM e corte em `-c copy`) e
+Quatro estágios existem e estão ligados: **ingestão** (§3.1, um `ffmpeg` por câmera
+lendo RTSP), **detecção** (§3.2, YOLOX em ONNX Runtime sobre os frames amostrados a
+3 fps), **clipe** (§3.5, buffer circular de 30 s em RAM e corte em `-c copy`) e
 **fila local com envio** (§3.6, Redis + `POST /v1/events`, `PUT` do clipe e `PATCH`).
-Falta o miolo: YOLO, tracking e o motor de regras (§3.2 a §3.4).
+Falta o miolo entre ver e decidir: tracking e o motor de regras (§3.3 e §3.4).
 
 Como nada dispara evento sozinho sem o motor de regras, o gatilho é andaime:
 `--trigger-after S`, `--trigger-every S` e `kill -USR1 <pid>`.
 
 Você não precisa de câmera nenhuma para trabalhar nele. `pnpm rtsp:up` sobe um
-servidor RTSP local com duas câmeras sintéticas em 640x480 a 15 fps:
+servidor RTSP local com três câmeras sintéticas em 640x480 a 15 fps:
 
 | Câmera | URL | Para quê |
 |---|---|---|
 | cam1 | `rtsp://localhost:8554/cam1` | keyframe a cada 2 s — a câmera de referência |
 | cam2 | `rtsp://localhost:8554/cam2` | keyframe a cada 10 s — câmera mal configurada |
+| cam3 | `rtsp://localhost:8554/cam3` | vídeo com **pessoas** em loop — a única em que a detecção tem o que achar |
+
+### O modelo e o vídeo
+
+Nenhum dos dois vai para o git — o modelo porque a nuvem é quem o distribui, com
+checksum e rollback (ADR-006), e o vídeo porque o repositório recusa mídia por
+princípio (R-9). Um comando baixa os dois, com verificação de checksum:
+
+```bash
+bash scripts/modelo.sh
+```
+
+Isso põe `apps/agent/models/yolox_s.onnx` e `infra/videos/pessoas.mp4` no lugar. O
+`pnpm rtsp:up` precisa do vídeo para subir a cam3, e o modelo é o que os testes de
+marcador `modelo` e a flag `--model` procuram.
+
+**Sem GPU o estágio 2 roda, mas devagar:** YOLOX-s a 640 custa ~450 ms por frame em
+CPU, ou seja ~2 fps para uma câmera contra os 3 fps amostrados. Não é problema de
+configuração — é o descarte do §3.2 fazendo o que deve, e aparece como `descartados`
+subindo na linha `[detecção]`.
 
 ```bash
 pnpm rtsp:up
@@ -245,9 +267,10 @@ durável, porque um restart perde os eventos que não subiram.
 
 ```bash
 cd apps/agent
-uv run pytest              # unitários; não precisam de rede, câmera nem infra
+uv run pytest              # unitários; não precisam de rede, câmera, infra nem modelo
 uv run pytest -m rtsp      # ponta a ponta; exige `pnpm rtsp:up`
 uv run pytest -m redis     # fila durável; exige `pnpm infra:up`
+uv run pytest -m modelo    # o .onnx de verdade; exige `bash scripts/modelo.sh`
 ```
 
 Os marcados são os únicos que dependem de infraestrutura, e cada um cobre o que só
@@ -295,6 +318,12 @@ aberto, o ffmpeg não reclama, e nenhum frame sai.
 | `ffmpeg` instalado mas sem NVDEC | build sem suporte a CUDA | irrelevante sem GPU; no box de referência use um build com `--enable-cuda-nvcc` |
 | `uv run pytest -m rtsp` pula tudo | câmeras sintéticas não estão de pé | `pnpm rtsp:up` e espere uns 5 s |
 | `uv run pytest -m redis` pula tudo | Redis fora do ar ou em outra porta | `pnpm infra:up`, ou aponte `LINCE_REDIS_URL` |
+| `uv run pytest -m modelo` pula tudo | o `.onnx` não está em `apps/agent/models/` | `bash scripts/modelo.sh`, ou aponte `LINCE_MODEL_PATH` |
+| `lince-cam3` reiniciando em loop | `infra/videos/pessoas.mp4` não existe | `bash scripts/modelo.sh` e depois `pnpm rtsp:up` |
+| Agente sobe com "não detecta nada" no log | faltou `--model` | é o comportamento pretendido sem modelo (§3.9); passe `--model models/yolox_s.onnx` |
+| `declara entrada de 416 e a configuração diz 640` | modelo e `--input-size` divergentes | ajuste `--input-size`; decodificar com o tamanho errado produz caixas plausíveis e erradas |
+| `o maior lado precisa ser exatamente 640` | resolução de decode incompatível com o modelo | ajuste `--width/--height` — o ffmpeg escala de graça no filtro que já existe |
+| `descartados` subindo na linha `[detecção]` | inferência mais lenta que os 3 fps amostrados | esperado sem GPU (~2 fps em CPU); é o *drop oldest* do §3.2 funcionando |
 | Agente com `fila local recusou o evento` | Redis local fora do ar | é a fronteira de durabilidade do ADR-004: o evento se perde e o contador sobe. Suba o Redis ou use `--outbox memory` |
 | Agente em `reconnecting` com `404 Not Found` | o MediaMTX está no ar mas nenhum publisher está publicando naquele caminho | `pnpm rtsp:ps` — o container `lince-cam1` precisa estar `Up` |
 | `bind: address already in use` na 8554 | outro servidor RTSP na máquina | mude `RTSP_PORT` em `infra/.env` |
@@ -306,15 +335,19 @@ aberto, o ffmpeg não reclama, e nenhum frame sai.
 ```
 apps/api/          API Fastify + Prisma (control plane)   — vazio
 apps/dashboard/    Dashboard React PWA (triagem)          — vazio
-apps/agent/        Agente da borda em Python              — estágios 1, 5 e 6
+apps/agent/        Agente da borda em Python              — estágios 1, 2, 5 e 6
   src/lince_agent/ffmpeg/    montagem do comando, processo, pipes, parser fMP4
   src/lince_agent/ingest/    supervisão: reconexão, watchdog, saúde
+  src/lince_agent/detect/    letterbox, sessão ONNX, decodificação, NMS, thread
   src/lince_agent/clip/      buffer circular em RAM, corte, teto de disco
   src/lince_agent/outbox/    fila local, política de retry, cliente HTTP, envio
   src/lince_agent/runtime.py composição: é aqui que os estágios viram um processo
+  models/                    o .onnx; fora do git (ADR-006)
 packages/shared/   Contrato agente ↔ nuvem em JSON Schema (§5)
 infra/             docker-compose de desenvolvimento e das câmeras sintéticas
+  videos/                    vídeo da cam3; fora do git (R-9)
 scripts/setup.sh   bootstrap idempotente
+scripts/modelo.sh  baixa modelo e vídeo de teste, com checksum
 docs/              arquitetura e ADRs
 ```
 

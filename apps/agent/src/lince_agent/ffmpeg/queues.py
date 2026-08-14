@@ -38,15 +38,25 @@ class DropOldestQueue[T]:
         with self._condition:
             return self._dropped
 
-    def put(self, item: T) -> None:
-        """Nunca bloqueia. Ver o docstring do módulo."""
+    def put(self, item: T) -> T | None:
+        """Nunca bloqueia. Ver o docstring do módulo.
+
+        Devolve o item que não sobreviveu — o mais antigo, quando a fila estava cheia,
+        ou o próprio `item`, quando a fila já estava fechada — e `None` quando coube.
+        Só a fila sabe **qual** item morreu, e o §5.3 pede `dropped_frames` por câmera:
+        com uma fila compartilhada entre todas elas, um contador agregado esconderia
+        justamente a câmera que está saturando o box (R-4).
+        """
         with self._condition:
             if self._closed:
-                return
+                return item
+            descartado: T | None = None
             if len(self._items) == self._items.maxlen:
                 self._dropped += 1
+                descartado = self._items[0]
             self._items.append(item)
             self._condition.notify()
+            return descartado
 
     def get(self, timeout: float | None = None) -> T | None:
         """Devolve o próximo item, ou `None` no timeout ou após o fechamento."""

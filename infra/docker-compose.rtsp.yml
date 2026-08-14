@@ -70,6 +70,55 @@ services:
       - tcp
       - rtsp://mediamtx:8554/cam1
 
+  # Câmera com pessoas de verdade, para o estágio 2 (§3.2). testsrc2 é padrão de
+  # barras: o detector não tem o que achar ali, e um teste de detecção contra barras de
+  # cor não prova nada. Esta publica um vídeo com gente andando e cruzando o quadro —
+  # que é do que o tracking (§3.3) e o motor de regras (§3.4) vão precisar depois.
+  #
+  # O arquivo não está no git (R-9, e o .gitignore recusa mídia). Rode antes:
+  #   bash scripts/modelo.sh
+  #
+  # Recodifica em vez de `-c copy` de propósito: o vídeo original tem outro GOP e outra
+  # resolução, e a cam3 precisa entregar o mesmo contrato das outras — 640x480, keyframe
+  # a cada 2 s — senão o corte do §3.5 se comporta diferente só nela.
+  cam3:
+    <<: *camera
+    container_name: lince-cam3
+    volumes:
+      - ./videos:/videos:ro
+    command:
+      - -hide_banner
+      - -loglevel
+      - warning
+      # O loop é no demuxer, antes do decode: `-loop` seria opção de imagem.
+      - -stream_loop
+      - "-1"
+      - -re
+      - -i
+      - /videos/pessoas.mp4
+      - -c:v
+      - libx264
+      - -preset
+      - ultrafast
+      - -tune
+      - zerolatency
+      - -g
+      - "30"
+      - -r
+      - "15"
+      - -s
+      - 640x480
+      - -pix_fmt
+      - yuv420p
+      # Áudio de loja é dado pessoal que ninguém pediu (R-9), e o vídeo de origem tem
+      # uma faixa. Recusar aqui é o mesmo que a ingestão faz com -allowed_media_types.
+      - -an
+      - -f
+      - rtsp
+      - -rtsp_transport
+      - tcp
+      - rtsp://mediamtx:8554/cam3
+
   # Câmera de GOP longo: keyframe a cada 10 s. Existe para provar que o pré-roll
   # de 5 s do §3.5 degrada de forma controlada quando a câmera é mal configurada
   # (o fragmento passa a ser maior que a janela pedida).
