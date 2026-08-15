@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import threading
 import time
 
@@ -18,6 +19,7 @@ from lince_agent.ingest.state import CameraHealth, CameraStatus
 from lince_agent.outbox.state import OutboxStats, SenderStats
 from lince_agent.outbox.store import MemoryOutbox
 from lince_agent.runtime import AgentHealth
+from lince_agent.track.state import CameraTrackingStats, TrackerStats
 
 
 def test_padroes_batem_com_a_arquitetura():
@@ -359,3 +361,128 @@ def test_linha_de_deteccao_mostra_modelo_fila_e_camera():
 
     for pedaço in ("yolox_s@abc123", "CUDAExecutionProvider", "1/8", "saida", "2.97", "41", "2"):
         assert pedaço in linha
+
+
+# --- estágio 3: tracking ----------------------------------------------------
+
+
+def test_tracking_nasce_ligado_na_cli():
+    args = cli.build_parser().parse_args(["--camera", "rtsp://x/y"])
+    assert cli._monta_tracking(args).enabled is True
+
+
+def test_no_track_desliga_o_estagio_3():
+    args = cli.build_parser().parse_args(["--camera", "rtsp://x/y", "--no-track"])
+    assert cli._monta_tracking(args).enabled is False
+
+
+def test_high_threshold_e_configuravel():
+    """O limiar que separa "é uma pessoa" de "talvez" é o que se ajusta em campo quando
+    uma câmera tem contraluz na porta (R-3)."""
+    args = cli.build_parser().parse_args(
+        ["--camera", "rtsp://x/y", "--track-high-threshold", "0.7"]
+    )
+    assert cli._monta_tracking(args).high_threshold == pytest.approx(0.7)
+
+
+def test_linha_de_tracking_desligado_diz_por_que():
+    assert "desligado" in cli._format_tracking(TrackerStats())
+
+
+def test_linha_de_tracking_destaca_a_fragmentacao():
+    """`criados_por_minuto` é o número a vigiar: numa loja de bairro ele deveria se
+    parecer com quantas pessoas entraram no quadro."""
+    stats = TrackerStats(
+        enabled=True,
+        cameras=(
+            CameraTrackingStats(
+                camera_id="saida",
+                ativos=2,
+                provisorios=1,
+                perdidos=1,
+                criados=9,
+                encerrados=6,
+                criados_por_minuto=7.5,
+                vida_media_s=12.3,
+                associacoes_baixa=4,
+            ),
+        ),
+    )
+    linha = cli._format_tracking(stats)
+
+    for pedaço in ("saida", "2 ativos", "7.5/min", "12.3s", "4 fracas", "criados=9"):
+        assert pedaço in linha
+
+
+def test_dump_tracks_grava_um_mp4_reproduzivel(tmp_path):
+    """Com ffmpeg de verdade: o vídeo anotado é a verificação do estágio mais frágil do
+    sistema, e um arquivo que não abre não verifica nada."""
+    from lince_agent.config import DecodeOptions
+    from lince_agent.ffmpeg.rawframe import Frame
+    from lince_agent.track.state import Track, TrackingResult, TrackStatus
+
+    decode = DecodeOptions(width=64, height=48, sample_fps=3.0)
+    dumper = cli._TrackDumper(tmp_path, decode)
+
+    for sequencia in range(1, 7):
+        frame = Frame(
+            data=bytes(decode.frame_bytes),
+            width=decode.width,
+            height=decode.height,
+            pixel_format=decode.pixel_format,
+            sequence=sequencia,
+            received_at=sequencia / 3,
+        )
+        dumper.on_frame("cam1", frame)
+        dumper.on_tracking(
+            TrackingResult(
+                camera_id="cam1",
+                sequence=sequencia,
+                received_at=sequencia / 3,
+                tracks=(
+                    Track(
+                        track_id=1,
+                        camera_id="cam1",
+                        status=TrackStatus.CONFIRMADO,
+                        x1=5.0 + sequencia,
+                        y1=5.0,
+                        x2=25.0 + sequencia,
+                        y2=40.0,
+                        score=0.9,
+                        hits=sequencia,
+                        age_s=sequencia / 3,
+                        time_since_update_s=0.0,
+                        first_seen_at=0.0,
+                        last_seen_at=sequencia / 3,
+                    ),
+                ),
+                tracking_ms=1.0,
+            )
+        )
+    dumper.close()
+
+    saida = tmp_path / "tracks_cam1.mp4"
+    assert saida.is_file() and saida.stat().st_size > 0
+    conferido = subprocess.run(
+        ["ffprobe", "-hide_banner", "-loglevel", "error", "-i", str(saida)],
+        capture_output=True,
+        check=False,
+    )
+    assert conferido.returncode == 0, "o MP4 anotado não abre"
+
+
+def test_dump_tracks_ignora_resultado_sem_frame_correspondente(tmp_path):
+    """O casamento é por `sequence`, não pelo último frame recebido: entre a chegada do
+    frame e a saída do tracker passa uma inferência inteira, e a fila do §3.2 pode ter
+    descartado outros no meio. Desenhar sobre o frame errado pareceria um bug de
+    tracking."""
+    from lince_agent.config import DecodeOptions
+    from lince_agent.track.state import TrackingResult
+
+    dumper = cli._TrackDumper(tmp_path, DecodeOptions(width=64, height=48))
+    dumper.on_tracking(
+        TrackingResult(camera_id="cam1", sequence=99, received_at=1.0, tracks=(), tracking_ms=0.1)
+    )
+    dumper.close()
+
+    assert not list(tmp_path.glob("*.mp4")), "não devia ter aberto ffmpeg sem frame"

@@ -69,17 +69,42 @@ def coletado(rtsp_url: str) -> Coletor:
 
 
 def test_probe_ve_o_substream(rtsp_url: str):
+    """A taxa conferida é a **medida** (`avg_frame_rate`), não a nominal.
+
+    `r_frame_rate` não é a taxa do stream: é o menor framerate com que o ffprobe
+    consegue representar todos os timestamps que viu. Basta um segundo leitor no mesmo
+    caminho do MediaMTX para o jitter de RTP fazê-lo inferir 30 numa câmera de 15 —
+    medido, com `avg_frame_rate` continuando correto em 15. Este teste já afirmava o
+    contrário e passava por sorte, enquanto só uma câmera sintética estava no ar.
+
+    Nada em produção depende disso: `StreamInfo.matches` só olha resolução, e a
+    divergência entre as duas taxas é informação de log (§3.1), não decisão.
+    """
     info = probe_stream(rtsp_url, DecodeOptions())
     assert info.codec == "h264"
     assert (info.width, info.height) == (640, 480)
-    assert info.r_frame_rate == pytest.approx(15.0, abs=1.0)
+    assert info.avg_frame_rate == pytest.approx(15.0, abs=1.0)
+    assert info.r_frame_rate >= info.avg_frame_rate - 1.0
 
 
 def test_frames_chegam_na_taxa_amostrada(coletado: Coletor):
     """A câmera entrega 15 fps; o filtro `fps=3` entrega 3. O decode continua em
-    taxa cheia — o que a amostragem economiza é inferência e banda de pipe."""
-    assert len(coletado.frames) >= 3 * (JANELA_S - 3)
-    assert len(coletado.frames) <= 3 * (JANELA_S + 3)
+    taxa cheia — o que a amostragem economiza é inferência e banda de pipe.
+
+    A taxa é medida **entre os frames coletados**, e não dividindo a contagem pela
+    janela de parede. Os dois primeiros segundos de uma ingestão não são regime
+    permanente: o ffmpeg passa o `-analyzeduration` analisando e depois solta uma
+    rajada, e enquanto a thread despachante não assume, a `DropOldestQueue` descarta o
+    mais antigo — por desenho, porque contrapressão ali travaria o ffmpeg inteiro
+    (§3.1). Contar frames numa janela fixa transformava essa perda de subida, mais o
+    arredondamento das bordas, num teste que passava conforme a carga da máquina.
+    """
+    frames = coletado.frames
+    assert len(frames) >= 10, "quase nada chegou; o problema não é cadência"
+
+    intervalo = frames[-1].received_at - frames[0].received_at
+    taxa = (len(frames) - 1) / intervalo
+    assert 2.0 <= taxa <= 4.5, f"amostragem entregou {taxa:.2f} fps, esperava ~3"
 
 
 def test_todo_frame_tem_o_tamanho_do_contrato(coletado: Coletor):
@@ -299,3 +324,83 @@ def test_pessoas_de_verdade_viram_caixas_dentro_do_frame(camera_com_pessoas: str
     stats = worker.stats()
     assert stats.errors == 0
     assert stats.info is not None and stats.info.model_version.startswith("yolox")
+
+
+@pytest.mark.modelo
+def test_a_mesma_pessoa_mantem_o_id_em_video_real(camera_com_pessoas: str, model_path):
+    """O estágio 3 com peças reais: RTSP → ffmpeg → ONNX → ByteTrack.
+
+    Os testes de `test_track_bytetrack.py` encenam cenários com detecções fabricadas, o
+    que os torna determinísticos e é o certo para verificar a lógica. O que eles não
+    conseguem provar é que o tracker sobrevive à **detecção real**, que é intermitente:
+    o modelo perde a pessoa por um frame, devolve a caixa alguns pixels deslocada, e às
+    vezes entrega duas caixas para a mesma pessoa.
+
+    O critério é deliberadamente modesto — um track que aparece em três frames — por dois
+    motivos. Sem *ground truth* não dá para afirmar mais, que é exatamente o que a
+    pendência §10.7 espera de vídeo de loja. E numa máquina sem GPU a inferência entrega
+    pouco mais de 1 fps (§10.10), então três frames já são quase três segundos de vídeo:
+    exigir mais mediria a velocidade da CPU, não a qualidade do tracking.
+
+    A verificação de verdade deste estágio é visual, com `--dump-tracks`: cada pessoa
+    mantém uma cor enquanto atravessa o quadro, e cor trocando no meio é o R-2 na tela.
+    """
+    from lince_agent.config import DetectionOptions, TrackingOptions
+    from lince_agent.detect.onnx import OnnxDetector
+    from lince_agent.detect.worker import DetectorWorker
+    from lince_agent.track.pool import TrackerPool
+
+    decode = DecodeOptions(sample_fps=3.0, width=640, height=480)
+    opcoes = DetectionOptions(
+        enabled=True, model_path=model_path, providers=("CPUExecutionProvider",), queue_size=4
+    )
+    pool = TrackerPool(TrackingOptions())
+    resultados = []
+    suficiente = threading.Event()
+
+    def rastreia(deteccao) -> None:
+        resultado = pool.update(deteccao)
+        resultados.append(resultado)
+        contagem: dict[int, int] = {}
+        for anterior in resultados:
+            for track in anterior.tracks:
+                contagem[track.track_id] = contagem.get(track.track_id, 0) + 1
+        if any(vezes >= 3 for vezes in contagem.values()):
+            suficiente.set()
+
+    worker = DetectorWorker(OnnxDetector(model_path, opcoes), options=opcoes, on_result=rastreia)
+    ingest = FfmpegIngest(
+        camera_com_pessoas,
+        decode,
+        IngestCallbacks(on_frame=lambda frame: worker.submit("cam3", frame)),
+    )
+
+    worker.start()
+    ingest.start()
+    try:
+        assert suficiente.wait(JANELA_S * 4), (
+            "nenhum track apareceu em 3 frames ao longo de 40 s de vídeo com pessoas — "
+            f"{len(resultados)} frames rastreados"
+        )
+    finally:
+        ingest.stop()
+        worker.stop(timeout=JANELA_S)
+
+    (camera,) = pool.stats().cameras
+    assert camera.criados > 0
+    assert camera.resets == 0, "não houve reconexão; um reset aqui é bug de sequence"
+
+    tracks = [track for resultado in resultados for track in resultado.tracks]
+    assert all(t.x1 < t.x2 and t.y1 < t.y2 for t in tracks), "caixa degenerada"
+
+    # A caixa de um track **não** é recortada na moldura, ao contrário da caixa de uma
+    # detecção: ela é estimativa do Kalman, e quem está saindo pela porta tem mesmo os
+    # pés estimados um pouco além da borda. Recortar moveria a `base_central`, que é
+    # justamente o ponto que o §3.4 vai testar contra a linha de saída — o recorte
+    # empurraria toda travessia para a beirada do quadro.
+    #
+    # O que se garante é que a extrapolação não delira: um track perdido é previsto por
+    # no máximo `max_perdido_s`, o que a 165 px/s dá algumas centenas de pixels.
+    folga = decode.width
+    assert all(-folga <= t.x1 and t.x2 <= decode.width + folga for t in tracks)
+    assert all(-folga <= t.y1 and t.y2 <= decode.height + folga for t in tracks)

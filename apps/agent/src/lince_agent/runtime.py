@@ -60,6 +60,8 @@ from lince_agent.outbox.http import CloudClient
 from lince_agent.outbox.sender import OutboxSender
 from lince_agent.outbox.state import ClipState, ItemKind, OutboxStats, QueueItem, SenderStats
 from lince_agent.outbox.store import OutboxStore
+from lince_agent.track.pool import TrackerPool
+from lince_agent.track.state import TrackerStats, TrackingResult
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +79,7 @@ class AgentHealth:
     cameras: tuple[CameraHealth, ...] = ()
     buffers: tuple[BufferStats, ...] = ()
     detector: DetectorStats = field(default_factory=DetectorStats)
+    tracker: TrackerStats = field(default_factory=TrackerStats)
     recorder: RecorderStats = field(default_factory=RecorderStats)
     outbox: OutboxStats = field(default_factory=OutboxStats)
     sender: SenderStats = field(default_factory=SenderStats)
@@ -112,6 +115,7 @@ class AgentRuntime:
         recorder: ClipRecorder | None = None,
         sender: OutboxSender | None = None,
         detector: Detector | None = None,
+        on_tracking: Callable[[TrackingResult], None] | None = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -154,6 +158,9 @@ class AgentRuntime:
             clock=clock,
         )
 
+        self._tracking = TrackerPool(config.tracking, clock=clock)
+        self._on_tracking = on_tracking
+
         self._lock = threading.Lock()
         self._detecta = {camera.camera_id: camera.detect for camera in config.cameras}
         """Elegibilidade para IA por câmera (R-3). A câmera inelegível continua
@@ -193,6 +200,7 @@ class AgentRuntime:
             self._recorder.attach(camera.camera_id, buffer)
             if camera.detect:
                 self._deteccao.register(camera.camera_id)
+                self._tracking.register(camera.camera_id)
 
         # Consumidores antes de produtores: um clipe cortado antes de o sender existir
         # ficaria esperando o próximo poll ocioso, e o NFR-1 já gastou 10 s no pós-roll.
@@ -348,12 +356,28 @@ class AgentRuntime:
             self._deteccao.submit(camera_id, frame)
 
     def _ao_detectar(self, resultado: DetectionResult) -> None:
-        """Recebe as caixas de um frame. Roda na thread de detecção.
+        """Dá identidade às caixas do frame. Roda na thread de detecção.
 
-        Por enquanto só passa. **É onde o estágio 3 (tracking, §3.3) entra** — e daí o
-        §3.4 chama `trigger` com `source=RULE`, que é o que enfim tira o andaime da CLI
-        do caminho. Nada mais precisa mudar para o evento chegar à nuvem.
+        O tracking acontece **aqui**, e não numa fila própria, de propósito: o Kalman
+        depende da ordem dos frames, e uma segunda fila com descarte entregaria frames
+        fora de sequência — o que corromperia a velocidade de todos os tracks daquela
+        câmera em silêncio. Rodar logo depois da inferência custa poucos milissegundos e
+        preserva a ordem por construção.
         """
+        if not self._config.tracking.enabled:
+            return
+        self._ao_rastrear(self._tracking.update(resultado))
+
+    def _ao_rastrear(self, resultado: TrackingResult) -> None:
+        """Recebe os tracks de um frame. **É onde o estágio 4 (§3.4) entra.**
+
+        A máquina de estados do motor de regras é *por track*, e é daqui que ela vai
+        receber cada pessoa com `base_central`, `age_s` e `hits` para decidir. Quando ela
+        existir, chamará `trigger(camera_id, source=RULE, …)` e o andaime da CLI sai do
+        caminho — nada mais precisa mudar para o evento chegar à nuvem.
+        """
+        if self._on_tracking is not None:
+            self._on_tracking(resultado)
 
     def _guarda_rascunho(self, rascunho: EventDraft) -> None:
         with self._lock:
@@ -384,6 +408,7 @@ class AgentRuntime:
             cameras=tuple(sup.health() for sup in self._supervisores.values()),
             buffers=tuple(buffer.stats() for buffer in self._buffers.values()),
             detector=self._deteccao.stats(),
+            tracker=self._tracking.stats(),
             frames_ingested=frames,
             recorder=self._recorder.stats(),
             outbox=self._store.stats(now_ms=agora_ms),

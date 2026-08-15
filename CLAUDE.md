@@ -56,25 +56,26 @@ cd apps/agent && uv run ruff check src tests && uv run ruff format --check src t
 
 | Componente | Situação |
 |---|---|
-| `apps/agent` | Estágios 1 (ingestão, §3.1), 2 (detecção, §3.2), 5 (clipe, §3.5) e 6 (fila e envio, §3.6), ligados por `runtime.py`. Sem tracking nem regras |
+| `apps/agent` | Estágios 1 (ingestão, §3.1), 2 (detecção, §3.2), 3 (tracking, §3.3), 5 (clipe, §3.5) e 6 (fila e envio, §3.6), ligados por `runtime.py`. Falta o motor de regras |
 | `apps/api` | vazio |
 | `apps/dashboard` | vazio |
 | `packages/shared` | JSON Schema do evento e do PATCH do clipe (§5). Heartbeat e config ainda não |
 
 O caminho **gatilho → clipe → fila local → nuvem → clipe apagado do disco** funciona
-ponta a ponta, e o detector já emite caixas de pessoas por frame. O que ainda não
-existe é quem puxa o gatilho: sem os estágios 3 e 4, quem dispara é andaime
-(`--trigger-after`, `--trigger-every`, `SIGUSR1`), e os eventos que ele produz sobem
-marcados como `source: "manual"` — de propósito, para não contaminarem a métrica de
-falso positivo por câmera (R-1).
+ponta a ponta, e a borda já vê: o detector emite caixas e o tracker dá a cada pessoa um
+ID que atravessa frames. O que ainda não existe é quem **decide** — sem o estágio 4,
+quem dispara é andaime (`--trigger-after`, `--trigger-every`, `SIGUSR1`), e os eventos
+que ele produz sobem marcados como `source: "manual"` — de propósito, para não
+contaminarem a métrica de falso positivo por câmera (R-1).
 
 Onde encostar em cada coisa:
 
-- **Tracking (§3.3)** entra em `AgentRuntime._ao_detectar`, que recebe um
-  `DetectionResult` por frame e hoje só passa.
-- **Motor de regras (§3.4)** chama `AgentRuntime.trigger(camera_id, source=RULE, …)`.
-  Nada mais precisa mudar para o evento chegar à nuvem. O ponto de referência da
-  travessia já está em `Detection.base_central`.
+- **Motor de regras (§3.4)** entra em `AgentRuntime._ao_rastrear`, que recebe um
+  `TrackingResult` por frame e hoje só passa. A máquina de estados é *por track*, e cada
+  `Track` já traz `base_central` (o ponto da travessia), `age_s` e `hits` (o filtro de
+  tempo mínimo de vida). Depois é só chamar
+  `AgentRuntime.trigger(camera_id, source=RULE, …)` — nada mais precisa mudar para o
+  evento chegar à nuvem.
 - **Heartbeat (§5.3)** já tem os dados reunidos em `AgentHealth`, agora incluindo
   `inference_fps` e `dropped_frames` por câmera; falta o transporte, que depende do
   registro da §5.1.
@@ -101,9 +102,14 @@ uv run pytest -m redis        # fila local durável; exige `pnpm infra:up`
 uv run pytest -m modelo       # o .onnx de verdade; exige `bash scripts/modelo.sh`
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 --stats
 
-# detecção contra vídeo com pessoas de verdade (cam3):
+# detecção e tracking contra vídeo com pessoas de verdade (cam3):
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 \
   --model models/yolox_s.onnx --stats
+
+# a verificação do estágio 3 é visual: cada pessoa mantém uma cor no vídeo gravado,
+# e cor trocando no meio do percurso é troca de ID (R-2)
+uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 \
+  --model models/yolox_s.onnx --dump-tracks ./tracks --duration 45 --stats
 
 # caminho inteiro até a nuvem, sem uma API do outro lado:
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 \
@@ -167,3 +173,20 @@ Não reintroduza nenhuma destas — cada uma custou depuração e tem teste guar
 - **Vídeo de teste com pessoas não é detalhe.** `testsrc2` é padrão de barras: um teste
   de detecção contra ele concorda com qualquer coisa, inclusive com um detector
   quebrado. A `cam3` existe para isso.
+- **A 3 fps, os parâmetros de tracking das implementações de referência não servem.**
+  Elas assumem 30 fps. Duas consequências, ambas medidas: o `dt` do Kalman tem que ser
+  tempo real (a fila do §3.2 descarta frames, então o intervalo varia), e os limiares de
+  IoU precisam ser bem mais frouxos — uma pessoa andando tem IoU de **0,19** entre caixas
+  cruas consecutivas. Copiar o ruído de processo diagonal da referência também quebra: ou
+  o filtro fica lento demais, ou o ruído de posição explica todo o movimento e a
+  velocidade estimada vai a zero.
+- **O estado do Kalman não tem restrição, e a caixa vira do avesso.** Quem se afasta da
+  câmera encolhe, o filtro aprende altura negativa, e extrapolar durante uma oclusão de
+  segundos produz `y2 < y1`. Nada estoura: a IoU dá zero, o desenho some, e a
+  `base_central` aponta para o lugar errado. Só apareceu em vídeo real.
+- **A caixa de um `Track` não é recortada na moldura** — ao contrário da caixa de uma
+  `Detection`. Ela é estimativa, e quem sai pela porta tem os pés estimados além da
+  borda; recortar empurraria toda travessia para a beirada do quadro.
+- **Detecção fraca nunca cria track.** O piso do detector é 0,10 para alimentar a segunda
+  passada do ByteTrack, e é a regra "só continua track existente" que impede isso de
+  virar falso positivo.

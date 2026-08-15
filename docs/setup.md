@@ -193,11 +193,12 @@ troubleshooting.
 
 ## Rodando o agente da borda
 
-Quatro estágios existem e estão ligados: **ingestão** (§3.1, um `ffmpeg` por câmera
+Cinco estágios existem e estão ligados: **ingestão** (§3.1, um `ffmpeg` por câmera
 lendo RTSP), **detecção** (§3.2, YOLOX em ONNX Runtime sobre os frames amostrados a
-3 fps), **clipe** (§3.5, buffer circular de 30 s em RAM e corte em `-c copy`) e
+3 fps), **tracking** (§3.3, ByteTrack com filtro de Kalman, um ID por pessoa por
+câmera), **clipe** (§3.5, buffer circular de 30 s em RAM e corte em `-c copy`) e
 **fila local com envio** (§3.6, Redis + `POST /v1/events`, `PUT` do clipe e `PATCH`).
-Falta o miolo entre ver e decidir: tracking e o motor de regras (§3.3 e §3.4).
+Falta quem decide: o motor de regras (§3.4).
 
 Como nada dispara evento sozinho sem o motor de regras, o gatilho é andaime:
 `--trigger-after S`, `--trigger-every S` e `kill -USR1 <pid>`.
@@ -225,10 +226,27 @@ Isso põe `apps/agent/models/yolox_s.onnx` e `infra/videos/pessoas.mp4` no lugar
 `pnpm rtsp:up` precisa do vídeo para subir a cam3, e o modelo é o que os testes de
 marcador `modelo` e a flag `--model` procuram.
 
-**Sem GPU o estágio 2 roda, mas devagar:** YOLOX-s a 640 custa ~450 ms por frame em
-CPU, ou seja ~2 fps para uma câmera contra os 3 fps amostrados. Não é problema de
-configuração — é o descarte do §3.2 fazendo o que deve, e aparece como `descartados`
-subindo na linha `[detecção]`.
+**Sem GPU os estágios 2 e 3 rodam, mas devagar:** YOLOX-s a 640 custa ~450 ms por frame
+em CPU, e com o tracking na mesma thread a taxa medida fica em ~1,15 fps para uma
+câmera, contra os 3 fps amostrados. Não é problema de configuração — é o descarte do
+§3.2 fazendo o que deve, e aparece como `descartados` subindo na linha `[detecção]`.
+Nesse regime o tracking opera bem fora do ponto de projeto (o intervalo entre frames
+passa de 0,8 s), então espere mais fragmentação do que haveria no box da loja.
+
+### Vendo o tracking funcionar
+
+Troca de ID — o risco crítico do §3.3 — **não aparece em contador nenhum**: o número de
+tracks sobe igual quando o tracker acerta e quando erra. A verificação é visual:
+
+```bash
+uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 \
+  --model models/yolox_s.onnx --dump-tracks ./tracks --duration 45 --stats
+```
+
+Isso grava `tracks/tracks_<câmera>.mp4` com a caixa, os pés e o rastro de cada pessoa.
+Cada ID tem uma cor fixa: **se a cor de alguém muda no meio do percurso, houve troca de
+ID**. Os pés marcados são a `base_central`, o ponto que o §3.4 vai testar contra a linha
+de saída.
 
 ```bash
 pnpm rtsp:up
@@ -323,7 +341,10 @@ aberto, o ffmpeg não reclama, e nenhum frame sai.
 | Agente sobe com "não detecta nada" no log | faltou `--model` | é o comportamento pretendido sem modelo (§3.9); passe `--model models/yolox_s.onnx` |
 | `declara entrada de 416 e a configuração diz 640` | modelo e `--input-size` divergentes | ajuste `--input-size`; decodificar com o tamanho errado produz caixas plausíveis e erradas |
 | `o maior lado precisa ser exatamente 640` | resolução de decode incompatível com o modelo | ajuste `--width/--height` — o ffmpeg escala de graça no filtro que já existe |
-| `descartados` subindo na linha `[detecção]` | inferência mais lenta que os 3 fps amostrados | esperado sem GPU (~2 fps em CPU); é o *drop oldest* do §3.2 funcionando |
+| `descartados` subindo na linha `[detecção]` | inferência mais lenta que os 3 fps amostrados | esperado sem GPU (~1 fps em CPU com o tracking ligado); é o *drop oldest* do §3.2 funcionando |
+| `criados_por_minuto` muito acima do nº de pessoas | fragmentação: o tracker está quebrando uma pessoa em vários tracks | sem GPU é esperado (a taxa efetiva cai demais); com GPU, rode `--dump-tracks` e olhe |
+| Cor de uma pessoa muda no meio do vídeo anotado | troca de ID — o R-2 acontecendo | é o dado que a §10.7 espera; anote o trecho antes de mexer em limiar |
+| `0 fracas` na linha `[tracking]` | a segunda passada do ByteTrack nunca disparou | normal em vídeo bem iluminado; ela existe para oclusão e contraluz de loja |
 | Agente com `fila local recusou o evento` | Redis local fora do ar | é a fronteira de durabilidade do ADR-004: o evento se perde e o contador sobe. Suba o Redis ou use `--outbox memory` |
 | Agente em `reconnecting` com `404 Not Found` | o MediaMTX está no ar mas nenhum publisher está publicando naquele caminho | `pnpm rtsp:ps` — o container `lince-cam1` precisa estar `Up` |
 | `bind: address already in use` na 8554 | outro servidor RTSP na máquina | mude `RTSP_PORT` em `infra/.env` |
@@ -335,10 +356,11 @@ aberto, o ffmpeg não reclama, e nenhum frame sai.
 ```
 apps/api/          API Fastify + Prisma (control plane)   — vazio
 apps/dashboard/    Dashboard React PWA (triagem)          — vazio
-apps/agent/        Agente da borda em Python              — estágios 1, 2, 5 e 6
+apps/agent/        Agente da borda em Python              — estágios 1, 2, 3, 5 e 6
   src/lince_agent/ffmpeg/    montagem do comando, processo, pipes, parser fMP4
   src/lince_agent/ingest/    supervisão: reconexão, watchdog, saúde
   src/lince_agent/detect/    letterbox, sessão ONNX, decodificação, NMS, thread
+  src/lince_agent/track/     Kalman, associação ótima, ByteTrack, desenho
   src/lince_agent/clip/      buffer circular em RAM, corte, teto de disco
   src/lince_agent/outbox/    fila local, política de retry, cliente HTTP, envio
   src/lince_agent/runtime.py composição: é aqui que os estágios viram um processo

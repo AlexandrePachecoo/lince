@@ -13,6 +13,7 @@ from lince_agent.config import (
     DetectionOptions,
     HwAccel,
     PixelFormat,
+    TrackingOptions,
 )
 
 
@@ -206,3 +207,56 @@ def test_sem_deteccao_a_resolucao_nao_e_conferida(tmp_path):
         camera_id="cam1", url="rtsp://x", decode=DecodeOptions(width=1920, height=1080)
     )
     assert agente(tmp_path, cameras=(camera,)).detection.enabled is False
+
+
+# --- estágio 3: tracking (§3.3) ---------------------------------------------
+
+
+def test_tracking_nasce_ligado():
+    """Diferente da detecção, que precisa de um modelo no disco, o tracking não tem
+    pré-requisito nenhum: se há detecções, há o que rastrear."""
+    assert TrackingOptions().enabled is True
+
+
+def test_gate_de_track_novo_e_o_mais_frouxo_dos_tres():
+    """Não é descuido, é aritmética: um track recém-nascido não tem velocidade
+    estimada, então a previsão do Kalman é a caixa parada. A 3 fps uma pessoa andando
+    percorre ~55 px sobre uma caixa de 80, o que dá IoU de 0,19 — qualquer gate acima
+    disso faria o agente só rastrear quem está parado."""
+    opcoes = TrackingOptions()
+    assert opcoes.iou_min_novo < opcoes.iou_min < opcoes.iou_min_baixa
+
+
+def test_janelas_de_tempo_sao_em_segundos():
+    """As implementações de referência contam frames porque assumem 30 fps fixos. Aqui
+    a cadência é 3 fps e varia com o descarte do §3.2 — contar frames faria a tolerância
+    a oclusão mudar sozinha conforme a carga do box."""
+    assert TrackingOptions().max_perdido_s == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize("campo", ["high_threshold", "iou_min", "iou_min_baixa", "iou_min_novo"])
+def test_limiares_de_tracking_fora_de_0_1_sao_recusados(campo: str):
+    with pytest.raises(ValueError, match=campo):
+        TrackingOptions(**{campo: 1.4})
+
+
+def test_min_hits_precisa_de_ao_menos_uma_associacao():
+    with pytest.raises(ValueError, match="min_hits"):
+        TrackingOptions(min_hits=0)
+
+
+def test_janela_de_perdido_negativa_e_recusada():
+    with pytest.raises(ValueError, match="max_perdido_s"):
+        TrackingOptions(max_perdido_s=-1.0)
+
+
+def test_teto_de_tracks_precisa_ser_positivo():
+    with pytest.raises(ValueError, match="max_tracks"):
+        TrackingOptions(max_tracks=0)
+
+
+def test_piso_do_detector_e_menor_que_o_corte_do_tracker():
+    """A relação que faz o ByteTrack funcionar: o detector deixa passar caixas fracas
+    (piso 0,10) e o tracker é quem decide o que é pessoa (0,50). Inverter isso esconderia
+    do estágio 3 exatamente o dado de que ele mais precisa."""
+    assert DetectionOptions().score_threshold < TrackingOptions().high_threshold

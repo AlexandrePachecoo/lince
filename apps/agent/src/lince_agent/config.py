@@ -331,9 +331,18 @@ class DetectionOptions:
     §3.2 sem nenhum `if gpu`: num box sem placa, ou com o driver quebrado, o runtime
     simplesmente cai para o próximo da lista e o heartbeat reporta qual pegou (§10.10)."""
 
-    score_threshold: float = 0.35
-    """Confiança mínima. Baixar aumenta recall e alimenta o R-1; subir perde a pessoa
-    parcialmente ocluída, que o §3.3 esperava recuperar. **A validar por benchmark.**"""
+    score_threshold: float = 0.10
+    """**Piso**, não o limiar de decisão. Abaixo disto a caixa não vale nada para
+    ninguém; o corte que separa "é uma pessoa" de "talvez" mora no estágio 3
+    (`TrackingOptions.high_threshold`).
+
+    Este número já foi 0,35, e desceu quando o §3.3 entrou. Não é afrouxamento: o
+    ByteTrack existe justamente para aproveitar as caixas fracas, oferecendo-as **só** a
+    tracks que já existem, numa segunda passada de associação. É assim que a pessoa que
+    passa atrás de uma gôndola continua sendo a mesma pessoa em vez de virar um track
+    novo — e track que nasce do nada perto da saída é o falso positivo do R-2.
+
+    Manter 0,35 aqui esconderia do tracker exatamente o dado de que ele mais precisa."""
 
     iou_threshold: float = 0.45
     classes: tuple[int, ...] = (0,)
@@ -369,6 +378,84 @@ class DetectionOptions:
             raise ValueError(f"queue_size deve ser positivo, recebi {self.queue_size}")
         if self.fps_window < 2:
             raise ValueError(f"fps_window precisa de ao menos 2 amostras, recebi {self.fps_window}")
+
+
+@dataclass(frozen=True, slots=True)
+class TrackingOptions:
+    """Estágio 3 (§3.3). Um tracker por câmera, IDs locais e efêmeros.
+
+    Todas as janelas de tempo são **em segundos, não em frames**. As implementações de
+    referência contam frames porque assumem 30 fps fixos; aqui a cadência é 3 fps e
+    varia com o descarte do §3.2, então contar frames faria a tolerância a oclusão mudar
+    sozinha conforme a carga do box.
+    """
+
+    enabled: bool = True
+
+    high_threshold: float = 0.5
+    """Fronteira entre detecção confiável e detecção fraca. Acima dela, uma caixa pode
+    criar track; abaixo, ela só continua um track que já existia (§3.3, segunda passada
+    de associação). É este limiar que preserva a precisão depois de o piso do detector
+    ter descido para 0,10 — ver `DetectionOptions.score_threshold`."""
+
+    iou_min: float = 0.20
+    """Gate da primeira passada. Frouxo, e o motivo é aritmética de loja:
+
+    uma pessoa a 1,4 m/s, com 1,70 m ocupando 200 px, percorre ~55 px entre dois frames
+    a 3 fps. A caixa de alguém em pé tem cerca de 0,4 da altura, ou 80 px. Duas caixas de
+    80 px deslocadas de 55 têm **IoU de 0,19** — e são a mesma pessoa.
+
+    Os limiares de 0,3 a 0,5 que aparecem em toda implementação de referência assumem
+    30 fps, onde o deslocamento entre frames é de poucos pixels. Copiá-los para cá faria
+    o tracker perder justamente quem anda rápido — que numa loja é quem está saindo.
+
+    Aqui o gate é frouxo porque a comparação não é contra a caixa antiga: é contra a
+    previsão do Kalman, que já andou junto com a pessoa."""
+
+    iou_min_baixa: float = 0.40
+    """Gate da segunda passada, **mais apertado** que o da primeira. A detecção fraca já
+    é duvidosa; exigir dela concordância geométrica melhor é o que impede uma sombra de
+    sequestrar um track. Ainda assim abaixo dos 0,5 da referência, pela mesma aritmética
+    de `iou_min`."""
+
+    iou_min_novo: float = 0.10
+    """Gate de um track ainda provisório, e o mais frouxo dos três **de propósito**.
+
+    Um track recém-nascido não tem velocidade estimada, então a previsão do Kalman é a
+    caixa parada no lugar de antes — sem nada para compensar os 55 px que a pessoa andou.
+    É exatamente o número calculado em `iou_min`: com gate acima de 0,19, uma pessoa
+    andando em ritmo normal nunca chega a formar um track, e o agente só rastrearia quem
+    está parado."""
+
+    min_hits: int = 2
+    """Associações até um track valer como pessoa. Piso do tracker, não o filtro de
+    verdade: o "tempo mínimo de vida do track" do §3.3 é limiar por câmera e mora no
+    §3.4, que recebe `age_s` e `hits` e decide (ADR-002)."""
+
+    max_perdido_s: float = 2.0
+    """Quanto tempo um track sobrevive sem detecção antes de encerrar. A 3 fps são uns
+    seis frames — o bastante para alguém passar atrás de uma gôndola e voltar sendo a
+    mesma pessoa, e pouco o bastante para não colar o ID de quem saiu em quem entrou."""
+
+    max_tracks: int = 64
+    """Teto defensivo por câmera. Uma câmera apontada para a rua, ou o modelo alucinando
+    numa cena difícil, não pode fazer o agente crescer sem limite."""
+
+    def __post_init__(self) -> None:
+        for nome, valor in (
+            ("high_threshold", self.high_threshold),
+            ("iou_min", self.iou_min),
+            ("iou_min_baixa", self.iou_min_baixa),
+            ("iou_min_novo", self.iou_min_novo),
+        ):
+            if not 0.0 <= valor <= 1.0:
+                raise ValueError(f"{nome} deve estar entre 0 e 1, recebi {valor}")
+        if self.min_hits < 1:
+            raise ValueError(f"min_hits deve ser ao menos 1, recebi {self.min_hits}")
+        if self.max_perdido_s < 0:
+            raise ValueError(f"max_perdido_s não pode ser negativo, recebi {self.max_perdido_s}")
+        if self.max_tracks < 1:
+            raise ValueError(f"max_tracks deve ser positivo, recebi {self.max_tracks}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,6 +510,7 @@ class AgentConfig:
     outbox: OutboxOptions = field(default_factory=OutboxOptions)
     cloud: CloudOptions = field(default_factory=CloudOptions)
     detection: DetectionOptions = field(default_factory=DetectionOptions)
+    tracking: TrackingOptions = field(default_factory=TrackingOptions)
     ffmpeg_bin: str = "ffmpeg"
 
     def __post_init__(self) -> None:

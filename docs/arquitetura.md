@@ -313,11 +313,40 @@ local, efêmero e descartado ao fim do track.
 ID no meio do percurso quebra a premissa do motor de regras: a pessoa "some" no
 caixa e "nasce" na linha de saída sem histórico, produzindo falso positivo.
 
+**A escolha do tracker segue aberta.** O R-2 manda avaliar alternativa com dado real
+antes de fechar, e por isso não há ADR: o que existe é ByteTrack com filtro de Kalman e
+atribuição ótima (`scipy.optimize.linear_sum_assignment`), suficiente para produzir os
+dados que a decisão exige.
+
+**Rodar a 3 fps muda dois parâmetros que toda implementação de referência trata como
+constantes**, e errar qualquer um dos dois é silencioso:
+
+- **O `dt` do filtro é tempo real, não "um frame".** A fila do §3.2 descarta o frame
+  mais antigo quando a inferência não acompanha, então o intervalo entre frames que
+  chegam ao tracking varia com a carga do box. Com `dt` fixo, a extrapolação de
+  velocidade erra exatamente quando o box está saturado.
+- **Os limiares de IoU precisam ser mais frouxos.** Uma pessoa a 1,4 m/s, com 1,70 m
+  ocupando 200 px, percorre ~55 px entre frames a 3 fps; sobre uma caixa de 80 px de
+  largura isso dá **IoU de 0,19**. Os 0,3 a 0,5 usuais assumem 30 fps e fariam o agente
+  perder justamente quem anda rápido — que numa loja é quem está saindo. Quem sustenta a
+  associação é a previsão do Kalman, não a sobreposição das caixas cruas.
+
+Pelo mesmo motivo, **toda janela de tempo é configurada em segundos**, não em frames.
+
+**Detecção fraca nunca cria track.** O §3.2 baixou o piso do detector para 0,10 para
+alimentar a segunda passada de associação do ByteTrack, que oferece as caixas duvidosas
+**apenas** a tracks já existentes. É o que trata a oclusão curta — a pessoa que passa
+atrás de uma gôndola continua sendo a mesma pessoa — sem deixar uma sombra virar gente.
+
+**O filtro do tempo mínimo de vida não mora aqui.** O tracker expõe `age_s` e `hits`; o
+limiar é configuração por câmera e é o §3.4 que decide (ADR-002).
+
 **Falhas esperadas**
 
 | Falha | Comportamento |
 |---|---|
-| Troca de ID (*ID switch*) em cruzamento de pessoas | Falso positivo ou falso negativo; sem mitigação automática no v1 |
+| Troca de ID (*ID switch*) em cruzamento de pessoas | Falso positivo ou falso negativo; sem mitigação automática no v1. A atribuição é ótima e não gulosa justamente para reduzir a frequência |
+| Reconexão da câmera no meio de um track | Todos os tracks daquela câmera são encerrados: a câmera pode ter sido reposicionada, e um track com a posição da cena antiga associaria a primeira pessoa que aparecesse no lugar errado |
 | Track perdido por oclusão longa | Track expira; reaparição vira track novo |
 | Fragmentação em corredor cheio | Múltiplos tracks curtos para a mesma pessoa |
 | Objetos estáticos detectados como pessoa | Filtro por tempo mínimo de vida do track antes de valer para regra |
@@ -718,10 +747,21 @@ Lista viva do que só se resolve com hardware e vídeo da loja piloto:
 1. Taxa real de frames entregue pelas câmeras no substream (base do dimensionamento de decode).
 2. Custo de inferência por frame no box de referência → nº máximo de câmeras por loja.
 3. Latência ponta a ponta medida por etapa (§3.7).
-4. Adequação de 3 fps para a travessia da linha de saída.
+4. Adequação de 3 fps para a travessia da linha de saída. **Primeiro dado:** a 3 fps a
+   IoU entre caixas cruas consecutivas de uma pessoa andando é ~0,19, o que torna a
+   associação inviável sem a previsão do Kalman e exige limiares mais frouxos que os de
+   qualquer implementação de referência (§3.3). A margem é estreita; se o piloto mostrar
+   troca de ID demais, aumentar a taxa nas câmeras de saída é a primeira alavanca.
 5. Valor inicial de N segundos na zona do caixa, por layout de loja.
 6. Janela de supressão de duplicados.
-7. Taxa de ID switch do tracker escolhido em vídeo real de corredor cheio.
+7. Taxa de ID switch do tracker escolhido em vídeo real de corredor cheio. Medi-la exige
+   *ground truth*, que só existe com vídeo de loja anotado. O que já é observável sem
+   isso: `criados_por_minuto` e `vida_media_s` por câmera no heartbeat (fragmentação), e
+   o vídeo anotado do `--dump-tracks`, em que cada pessoa tem uma cor e uma troca de ID
+   aparece como a cor mudando no meio do percurso.
+   Pendência irmã: a segunda passada de associação (detecções fracas) ainda não foi
+   exercitada em condição real — no vídeo de teste, bem iluminado, ela nunca dispara. O
+   ganho dela só aparece com oclusão e contraluz de loja.
 8. Consumo de RAM do buffer circular de 30 s × N câmeras.
 9. ~~Escolha final entre SQLite e Redis para a fila local.~~ **Fechada: Redis** (§3.6, ADR-004).
 10. Comportamento do estágio de detecção quando a GPU cai: fallback em CPU ou parada
@@ -729,7 +769,11 @@ Lista viva do que só se resolve com hardware e vídeo da loja piloto:
     reportado; falta a política. **Primeiro dado real, numa máquina de desenvolvimento
     sem GPU:** YOLOX-s a 640 custa ~450 ms por frame em CPU, ou seja ~2 fps para **uma**
     câmera, contra os 3 fps amostrados. O fallback em CPU não é degradação suave — não
-    sustenta nem uma câmera, e o descarte começa imediatamente.
+    sustenta nem uma câmera, e o descarte começa imediatamente. Com o estágio 3 ligado na
+    mesma thread, a taxa medida cai para ~1,15 fps e a fila fica permanentemente cheia:
+    o intervalo entre frames rastreados passa de 0,8 s, e nesse regime o tracking opera
+    muito fora do ponto de projeto. Reforça a leitura de que o fallback em CPU deveria
+    ser **parada com alerta técnico**, não operação degradada.
 11. Rolls de clipe por câmera. Hoje o `ClipRecorder` tem um pré/pós-roll para o
     agente inteiro e a subida falha se as câmeras divergirem. Uma câmera de saída com
     GOP longo pode precisar de outra tolerância que a do corredor (§3.4) — resolver

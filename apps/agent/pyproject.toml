@@ -12,6 +12,10 @@ dependencies = [
     # é exatamente o que o `GET /v1/models/current` do §5.2 distribui com checksum.
     # Um framework de treino traria gigabytes que só servem para treinar.
     "onnxruntime>=1.20",
+    # Só por `linear_sum_assignment`, a atribuição ótima do §3.3. Parece exagero para
+    # uma função, e não é: um solver de atribuição escrito à mão é código crítico a mais
+    # para uma pessoa só manter (R-11), e um erro sutil nele **é** o R-2.
+    "scipy>=1.14",
 ]
 
 [project.scripts]

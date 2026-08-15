@@ -7,11 +7,11 @@ câmeras de CFTV já instaladas na loja.
 evento (JSON) e um clipe de ~15 s. O sistema não decide nada sozinho: todo alerta
 passa por triagem humana.
 
-> **Status:** agente com os estágios 1 (ingestão RTSP, §3.1), 2 (detecção, §3.2), 5
-> (clipe, §3.5) e 6 (fila local e envio, §3.6) ligados ponta a ponta — o caminho
-> gatilho → clipe → fila → nuvem funciona, e o detector já emite caixas de pessoas,
-> com gatilho de andaime no lugar do motor de regras.
-> Tracking, regras, API e dashboard ainda não existem.
+> **Status:** agente com os estágios 1 (ingestão RTSP, §3.1), 2 (detecção, §3.2), 3
+> (tracking, §3.3), 5 (clipe, §3.5) e 6 (fila local e envio, §3.6) ligados ponta a
+> ponta — o caminho gatilho → clipe → fila → nuvem funciona, e a borda já dá a cada
+> pessoa um ID que atravessa frames. Falta quem **decide**: o motor de regras (§3.4),
+> hoje substituído por um gatilho de andaime. API e dashboard ainda não existem.
 > Leia [`docs/arquitetura.md`](docs/arquitetura.md) antes de escrever código, e
 > [`CLAUDE.md`](CLAUDE.md) para as convenções — em especial a regra de que toda
 > função nova precisa de teste automatizado.
@@ -58,16 +58,23 @@ uv run pytest -m modelo                                          # exige `script
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 --stats
 ```
 
-Para ver a detecção funcionando, aponte para a `cam3` — a única das três câmeras
-sintéticas que publica vídeo com pessoas de verdade, em loop:
+Para ver a detecção e o tracking funcionando, aponte para a `cam3` — a única das três
+câmeras sintéticas que publica vídeo com pessoas de verdade, em loop:
 
 ```bash
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 \
-  --model models/yolox_s.onnx --stats
+  --model models/yolox_s.onnx --dump-tracks ./tracks --duration 45 --stats
 ```
 
 A linha `[detecção]` mostra o modelo, o *execution provider* que de fato pegou, a
-profundidade da fila e, por câmera, a taxa de inferência e quantas caixas saíram.
+profundidade da fila e, por câmera, a taxa de inferência e quantas caixas saíram. A
+`[tracking]` mostra quantas pessoas estão em quadro e `criados_por_minuto`, que é o
+sinal de fragmentação.
+
+O `--dump-tracks` grava `tracks/tracks_<câmera>.mp4` com as caixas, os pés e o rastro de
+cada pessoa. **É assim que se verifica o estágio 3**: troca de ID não aparece em
+contador nenhum, mas no vídeo cada pessoa tem uma cor — se a cor muda no meio do
+percurso, houve troca (R-2).
 
 Para ver o caminho inteiro — corte do clipe, fila local e envio — sem uma API do
 outro lado:
@@ -79,8 +86,8 @@ uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 \
 
 O gatilho é andaime: o motor de regras (§3.4) ainda não existe, então `--trigger-after`,
 `--trigger-every` e `kill -USR1` ocupam o lugar dele. Os eventos que eles produzem
-sobem marcados como `source: "manual"`. A detecção já roda, mas ninguém decide nada com
-ela ainda — faltam o tracking (§3.3) e as regras (§3.4) entre uma coisa e outra.
+sobem marcados como `source: "manual"`. A borda já vê e já sabe quem é quem, mas nada
+decide nada — falta a máquina de estados que avalia zonas e tempos por track.
 
 **Primeira vez, ou numa máquina nova?** O passo a passo completo — instalação por
 sistema operacional, verificação e troubleshooting — está em

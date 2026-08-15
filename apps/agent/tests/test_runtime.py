@@ -32,6 +32,7 @@ from lince_agent.config import (
     DetectionOptions,
     OutboxOptions,
     RetryOptions,
+    TrackingOptions,
 )
 from lince_agent.ffmpeg.fmp4 import Fmp4Parser, Fragment, InitSegment
 from lince_agent.ffmpeg.process import IngestCallbacks
@@ -168,6 +169,8 @@ class Agente:
         cliente=None,
         detector=None,
         inelegiveis: tuple[str, ...] = (),
+        on_tracking=None,
+        tracking: bool = True,
     ):
         self.relogio = RelogioFalso()
         self.parede = RelogioFalso(1_700_000_000.0)
@@ -196,6 +199,7 @@ class Agente:
             clips_dir=tmp_path / "clipes",
             outbox=OPCOES_FILA,
             cloud=CloudOptions(api_url="http://nuvem.invalida"),
+            tracking=TrackingOptions(enabled=tracking, min_hits=1),
         )
         self.clipes = ClipStore(self.config.clips_dir, max_bytes=CORTE.max_disk_bytes)
 
@@ -218,6 +222,7 @@ class Agente:
             supervisor_factory=self._fabrica,
             recorder=self.recorder,
             detector=detector,
+            on_tracking=on_tracking,
         )
         # O recorder foi construído com o `on_result` do teste, então encadeamos: o
         # runtime precisa continuar recebendo o resultado, senão nada é enfileirado.
@@ -740,5 +745,88 @@ def test_detector_falho_nao_derruba_o_caminho_do_clipe(tmp_path, sessao_longa):
         montado.relogio.agora = 1.0
         montado.runtime.trigger("cam1", at=1.0)
         assert montado.espera_clipe().status is ClipStatus.OK
+    finally:
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+# --- estágio 3: tracking ----------------------------------------------------
+
+
+def test_deteccao_vira_track_com_identidade(tmp_path):
+    """O caminho novo: frame → detector → tracker → gancho do §3.4. O que sai não são
+    mais caixas soltas, é a mesma pessoa com um ID que atravessa frames."""
+    rastreados: list = []
+    detector = DetectorFalso((pessoa(),))
+    montado = Agente(tmp_path, detector=detector, on_tracking=rastreados.append)
+    montado.runtime.start()
+    try:
+        for sequencia in range(1, 4):
+            detector.chamou.clear()
+            montado.alimenta_frame("cam1", quadro(sequencia, received_at=sequencia / 3))
+            assert detector.chamou.wait(PRAZO_S)
+        assert _ate(lambda: len(rastreados) == 3)
+
+        ids = {track.track_id for resultado in rastreados for track in resultado.tracks}
+        assert ids == {1}, "a mesma detecção em frames seguidos é uma pessoa só"
+        assert rastreados[-1].camera_id == "cam1"
+        assert rastreados[-1].sequence == 3
+    finally:
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+def test_health_expoe_a_fragmentacao_por_camera(tmp_path):
+    """`criados_por_minuto` é o mais perto que dá para chegar do R-2 sem ground truth, e
+    precisa estar no mesmo lugar que o resto da telemetria do §5.3."""
+    detector = DetectorFalso((pessoa(),))
+    montado = Agente(tmp_path, detector=detector)
+    montado.runtime.start()
+    try:
+        montado.alimenta_frame("cam1", quadro(1))
+        assert detector.chamou.wait(PRAZO_S)
+        assert _ate(lambda: montado.runtime.health().tracker.criados == 1)
+
+        saude = montado.runtime.health().tracker
+        assert saude.enabled is True
+        assert [c.camera_id for c in saude.cameras] == ["cam1"]
+    finally:
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+def test_camera_inelegivel_nao_aparece_no_tracking(tmp_path):
+    """Mesma regra do estágio 2: a câmera que o R-3 marcou continua ingerindo e
+    gravando clipe, e some do tracking junto com a inferência."""
+    montado = Agente(
+        tmp_path,
+        cameras=("cam1", "cam2"),
+        detector=DetectorFalso((pessoa(),)),
+        inelegiveis=("cam2",),
+    )
+    montado.runtime.start()
+    try:
+        assert [c.camera_id for c in montado.runtime.health().tracker.cameras] == ["cam1"]
+    finally:
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+def test_tracking_desligado_nao_quebra_o_caminho_do_clipe(tmp_path, sessao_longa):
+    """O §5.4 vale para o pipeline inteiro: nada no caminho de ver pode parar o caminho
+    de alertar."""
+    init, fragmentos = sessao_longa
+    rastreados: list = []
+    montado = Agente(
+        tmp_path,
+        detector=DetectorFalso((pessoa(),)),
+        on_tracking=rastreados.append,
+        tracking=False,
+    )
+    montado.runtime.start()
+    try:
+        montado.alimenta("cam1", init, fragmentos[:20])
+        montado.alimenta_frame("cam1", quadro(1))
+        montado.relogio.agora = 1.0
+        montado.runtime.trigger("cam1", at=1.0)
+
+        assert montado.espera_clipe().status is ClipStatus.OK
+        assert rastreados == []
     finally:
         montado.runtime.stop(timeout=PRAZO_S)
