@@ -39,6 +39,7 @@ from lince_agent.config import (
     HwAccel,
     OutboxOptions,
     PixelFormat,
+    RuleOptions,
     TrackingOptions,
 )
 from lince_agent.detect.state import DetectorStats
@@ -50,11 +51,45 @@ from lince_agent.ingest.supervisor import CameraSupervisor
 from lince_agent.outbox.http import CloudResponse, HttpCloudClient
 from lince_agent.outbox.state import OutboxStats
 from lince_agent.outbox.store import MemoryOutbox, OutboxStore
+from lince_agent.rules.geometry import LinhaOrientada, Poligono
+from lince_agent.rules.state import RuleStats
 from lince_agent.runtime import AgentHealth, AgentRuntime
 from lince_agent.track.draw import Rastros, desenha
 from lince_agent.track.state import TrackerStats, TrackingResult
 
 log = logging.getLogger("lince_agent")
+
+
+def _pares(texto: str) -> tuple[tuple[float, float], ...]:
+    """`x1,y1,x2,y2,...` em pontos. Formato achatado para não exigir aspas no shell."""
+    try:
+        numeros = [float(parte) for parte in texto.split(",")]
+    except ValueError as erro:
+        raise argparse.ArgumentTypeError(f"{texto!r} não é uma lista de números") from erro
+    if len(numeros) < 2 or len(numeros) % 2:
+        raise argparse.ArgumentTypeError(
+            f"{texto!r} tem {len(numeros)} números: precisa de um par x,y por vértice"
+        )
+    return tuple((numeros[i], numeros[i + 1]) for i in range(0, len(numeros), 2))
+
+
+def _linha_orientada(texto: str) -> LinhaOrientada:
+    pontos = _pares(texto)
+    if len(pontos) != 2:
+        raise argparse.ArgumentTypeError(
+            f"a linha de saída são dois pontos (X1,Y1,X2,Y2); recebi {len(pontos)}"
+        )
+    try:
+        return LinhaOrientada(origem=pontos[0], destino=pontos[1])
+    except ValueError as erro:
+        raise argparse.ArgumentTypeError(str(erro)) from erro
+
+
+def _poligono(texto: str) -> Poligono:
+    try:
+        return Poligono(_pares(texto))
+    except ValueError as erro:
+        raise argparse.ArgumentTypeError(str(erro)) from erro
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -172,7 +207,37 @@ def build_parser() -> argparse.ArgumentParser:
         "Cor por ID: troca de cor no meio do percurso é troca de ID (R-2)",
     )
 
-    andaime = parser.add_argument_group("andaime do gatilho (o estágio 4 não existe)")
+    estagio4 = parser.add_argument_group("estágio 4 — motor de regras (§3.4)")
+    estagio4.add_argument(
+        "--linha-saida",
+        type=_linha_orientada,
+        metavar="X1,Y1,X2,Y2",
+        help="linha de saída, orientada: desenhe da esquerda para a direita e o lado de "
+        "dentro da loja fica embaixo (y maior). Cruzar de dentro para fora dispara",
+    )
+    estagio4.add_argument(
+        "--zona-caixa",
+        type=_poligono,
+        action="append",
+        metavar="X1,Y1,X2,Y2,X3,Y3...",
+        help="polígono da zona de caixa; repita a opção para mais de uma posição",
+    )
+    estagio4.add_argument(
+        "--tempo-caixa",
+        type=float,
+        default=RuleOptions().tempo_caixa_min_s,
+        metavar="S",
+        help="o N da regra: cruzar a saída com menos de S s no caixa é possível ocorrência",
+    )
+    estagio4.add_argument(
+        "--vida-minima",
+        type=float,
+        default=RuleOptions().vida_min_s,
+        metavar="S",
+        help="idade mínima do track para valer para regra; é a defesa contra troca de ID (R-2)",
+    )
+
+    andaime = parser.add_argument_group("andaime do gatilho (para exercitar sem zonas)")
     andaime.add_argument("--trigger-after", type=float, metavar="S", help="um gatilho após S s")
     andaime.add_argument(
         "--trigger-every",
@@ -240,6 +305,25 @@ def _monta_deteccao(args: argparse.Namespace) -> DetectionOptions:
         providers=tuple(args.providers) if args.providers else padrao.providers,
         score_threshold=args.score_threshold,
         iou_threshold=args.iou_threshold,
+    )
+
+
+def _monta_regras(args: argparse.Namespace) -> RuleOptions:
+    """Zonas vindas da linha de comando — o lugar de onde elas **não** vêm em produção.
+
+    Em produção isto desce da nuvem versionado (§5.2), desenhado sobre o frame no
+    dashboard (§4.5). Aqui as coordenadas são digitadas à mão porque o estágio precisa
+    ser verificável contra a `cam3` antes de existir API do outro lado. Sem nenhuma das
+    duas opções, o motor fica desligado e o andaime de gatilho continua sendo o caminho.
+    """
+    if args.linha_saida is None and not args.zona_caixa:
+        return RuleOptions()
+    return RuleOptions(
+        enabled=True,
+        linha_saida=args.linha_saida,
+        zonas_caixa=tuple(args.zona_caixa or ()),
+        tempo_caixa_min_s=args.tempo_caixa,
+        vida_min_s=args.vida_minima,
     )
 
 
@@ -331,6 +415,36 @@ def _format_tracking(stats: TrackerStats) -> str:
         for camera in stats.cameras
     )
     return f"[tracking] criados={stats.criados} encerrados={stats.encerrados}  {por_camera}"
+
+
+def _format_regras(stats: RuleStats) -> str:
+    """A linha do estágio 4, e os números a vigiar são os de **descarte**.
+
+    `pagou` deveria dominar tudo: numa loja de bairro, quase todo mundo que sai passou
+    pelo caixa. Se ele estiver perto de zero e os eventos subindo, a zona do caixa está
+    errada ou fora do quadro. Se `vida_curta` estiver alto, o problema é o tracker
+    fragmentando (R-2) e mexer no N não vai adiantar.
+
+    `caixa medio` é o dado que calibra o N por layout de loja (§10.5): compare-o com o
+    limiar configurado antes de deixar a primeira notificação sair.
+    """
+    if not stats.enabled:
+        return "[regras] sem zonas desenhadas (gatilho só por andaime)"
+
+    por_camera = "  ".join(
+        f"{camera.camera_id}="
+        + (
+            f"{camera.acompanhados} acompanhados ({camera.no_caixa} no caixa), "
+            f"saídas={camera.travessias_saida} entradas={camera.travessias_entrada}, "
+            f"descartes: {camera.descartados_pagou} pagou / "
+            f"{camera.descartados_vida_curta} vida curta, "
+            f"caixa médio {camera.tempo_caixa_medio_s:4.1f}s"
+            if camera.configurada
+            else "sem zonas"
+        )
+        for camera in stats.cameras
+    )
+    return f"[regras] eventos={stats.eventos}  {por_camera}"
 
 
 class _TrackDumper:
@@ -480,16 +594,31 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     opcoes_fila = OutboxOptions(redis_url=args.redis_url)
-    config = AgentConfig(
-        tenant_id=args.tenant_id,
-        store_id=args.store_id,
-        cameras=(CameraConfig(camera_id=args.camera_id, url=args.camera, decode=decode),),
-        clips_dir=args.clips_dir,
-        outbox=opcoes_fila,
-        cloud=CloudOptions(api_url=args.api_url, token=args.api_token),
-        detection=_monta_deteccao(args),
-        tracking=_monta_tracking(args),
-    )
+    try:
+        config = AgentConfig(
+            tenant_id=args.tenant_id,
+            store_id=args.store_id,
+            cameras=(
+                CameraConfig(
+                    camera_id=args.camera_id,
+                    url=args.camera,
+                    decode=decode,
+                    rules=_monta_regras(args),
+                ),
+            ),
+            clips_dir=args.clips_dir,
+            outbox=opcoes_fila,
+            cloud=CloudOptions(api_url=args.api_url, token=args.api_token),
+            detection=_monta_deteccao(args),
+            tracking=_monta_tracking(args),
+        )
+    except ValueError as erro:
+        # A configuração recusa na subida o que causaria falso positivo em massa: zona
+        # fora do quadro, regra sem zona de caixa, resolução que não bate com o modelo.
+        # As mensagens explicam o que fazer — um traceback as enterraria justamente
+        # para quem está desenhando zonas pela primeira vez.
+        log.error("configuração inválida: %s", erro)
+        return 2
     fila = _monta_fila(args, opcoes_fila)
     cliente = (
         ClienteSeco()
@@ -546,6 +675,7 @@ def main(argv: list[str] | None = None) -> int:
                     print(_format_health(camera, decode.frame_bytes), flush=True)  # noqa: T201
                 print(_format_deteccao(saude.detector), flush=True)  # noqa: T201
                 print(_format_tracking(saude.tracker), flush=True)  # noqa: T201
+                print(_format_regras(saude.rules), flush=True)  # noqa: T201
                 print(_format_outbox(saude.outbox, saude), flush=True)  # noqa: T201
             finished.wait(1.0)
     finally:

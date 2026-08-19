@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from lince_agent.rules.geometry import LinhaOrientada, Poligono
+
 
 class PixelFormat(StrEnum):
     """Formato dos frames que saem no pipe de detecção.
@@ -459,12 +461,116 @@ class TrackingOptions:
 
 
 @dataclass(frozen=True, slots=True)
+class RuleOptions:
+    """Estágio 4 (§3.4). Zonas e limiares **por câmera** — é aqui que o ADR-002 vira
+    dado.
+
+    Nada neste bloco é constante de código, e não pode ser: recalibrar uma loja tem que
+    ser mudar configuração, não retreinar rede nem republicar imagem. Em produção isto
+    desce da nuvem pelo `GET /v1/agents/config` (§5.2), versionado, e a `rule_version`
+    viaja junto no evento para que uma taxa histórica de falso positivo signifique
+    alguma coisa (§6).
+
+    Os números são **hipóteses de projeto**, não medições — como todo limiar da
+    arquitetura. `tempo_caixa_min_s` em particular é a pendência §10.5, e o
+    `tempo_caixa_medio_s` do heartbeat existe para resolvê-la com dado da loja.
+    """
+
+    enabled: bool = False
+    """Desligado por padrão: sem zonas desenhadas não há o que decidir, e o agente
+    continua sendo ingestão, detecção, tracking e gatilho manual."""
+
+    rule_id: str = "saida-sem-caixa"
+    rule_version: int = 1
+    """Sobe no evento. Formato restrito ao `identifier` do contrato (§5)."""
+
+    linha_saida: LinhaOrientada | None = None
+    zonas_caixa: tuple[Poligono, ...] = ()
+    """Mais de uma porque mercado de bairro tem duas ou três posições de caixa, e
+    obrigar a desenhar um polígono só engolindo o corredor entre elas transformaria o
+    corredor em zona de caixa — quem passa direto sairia descartado."""
+
+    tempo_caixa_min_s: float = 8.0
+    """O **N** da regra principal: cruzou a saída sem ter ficado N segundos no caixa.
+    Por layout de loja, a validar com dado real (§10.5)."""
+
+    vida_min_s: float = 2.0
+    """Tempo mínimo de vida do track antes de ele valer para regra (§3.3, §3.4).
+
+    É a defesa contra o R-2 e o número mais delicado daqui. Baixo demais, um track que
+    nasceu de troca de ID perto da porta vira alerta; alto demais, quem entra correndo
+    e sai correndo nunca é avaliado. A 3 fps, 2 s são uns seis frames."""
+
+    hits_min: int = 3
+    """Associações mínimas, junto com `vida_min_s`. Os dois, e não só o tempo: um track
+    perdido quase o tempo todo envelhece sem nunca ter sido visto de verdade."""
+
+    intervalo_max_s: float = 1.0
+    """Teto do intervalo creditado ao tempo de caixa entre duas amostras.
+
+    Sem ele, uma oclusão longa dentro da zona credita todo o tempo ocluído como tempo
+    de caixa, e a pessoa sai descartada por um crédito que ninguém observou. O teto
+    empurra o erro para o lado seguro do produto: na dúvida, o tempo de caixa é
+    subestimado e o evento **sobe** para triagem humana."""
+
+    janela_tempo_caixa: int = 64
+    """Travessias consideradas na média de `tempo_caixa_medio_s`. Janela, e não média
+    desde a subida, pelo mesmo motivo do `inference_fps` do §3.2."""
+
+    def __post_init__(self) -> None:
+        if not self.enabled:
+            return
+        if self.linha_saida is None:
+            raise ValueError(
+                "regra habilitada exige linha_saida: sem a linha não existe travessia, "
+                "e a regra principal do §3.4 é sobre a travessia"
+            )
+        if not self.zonas_caixa:
+            # Recusar é o ponto. A regra compara tempo numa zona que não existe: todo
+            # mundo teria zero, e toda saída da loja viraria alerta. Um agente que
+            # subisse assim alertaria a loja inteira até alguém desligar a notificação,
+            # que é exatamente como o R-1 mata o produto.
+            raise ValueError(
+                "regra habilitada exige ao menos uma zona de caixa: sem ela o tempo no "
+                "caixa é sempre zero e toda saída da loja vira alerta (R-1)"
+            )
+        if self.tempo_caixa_min_s <= 0:
+            raise ValueError(
+                f"tempo_caixa_min_s deve ser positivo, recebi {self.tempo_caixa_min_s}: "
+                "com zero, nenhuma travessia jamais dispara e a câmera fica muda"
+            )
+        if self.vida_min_s < 0:
+            raise ValueError(f"vida_min_s não pode ser negativo, recebi {self.vida_min_s}")
+        if self.hits_min < 1:
+            raise ValueError(f"hits_min deve ser ao menos 1, recebi {self.hits_min}")
+        if self.intervalo_max_s <= 0:
+            raise ValueError(f"intervalo_max_s deve ser positivo, recebi {self.intervalo_max_s}")
+        if self.janela_tempo_caixa < 1:
+            raise ValueError(
+                f"janela_tempo_caixa deve ser positiva, recebi {self.janela_tempo_caixa}"
+            )
+
+    @property
+    def pontos(self) -> tuple[tuple[float, float], ...]:
+        """Todo vértice e ponta de linha, para quem precisa conferir os limites."""
+        pontos: list[tuple[float, float]] = []
+        if self.linha_saida is not None:
+            pontos.extend((self.linha_saida.origem, self.linha_saida.destino))
+        for zona in self.zonas_caixa:
+            pontos.extend(zona.vertices)
+        return tuple(pontos)
+
+
+@dataclass(frozen=True, slots=True)
 class CameraConfig:
     camera_id: str
     url: str
     decode: DecodeOptions = field(default_factory=DecodeOptions)
     supervision: SupervisionOptions = field(default_factory=SupervisionOptions)
     clip: ClipOptions = field(default_factory=ClipOptions)
+    rules: RuleOptions = field(default_factory=RuleOptions)
+    """Zonas e limiares desta câmera (§3.4). Por câmera, não por loja: a linha de
+    saída de uma é o corredor da outra."""
 
     detect: bool = True
     """Se esta câmera é elegível para IA. O R-3 prevê câmeras com ângulo, altura ou
@@ -476,6 +582,38 @@ class CameraConfig:
             raise ValueError("camera_id é obrigatório")
         if not self.url:
             raise ValueError("url é obrigatória")
+        self._valida_regras()
+
+    def _valida_regras(self) -> None:
+        """Recusa na subida a zona que nunca conteria ninguém.
+
+        As zonas são desenhadas sobre um frame no dashboard (§4.5) e avaliadas contra
+        as caixas que saem do §3.2 — que estão no espaço do frame **decodificado**.
+        Quando os dois não são a mesma resolução, nada falha: o polígono cai fora do
+        quadro, `contem` devolve `False` para todo mundo, e a câmera passa a alertar
+        para a loja inteira porque ninguém nunca esteve no caixa. É o caminho mais
+        curto do sistema até o R-1, e o único sintoma seria o volume de alertas.
+        """
+        if not self.rules.enabled:
+            return
+        if not self.detect:
+            raise ValueError(
+                f"câmera {self.camera_id} tem regra habilitada e detect=False: sem "
+                "detecção não há track, e sem track a regra nunca avalia nada"
+            )
+        largura, altura = self.decode.width, self.decode.height
+        fora = [
+            ponto
+            for ponto in self.rules.pontos
+            if not (0 <= ponto[0] <= largura and 0 <= ponto[1] <= altura)
+        ]
+        if fora:
+            raise ValueError(
+                f"câmera {self.camera_id} decodifica em {largura}x{altura} e tem zonas "
+                f"com pontos fora do quadro: {fora}. As zonas foram desenhadas sobre um "
+                "frame de outra resolução? Uma zona fora do quadro não contém ninguém, "
+                "e aí toda saída da loja vira alerta (R-1)"
+            )
 
 
 @dataclass(frozen=True, slots=True)

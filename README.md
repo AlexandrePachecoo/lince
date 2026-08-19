@@ -7,11 +7,11 @@ câmeras de CFTV já instaladas na loja.
 evento (JSON) e um clipe de ~15 s. O sistema não decide nada sozinho: todo alerta
 passa por triagem humana.
 
-> **Status:** agente com os estágios 1 (ingestão RTSP, §3.1), 2 (detecção, §3.2), 3
-> (tracking, §3.3), 5 (clipe, §3.5) e 6 (fila local e envio, §3.6) ligados ponta a
-> ponta — o caminho gatilho → clipe → fila → nuvem funciona, e a borda já dá a cada
-> pessoa um ID que atravessa frames. Falta quem **decide**: o motor de regras (§3.4),
-> hoje substituído por um gatilho de andaime. API e dashboard ainda não existem.
+> **Status:** agente com os seis estágios da borda ligados ponta a ponta (§3.1 a
+> §3.6). A borda **decide sozinha**: uma pessoa cruza a linha de saída sem ter passado
+> no caixa e o evento sobe com o clipe, sem ninguém puxar gatilho. O que ainda falta no
+> agente é de onde vêm as zonas — hoje são coordenadas na linha de comando, e em
+> produção elas descem versionadas da nuvem (§5.2). API e dashboard ainda não existem.
 > Leia [`docs/arquitetura.md`](docs/arquitetura.md) antes de escrever código, e
 > [`CLAUDE.md`](CLAUDE.md) para as convenções — em especial a regra de que toda
 > função nova precisa de teste automatizado.
@@ -84,10 +84,25 @@ uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 \
   --outbox redis --dry-run --trigger-every 20 --stats
 ```
 
-O gatilho é andaime: o motor de regras (§3.4) ainda não existe, então `--trigger-after`,
-`--trigger-every` e `kill -USR1` ocupam o lugar dele. Os eventos que eles produzem
-sobem marcados como `source: "manual"`. A borda já vê e já sabe quem é quem, mas nada
-decide nada — falta a máquina de estados que avalia zonas e tempos por track.
+Aí o gatilho é andaime — `--trigger-after`, `--trigger-every` e `kill -USR1` — e o que
+ele produz sobe marcado como `source: "manual"`, para não contaminar a métrica de falso
+positivo por câmera. Ele continua existindo para câmera sem zonas e para teste de
+instalação.
+
+Com zonas desenhadas, quem dispara é a regra (§3.4):
+
+```bash
+uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 --camera-id cam3 \
+  --model models/yolox_s.onnx --dry-run --stats --duration 60 \
+  --linha-saida 0,400,640,400 --zona-caixa 0,410,260,410,260,478,0,478 \
+  --tempo-caixa 3 --vida-minima 1
+```
+
+A linha de saída é **orientada**: desenhada da esquerda para a direita, o lado de dentro
+da loja fica embaixo (`y` maior), e só cruzar de dentro para fora dispara. Na linha
+`[regras]` o que se vigia são os descartes — numa loja de verdade `pagou` tem que
+dominar tudo. Perto de zero com eventos subindo é zona de caixa errada; `vida curta`
+alto é o tracker fragmentando (R-2).
 
 **Primeira vez, ou numa máquina nova?** O passo a passo completo — instalação por
 sistema operacional, verificação e troubleshooting — está em

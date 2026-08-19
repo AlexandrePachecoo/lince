@@ -19,8 +19,9 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from deteccoes import DetectorFalso, DetectorQueFalha, pessoa
+from deteccoes import INFO, DetectorFalso, DetectorQueFalha, pessoa
 from deteccoes import frame as quadro
+from regras import CAIXA, LINHA, LONGE_DO_CAIXA, PASSO_S, caminho
 
 from lince_agent.clip.state import ClipResult, ClipStatus
 from lince_agent.clip.store import ClipStore
@@ -32,8 +33,10 @@ from lince_agent.config import (
     DetectionOptions,
     OutboxOptions,
     RetryOptions,
+    RuleOptions,
     TrackingOptions,
 )
+from lince_agent.detect.state import Detection
 from lince_agent.ffmpeg.fmp4 import Fmp4Parser, Fragment, InitSegment
 from lince_agent.ffmpeg.process import IngestCallbacks
 from lince_agent.ingest.state import CameraHealth, CameraStatus
@@ -171,6 +174,7 @@ class Agente:
         inelegiveis: tuple[str, ...] = (),
         on_tracking=None,
         tracking: bool = True,
+        regras=None,
     ):
         self.relogio = RelogioFalso()
         self.parede = RelogioFalso(1_700_000_000.0)
@@ -193,6 +197,7 @@ class Agente:
                     url=f"rtsp://camera/{nome}",
                     clip=CORTE,
                     detect=nome not in inelegiveis,
+                    rules=regras or RuleOptions(),
                 )
                 for nome in cameras
             ),
@@ -828,5 +833,118 @@ def test_tracking_desligado_nao_quebra_o_caminho_do_clipe(tmp_path, sessao_longa
 
         assert montado.espera_clipe().status is ClipStatus.OK
         assert rastreados == []
+    finally:
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+# --- estágio 4: motor de regras ---------------------------------------------
+
+SAINDO_SEM_PAGAR = caminho(LONGE_DO_CAIXA, (520.0, 355.0), 16)
+"""Do fundo da loja até a rua, pelo corredor longe do caixa (planta de `regras.py`)."""
+
+ZONAS = RuleOptions(
+    enabled=True, linha_saida=LINHA, zonas_caixa=(CAIXA,), tempo_caixa_min_s=5.0, vida_min_s=2.0
+)
+
+
+class DetectorAndando:
+    """Devolve uma pessoa caminhando por um percurso fixo, um ponto por frame.
+
+    É o dublê que fecha o caminho inteiro do estágio 2 ao 4 com o tracker e o motor de
+    regras **de verdade** no meio: o que fica de fora é só o modelo, que é a exceção
+    para mock que o CLAUDE.md reserva.
+    """
+
+    def __init__(self, pontos: list[tuple[float, float]]) -> None:
+        self._pontos = pontos
+        self.chamadas = 0
+
+    def detect(self, frame) -> tuple[Detection, ...]:
+        if self.chamadas >= len(self._pontos):
+            return ()
+        x, y = self._pontos[self.chamadas]
+        self.chamadas += 1
+        return (Detection(class_id=0, score=0.9, x1=x - 40.0, y1=y - 200.0, x2=x + 40.0, y2=y),)
+
+    def info(self):
+        return INFO
+
+    def close(self) -> None:
+        return None
+
+
+def _anda(montado, detector: DetectorAndando, pontos: list[tuple[float, float]]) -> None:
+    """Entrega um frame por ponto, esperando a inferência de cada um antes do próximo.
+
+    A espera não é zelo: a fila do §3.2 tem 8 posições e descarta a mais antiga. Despejar
+    16 frames de uma vez faria o tracker ver saltos em vez de uma caminhada, e o teste
+    passaria a medir a política de descarte em vez da regra.
+    """
+    for i in range(len(pontos)):
+        montado.alimenta_frame("cam1", quadro(i + 1, received_at=i * PASSO_S))
+        assert _ate(lambda alvo=i + 1: detector.chamadas == alvo), f"frame {i} não foi inferido"
+
+
+def test_a_regra_dispara_sozinha_e_o_evento_sobe_como_rule(tmp_path):
+    """**O caminho inteiro, sem andaime nenhum.**
+
+    Uma pessoa atravessa a linha de saída sem ter passado no caixa, e o evento chega à
+    fila local sem que ninguém chame `trigger()`: detecção, tracking, regra e clipe.
+    É o que separa este agente de um gravador com temporizador.
+
+    E ele sobe como `rule`, não `manual`. A distinção existe para a nuvem não contar
+    teste de instalação na taxa de falso positivo por câmera — a métrica número 1 do
+    produto (NFR-2, R-1).
+    """
+    detector = DetectorAndando(SAINDO_SEM_PAGAR)
+    montado = Agente(tmp_path, detector=detector, regras=ZONAS)
+    # Adiantado para o pós-roll do corte já estar vencido quando a regra disparar: o
+    # clipe não é o assunto deste teste, e o evento sobe com ou sem ele (§3.5).
+    montado.relogio.agora = 1000.0
+    montado.runtime.start()
+    try:
+        _anda(montado, detector, SAINDO_SEM_PAGAR)
+        resultado = montado.espera_clipe()
+
+        item = montado.store.get(resultado.event_id)
+        assert item is not None, "a regra disparou mas o evento não chegou à fila local"
+        assert item.payload["source"] == EventSource.RULE
+        assert item.payload["rule"] == {"id": "saida-sem-caixa", "version": 1}
+        assert item.payload["camera_id"] == "cam1"
+
+        regras = montado.runtime.health().rules
+        assert regras.eventos == 1
+        assert regras.cameras[0].travessias_saida == 1
+    finally:
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+def test_camera_sem_zonas_desenhadas_nao_decide_nada(tmp_path):
+    """O estado de toda câmera no dia da instalação. Ela ingere, detecta e rastreia —
+    e fica calada até alguém desenhar a linha."""
+    detector = DetectorAndando(SAINDO_SEM_PAGAR)
+    montado = Agente(tmp_path, detector=detector)
+    montado.relogio.agora = 1000.0
+    montado.runtime.start()
+    try:
+        _anda(montado, detector, SAINDO_SEM_PAGAR)
+
+        assert montado.runtime.health().rules.eventos == 0
+        assert montado.store.stats(now_ms=0).depth == 0
+        assert montado.runtime.health().tracker.ativos == 1, "mas o tracking segue vivo"
+    finally:
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+def test_health_separa_as_regras_por_camera(tmp_path):
+    """São campos do heartbeat (§5.3). `configurada` em falso numa câmera elegível para
+    IA é o sinal de que alguém esqueceu de desenhar as zonas — sem ele, a câmera fica
+    muda e ninguém descobre até estranharem que aquela loja nunca alertou."""
+    montado = Agente(tmp_path, cameras=("cam1", "cam2"), regras=None)
+    montado.runtime.start()
+    try:
+        por_camera = {c.camera_id: c for c in montado.runtime.health().rules.cameras}
+        assert set(por_camera) == {"cam1", "cam2"}
+        assert all(not c.configurada for c in por_camera.values())
     finally:
         montado.runtime.stop(timeout=PRAZO_S)

@@ -13,8 +13,10 @@ from lince_agent.config import (
     DetectionOptions,
     HwAccel,
     PixelFormat,
+    RuleOptions,
     TrackingOptions,
 )
+from lince_agent.rules.geometry import LinhaOrientada, Poligono
 
 
 def test_bgr24_sao_tres_bytes_por_pixel():
@@ -260,3 +262,74 @@ def test_piso_do_detector_e_menor_que_o_corte_do_tracker():
     (piso 0,10) e o tracker é quem decide o que é pessoa (0,50). Inverter isso esconderia
     do estágio 3 exatamente o dado de que ele mais precisa."""
     assert DetectionOptions().score_threshold < TrackingOptions().high_threshold
+
+
+# --- zonas e limiares do estágio 4 (§3.4) ---------------------------------------
+
+LINHA = LinhaOrientada(origem=(0.0, 400.0), destino=(640.0, 400.0))
+CAIXA = Poligono(((100.0, 420.0), (340.0, 420.0), (340.0, 470.0), (100.0, 470.0)))
+
+
+def regra(**kwargs) -> RuleOptions:
+    padrao = {"enabled": True, "linha_saida": LINHA, "zonas_caixa": (CAIXA,)}
+    return RuleOptions(**{**padrao, **kwargs})
+
+
+def test_regra_desligada_nao_exige_nada():
+    """É o estado de toda câmera no dia da instalação: ela ingere, detecta e rastreia
+    antes de alguém ter desenhado uma linha sobre o frame."""
+    assert RuleOptions().enabled is False
+
+
+def test_regra_habilitada_exige_linha_de_saida():
+    with pytest.raises(ValueError, match="linha_saida"):
+        RuleOptions(enabled=True, zonas_caixa=(CAIXA,))
+
+
+def test_regra_habilitada_exige_zona_de_caixa():
+    """Sem zona de caixa o tempo acumulado é sempre zero, e **toda** saída da loja vira
+    alerta. Uma câmera assim alerta a loja inteira até alguém desligar a notificação —
+    que é exatamente como o R-1 mata o produto. Recusar na subida é o único momento em
+    que isso custa barato."""
+    with pytest.raises(ValueError, match="zona de caixa"):
+        RuleOptions(enabled=True, linha_saida=LINHA)
+
+
+def test_tempo_de_caixa_zero_e_recusado():
+    """Com N = 0, a comparação `tempo < N` nunca é verdadeira e a câmera fica muda. É o
+    oposto do erro anterior e igualmente silencioso."""
+    with pytest.raises(ValueError, match="tempo_caixa_min_s"):
+        regra(tempo_caixa_min_s=0.0)
+
+
+def test_zona_fora_do_quadro_e_recusada_na_subida():
+    """**O erro de resolução.**
+
+    As zonas são desenhadas sobre um frame no dashboard e avaliadas contra caixas no
+    espaço do frame decodificado (640x480). Quem desenhar sobre um frame 1080p produz um
+    polígono que não contém ninguém: `contem` devolve `False` sempre, o tempo de caixa
+    fica em zero e a câmera passa a alertar para todo cliente que sai. Nada disso levanta
+    erro em runtime — o único sintoma é o volume de alertas.
+    """
+    with pytest.raises(ValueError, match="fora do quadro"):
+        CameraConfig(
+            camera_id="cam1",
+            url="rtsp://camera/stream",
+            rules=regra(linha_saida=LinhaOrientada(origem=(0.0, 900.0), destino=(1900.0, 900.0))),
+        )
+
+
+def test_regra_em_camera_inelegivel_para_ia_e_recusada():
+    """Uma câmera com `detect=False` (R-3) não produz track nenhum, então a regra nunca
+    avaliaria nada. Aceitar a configuração criaria uma câmera que parece vigiada no
+    dashboard e é muda na prática."""
+    with pytest.raises(ValueError, match="detect=False"):
+        CameraConfig(camera_id="cam1", url="rtsp://camera/stream", detect=False, rules=regra())
+
+
+def test_zonas_sao_por_camera():
+    """A linha de saída de uma câmera é o corredor de outra (ADR-002): recalibrar uma
+    delas não pode mexer nas demais."""
+    porta = CameraConfig(camera_id="porta", url="rtsp://camera/1", rules=regra())
+    corredor = CameraConfig(camera_id="corredor", url="rtsp://camera/2")
+    assert porta.rules.enabled and not corredor.rules.enabled

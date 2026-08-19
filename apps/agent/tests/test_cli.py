@@ -18,6 +18,7 @@ from lince_agent.ffmpeg.probe import ProbeError, StreamInfo
 from lince_agent.ingest.state import CameraHealth, CameraStatus
 from lince_agent.outbox.state import OutboxStats, SenderStats
 from lince_agent.outbox.store import MemoryOutbox
+from lince_agent.rules.state import CameraRuleStats, RuleStats
 from lince_agent.runtime import AgentHealth
 from lince_agent.track.state import CameraTrackingStats, TrackerStats
 
@@ -486,3 +487,111 @@ def test_dump_tracks_ignora_resultado_sem_frame_correspondente(tmp_path):
     dumper.close()
 
     assert not list(tmp_path.glob("*.mp4")), "não devia ter aberto ffmpeg sem frame"
+
+
+# --- estágio 4: zonas na linha de comando ---------------------------------------
+
+BASE = ["--camera", "rtsp://x/y"]
+LINHA = ["--linha-saida", "0,400,640,400"]
+CAIXA = ["--zona-caixa", "100,420,340,420,340,470,100,470"]
+
+
+def test_sem_zonas_o_motor_de_regras_fica_desligado():
+    """O estado de quem só quer exercitar ingestão e clipe. O andaime de gatilho
+    continua sendo o caminho, e é por isso que ele não foi removido junto."""
+    args = cli.build_parser().parse_args(BASE)
+    assert cli._monta_regras(args).enabled is False
+
+
+def test_linha_e_zona_ligam_a_regra():
+    args = cli.build_parser().parse_args([*BASE, *LINHA, *CAIXA, "--tempo-caixa", "6"])
+    regras = cli._monta_regras(args)
+
+    assert regras.enabled
+    assert regras.linha_saida.origem == (0.0, 400.0)
+    assert regras.zonas_caixa[0].vertices[0] == (100.0, 420.0)
+    assert regras.tempo_caixa_min_s == 6.0
+
+
+def test_mais_de_uma_posicao_de_caixa():
+    """Mercado de bairro tem duas ou três posições de caixa. Um polígono só engolindo o
+    corredor entre elas transformaria o corredor em zona de caixa — quem passa direto
+    sairia descartado."""
+    args = cli.build_parser().parse_args(
+        [*BASE, *LINHA, *CAIXA, "--zona-caixa", "400,420,500,420,500,470,400,470"]
+    )
+    assert len(cli._monta_regras(args).zonas_caixa) == 2
+
+
+@pytest.mark.parametrize(
+    "texto",
+    ["0,400,640", "0,400", "a,b,c,d"],
+    ids=["ímpar", "um ponto só", "não numérico"],
+)
+def test_linha_malformada_e_recusada_no_parse(texto: str):
+    """Erro de digitação vira mensagem de uso, não zona silenciosamente errada."""
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args([*BASE, "--linha-saida", texto])
+
+
+def test_zona_com_dois_vertices_e_recusada():
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args([*BASE, "--zona-caixa", "0,0,10,10"])
+
+
+def test_zona_sem_linha_sai_com_erro_legivel(monkeypatch, caplog):
+    """A configuração recusa a combinação e a CLI mostra **a mensagem**, não um
+    traceback: quem está desenhando zonas pela primeira vez é exatamente quem menos
+    consegue ler um traceback do dataclass."""
+    monkeypatch.setattr(
+        cli, "probe_stream", lambda *a, **k: StreamInfo("h264", 640, 480, 15.0, 15.0)
+    )
+    with caplog.at_level("ERROR"):
+        assert cli.main([*BASE, *CAIXA]) == 2
+    assert "linha_saida" in caplog.text
+
+
+def test_zona_fora_do_quadro_sai_com_erro_legivel(monkeypatch, caplog):
+    """Zonas desenhadas sobre um frame 1080p contra um agente que decodifica em 640x480.
+    Em runtime não daria erro nenhum: o polígono não conteria ninguém, o tempo de caixa
+    ficaria em zero e a câmera alertaria para todo cliente que sai (R-1)."""
+    monkeypatch.setattr(
+        cli, "probe_stream", lambda *a, **k: StreamInfo("h264", 640, 480, 15.0, 15.0)
+    )
+    with caplog.at_level("ERROR"):
+        codigo = cli.main([*BASE, "--linha-saida", "0,900,1900,900", *CAIXA])
+    assert codigo == 2
+    assert "fora do quadro" in caplog.text
+
+
+def test_linha_de_regras_desligada_diz_por_que():
+    assert "sem zonas desenhadas" in cli._format_regras(RuleStats())
+
+
+def test_linha_de_regras_destaca_os_descartes():
+    """Os descartes é que dizem se a loja está calibrada. `pagou` deveria dominar; se
+    `vida curta` estiver alto, o problema é o tracker (R-2) e mexer no N não adianta."""
+    linha = cli._format_regras(
+        RuleStats(
+            enabled=True,
+            cameras=(
+                CameraRuleStats(
+                    camera_id="cam1",
+                    configurada=True,
+                    acompanhados=4,
+                    no_caixa=1,
+                    travessias_saida=30,
+                    travessias_entrada=28,
+                    eventos=2,
+                    descartados_pagou=25,
+                    descartados_vida_curta=3,
+                    tempo_caixa_medio_s=11.5,
+                ),
+                CameraRuleStats(camera_id="cam2"),
+            ),
+        )
+    )
+    assert "eventos=2" in linha
+    assert "25 pagou" in linha and "3 vida curta" in linha
+    assert "11.5s" in linha
+    assert "cam2=sem zonas" in linha

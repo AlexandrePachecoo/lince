@@ -56,29 +56,34 @@ cd apps/agent && uv run ruff check src tests && uv run ruff format --check src t
 
 | Componente | Situação |
 |---|---|
-| `apps/agent` | Estágios 1 (ingestão, §3.1), 2 (detecção, §3.2), 3 (tracking, §3.3), 5 (clipe, §3.5) e 6 (fila e envio, §3.6), ligados por `runtime.py`. Falta o motor de regras |
+| `apps/agent` | Estágios 1 a 6 (§3.1 a §3.6) ligados por `runtime.py`. As zonas ainda vêm da linha de comando, não da nuvem |
 | `apps/api` | vazio |
 | `apps/dashboard` | vazio |
 | `packages/shared` | JSON Schema do evento e do PATCH do clipe (§5). Heartbeat e config ainda não |
 
-O caminho **gatilho → clipe → fila local → nuvem → clipe apagado do disco** funciona
-ponta a ponta, e a borda já vê: o detector emite caixas e o tracker dá a cada pessoa um
-ID que atravessa frames. O que ainda não existe é quem **decide** — sem o estágio 4,
-quem dispara é andaime (`--trigger-after`, `--trigger-every`, `SIGUSR1`), e os eventos
-que ele produz sobem marcados como `source: "manual"` — de propósito, para não
-contaminarem a métrica de falso positivo por câmera (R-1).
+O caminho **pessoa cruza a linha → clipe → fila local → nuvem → clipe apagado do
+disco** funciona ponta a ponta, sem andaime nenhum: a borda vê, dá identidade e
+**decide**. Os eventos sobem com `source: "rule"` e o bloco `rule` preenchido.
+
+O andaime de gatilho (`--trigger-after`, `--trigger-every`, `SIGUSR1`) continua
+existindo para câmera sem zonas desenhadas e para teste de instalação, e o que ele
+produz sobe como `source: "manual"` — de propósito, para não contaminar a métrica de
+falso positivo por câmera (R-1).
+
+O que falta para o estágio 4 estar pronto de verdade é **de onde vêm as zonas**: hoje
+são coordenadas digitadas em `--linha-saida` e `--zona-caixa`, e o agente só aceita uma
+câmera. Em produção elas descem versionadas da nuvem (§5.2), desenhadas sobre o frame
+no dashboard (§4.5).
 
 Onde encostar em cada coisa:
 
-- **Motor de regras (§3.4)** entra em `AgentRuntime._ao_rastrear`, que recebe um
-  `TrackingResult` por frame e hoje só passa. A máquina de estados é *por track*, e cada
-  `Track` já traz `base_central` (o ponto da travessia), `age_s` e `hits` (o filtro de
-  tempo mínimo de vida). Depois é só chamar
-  `AgentRuntime.trigger(camera_id, source=RULE, …)` — nada mais precisa mudar para o
-  evento chegar à nuvem.
+- **Configuração (§5.2)** é o gargalo agora. `AgentConfig` já suporta N câmeras com
+  zonas próprias e valida tudo na subida; o que não existe é como expressá-las — falta
+  um arquivo de configuração e, depois, o poll da nuvem. `__main__.py` monta uma câmera
+  só, a partir de `--camera`.
 - **Heartbeat (§5.3)** já tem os dados reunidos em `AgentHealth`, agora incluindo
-  `inference_fps` e `dropped_frames` por câmera; falta o transporte, que depende do
-  registro da §5.1.
+  `inference_fps` e `dropped_frames` por câmera e os contadores de descarte do §3.4;
+  falta o transporte, que depende do registro da §5.1.
 - **Download de modelo (§5.2)** substitui o caminho local em `DetectionOptions.model_path`.
   O `model_version` já é nome + checksum, no formato que o ADR-006 quer.
 
@@ -114,7 +119,18 @@ uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 \
 # caminho inteiro até a nuvem, sem uma API do outro lado:
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 \
   --outbox redis --dry-run --trigger-every 20 --stats
+
+# estágio 4: a borda decidindo sozinha, sem andaime de gatilho. A linha é orientada —
+# desenhada da esquerda para a direita, o lado de dentro da loja fica embaixo (y maior):
+uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 --camera-id cam3 \
+  --model models/yolox_s.onnx --dry-run --stats --duration 60 \
+  --linha-saida 0,400,640,400 --zona-caixa 0,410,260,410,260,478,0,478 \
+  --tempo-caixa 3 --vida-minima 1
 ```
+
+Na linha `[regras]` o que se vigia são os **descartes**, não os eventos: numa loja de
+verdade `pagou` tem que dominar tudo. Perto de zero com eventos subindo é zona de caixa
+errada; `vida curta` alto é o tracker fragmentando (R-2), e aí mexer no N não adianta.
 
 ## Convenções
 
@@ -187,6 +203,23 @@ Não reintroduza nenhuma destas — cada uma custou depuração e tem teste guar
 - **A caixa de um `Track` não é recortada na moldura** — ao contrário da caixa de uma
   `Detection`. Ela é estimativa, e quem sai pela porta tem os pés estimados além da
   borda; recortar empurraria toda travessia para a beirada do quadro.
+- **Amostra exatamente sobre a linha de saída não pode virar a nova referência.** Um
+  ponto com `lado == 0` não tem lado, então a travessia é adiada para o frame seguinte —
+  mas se ele substituir o ponto anterior, a comparação seguinte parte de novo de um ponto
+  sem lado e devolve "não cruzou" para sempre. A pessoa atravessa a porta e o motor nunca
+  vê: sem log, sem contador, sem rastro. É a falha mais perigosa do §3.4, porque um
+  evento que não acontece não deixa nada para depurar.
+- **Zona desenhada sobre um frame de outra resolução não levanta erro.** Ela
+  simplesmente não contém ninguém: o tempo de caixa fica em zero e a câmera passa a
+  alertar para todo cliente que sai. Por isso `CameraConfig` recusa na subida qualquer
+  vértice fora de `decode.width/height`.
+- **Track `PERDIDO` é extrapolação do Kalman, não observação.** Decidir travessia sobre
+  ele manda o gerente abrir um clipe em que ninguém atravessa nada. O §3.4 só amostra
+  track com detecção nova no frame (`time_since_update_s == 0`); a oclusão vira um
+  segmento mais comprido entre duas observações reais.
+- **Na reconexão da câmera os IDs de track recomeçam do 1.** Quem guarda estado por
+  `track_id` — o §3.4 guarda — tem que zerar junto com o `TrackerPool`, senão a primeira
+  pessoa da sessão nova herda o desfecho de outra e nunca mais alerta.
 - **Detecção fraca nunca cria track.** O piso do detector é 0,10 para alimentar a segunda
   passada do ByteTrack, e é a regra "só continua track existente" que impede isso de
   virar falso positivo.

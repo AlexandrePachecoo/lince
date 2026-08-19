@@ -60,6 +60,8 @@ from lince_agent.outbox.http import CloudClient
 from lince_agent.outbox.sender import OutboxSender
 from lince_agent.outbox.state import ClipState, ItemKind, OutboxStats, QueueItem, SenderStats
 from lince_agent.outbox.store import OutboxStore
+from lince_agent.rules.engine import RuleEnginePool
+from lince_agent.rules.state import RuleStats
 from lince_agent.track.pool import TrackerPool
 from lince_agent.track.state import TrackerStats, TrackingResult
 
@@ -80,6 +82,7 @@ class AgentHealth:
     buffers: tuple[BufferStats, ...] = ()
     detector: DetectorStats = field(default_factory=DetectorStats)
     tracker: TrackerStats = field(default_factory=TrackerStats)
+    rules: RuleStats = field(default_factory=RuleStats)
     recorder: RecorderStats = field(default_factory=RecorderStats)
     outbox: OutboxStats = field(default_factory=OutboxStats)
     sender: SenderStats = field(default_factory=SenderStats)
@@ -115,6 +118,7 @@ class AgentRuntime:
         recorder: ClipRecorder | None = None,
         sender: OutboxSender | None = None,
         detector: Detector | None = None,
+        rules: RuleEnginePool | None = None,
         on_tracking: Callable[[TrackingResult], None] | None = None,
     ) -> None:
         self._config = config
@@ -159,6 +163,7 @@ class AgentRuntime:
         )
 
         self._tracking = TrackerPool(config.tracking, clock=clock)
+        self._regras = rules or RuleEnginePool(clock=clock)
         self._on_tracking = on_tracking
 
         self._lock = threading.Lock()
@@ -201,6 +206,10 @@ class AgentRuntime:
             if camera.detect:
                 self._deteccao.register(camera.camera_id)
                 self._tracking.register(camera.camera_id)
+                # Registrada mesmo sem zonas desenhadas: é o que faz uma câmera que
+                # nunca vai decidir nada aparecer como `configurada=False` no §5.3, em
+                # vez de sumir da telemetria e virar uma loja muda em silêncio.
+                self._regras.register(camera.camera_id, camera.rules)
 
         # Consumidores antes de produtores: um clipe cortado antes de o sender existir
         # ficaria esperando o próximo poll ocioso, e o NFR-1 já gastou 10 s no pós-roll.
@@ -369,13 +378,25 @@ class AgentRuntime:
         self._ao_rastrear(self._tracking.update(resultado))
 
     def _ao_rastrear(self, resultado: TrackingResult) -> None:
-        """Recebe os tracks de um frame. **É onde o estágio 4 (§3.4) entra.**
+        """Recebe os tracks de um frame e deixa o estágio 4 (§3.4) decidir.
 
-        A máquina de estados do motor de regras é *por track*, e é daqui que ela vai
-        receber cada pessoa com `base_central`, `age_s` e `hits` para decidir. Quando ela
-        existir, chamará `trigger(camera_id, source=RULE, …)` e o andaime da CLI sai do
-        caminho — nada mais precisa mudar para o evento chegar à nuvem.
+        Roda na thread de detecção, e é por isso que o motor de regras é geometria pura:
+        avaliar zonas e tempos custa microssegundos por track, enquanto qualquer coisa
+        que bloqueie aqui atrasa a inferência da loja inteira (ADR-007).
+
+        O gatilho sai com `source=RULE`, ao contrário do andaime da CLI, que sobe como
+        `MANUAL`. A nuvem separa os dois para não contar teste de instalação na taxa de
+        falso positivo por câmera (NFR-2, R-1).
         """
+        for gatilho in self._regras.update(resultado):
+            self.trigger(
+                gatilho.camera_id,
+                source=EventSource.RULE,
+                rule_id=gatilho.rule_id,
+                rule_version=gatilho.rule_version,
+                at=gatilho.at,
+            )
+
         if self._on_tracking is not None:
             self._on_tracking(resultado)
 
@@ -409,6 +430,7 @@ class AgentRuntime:
             buffers=tuple(buffer.stats() for buffer in self._buffers.values()),
             detector=self._deteccao.stats(),
             tracker=self._tracking.stats(),
+            rules=self._regras.stats(),
             frames_ingested=frames,
             recorder=self._recorder.stats(),
             outbox=self._store.stats(now_ms=agora_ms),
