@@ -18,8 +18,17 @@ fonte: o agente valida o payload real contra o schema nos testes
 | `schemas/common.v1.json` | `$defs` compartilhados: identificadores, instantes, bloco de clipe |
 | `schemas/event.v1.json` | Corpo do `POST /v1/events` |
 | `schemas/event-clip.v1.json` | Corpo do `PATCH /v1/events/{event_id}` |
+| `schemas/config.v1.json` | Corpo do `GET /v1/agents/config` — câmeras, zonas, regras e limiares |
 
-Reservados, ainda não escritos: `heartbeat.v1.json` (§5.3), `config.v1.json` (§5.2).
+Reservado, ainda não escrito: `heartbeat.v1.json` (§5.3).
+
+`config.v1.json` é o único que já circula fora de uma resposta HTTP: enquanto o
+endpoint não existe, o agente lê **o mesmo documento** de um arquivo local
+(`apps/agent/config.exemplo.json`, `--config`). É de propósito — quando o poll entrar,
+só muda quem entrega o dicionário, e o parser que já roda em produção é o mesmo que
+sempre rodou. O que é do box e não da loja (URL do Redis, diretório dos clipes, caminho
+do `.onnx`, credencial) fica **fora** do documento: repointar o disco de uma loja não
+pode ser efeito de uma resposta HTTP.
 
 ## Versionamento
 

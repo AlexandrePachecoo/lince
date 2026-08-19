@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
 from lince_agent import __main__ as cli
-from lince_agent.config import HwAccel, OutboxOptions, PixelFormat
+from lince_agent.config import HwAccel, PixelFormat
 from lince_agent.detect.state import CameraDetectionStats, DetectorInfo, DetectorStats
 from lince_agent.ffmpeg.fmp4 import Fragment, InitSegment
 from lince_agent.ffmpeg.probe import ProbeError, StreamInfo
@@ -33,9 +35,83 @@ def test_padroes_batem_com_a_arquitetura():
     assert args.hwaccel == HwAccel.NONE.value
 
 
-def test_camera_e_obrigatoria():
+def test_camera_ou_config_e_obrigatorio():
+    """Sem fonte de câmera não há o que ingerir. O erro precisa ser na linha de
+    comando, e não um agente que sobe e fica mudo."""
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args([])
+
+
+def test_camera_e_config_nao_convivem():
+    """As duas juntas não têm resposta certa: `--camera` monta uma câmera, `--config`
+    traz a lista da loja. Escolher uma em silêncio deixaria metade das câmeras fora."""
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["--camera", "rtsp://x", "--config", "loja.json"])
+
+
+def escreve_config(tmp_path, **mudancas) -> Path:
+    documento = {
+        "schema_version": 1,
+        "config_version": "cfg-1",
+        "tenant_id": "rede-abc",
+        "store_id": "loja-7",
+        "cameras": [{"camera_id": "porta", "url": "rtsp://cam/stream"}],
+    } | mudancas
+    caminho = tmp_path / "loja.json"
+    caminho.write_text(json.dumps(documento), encoding="utf-8")
+    return caminho
+
+
+def test_config_traz_loja_camera_e_versao(tmp_path):
+    """O documento é a fonte: `store_id` errado aqui vira prefixo de chave errado no
+    Redis e credencial de outra loja no envio (NFR-6)."""
+    parser = cli.build_parser()
+    args = parser.parse_args(["--config", str(escreve_config(tmp_path))])
+
+    config = cli._monta_config(parser, args)
+
+    assert (config.tenant_id, config.store_id) == ("rede-abc", "loja-7")
+    assert config.config_version == "cfg-1"
+    assert [camera.camera_id for camera in config.cameras] == ["porta"]
+
+
+def test_flag_de_zona_junto_com_config_e_erro(tmp_path):
+    """Ignorar a flag em silêncio faria quem digitou `--linha-saida` acreditar que
+    recalibrou a câmera, com o agente rodando a linha do documento. A diferença entre
+    as duas só apareceria como alerta que não veio — ou como alerta demais (R-1)."""
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        ["--config", str(escreve_config(tmp_path)), "--linha-saida", "0,400,640,400"]
+    )
+
+    with pytest.raises(SystemExit):
+        cli._monta_config(parser, args)
+
+
+def test_flags_do_box_continuam_valendo_com_config(tmp_path):
+    """A divisão da §5.2: a loja diz quais limiares, o box diz onde está o modelo e
+    para qual API falar. Recusar `--model` junto com `--config` tornaria o documento
+    responsável por um caminho de disco que ele não pode conhecer."""
+    parser = cli.build_parser()
+    caminho = escreve_config(tmp_path, detection={"enabled": True})
+    args = parser.parse_args(
+        ["--config", str(caminho), "--model", str(tmp_path / "m.onnx"), "--api-url", "http://api"]
+    )
+
+    config = cli._monta_config(parser, args)
+
+    assert config.detection.enabled
+    assert config.detection.model_path == tmp_path / "m.onnx"
+    assert config.cloud.api_url == "http://api"
+
+
+def test_config_invalida_sai_com_codigo_2(tmp_path):
+    """Código próprio, distinto do 1 de câmera inacessível: quem sobe o agente por
+    systemd precisa distinguir "arquivo errado" de "câmera fora do ar" sem ler log."""
+    caminho = tmp_path / "loja.json"
+    caminho.write_text('{"schema_version": 1}', encoding="utf-8")
+
+    assert cli.main(["--config", str(caminho)]) == 2
 
 
 def test_pix_fmt_invalido_e_recusado():
@@ -102,7 +178,7 @@ def test_fila_em_ram_avisa_que_nao_e_duravel(caplog):
     args = cli.build_parser().parse_args(["--camera", "rtsp://x", "--outbox", "memory"])
 
     with caplog.at_level("WARNING"):
-        fila = cli._monta_fila(args, OutboxOptions())
+        fila = cli._monta_fila(args, cli._monta_config(cli.build_parser(), args))
 
     assert isinstance(fila, MemoryOutbox)
     assert "restart" in caplog.text

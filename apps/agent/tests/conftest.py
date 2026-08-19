@@ -142,3 +142,44 @@ def rtsp_url() -> str:
     if check.returncode != 0:
         pytest.skip(f"sem servidor RTSP em {url} — rode `pnpm rtsp:up`")
     return url
+
+
+SCHEMAS = Path(__file__).resolve().parents[3] / "packages" / "shared" / "schemas"
+"""`packages/shared/schemas`, a fonte única do contrato do §5.
+
+O agente lê os schemas do repositório, e não uma cópia dentro de `apps/agent`. Uma
+cópia é exatamente a duplicação que o contrato existe para evitar: ela fica correta
+até alguém alterar o original, e o sintoma aparece numa loja, como evento recusado.
+"""
+
+
+@pytest.fixture(scope="session")
+def registry():
+    """Os schemas do repositório num registry, para os `$ref` entre eles resolverem
+    sem rede. Sem isto, validar `event.v1.json` tentaria buscar `common.v1.json` em
+    `https://schemas.lince.dev` — que não existe, e o teste passaria a depender de DNS.
+    """
+    import json
+
+    from referencing import Registry, Resource
+
+    recursos = []
+    for arquivo in sorted(SCHEMAS.glob("*.json")):
+        conteudo = json.loads(arquivo.read_text(encoding="utf-8"))
+        recursos.append((conteudo["$id"], Resource.from_contents(conteudo)))
+    assert recursos, f"nenhum schema em {SCHEMAS}"
+    return Registry().with_resources(recursos)
+
+
+@pytest.fixture(scope="session")
+def validador(registry):
+    """Fábrica: `validador("event.v1.json")` devolve o validador daquele schema."""
+    import json
+
+    from jsonschema import Draft202012Validator
+
+    def cria(nome: str) -> Draft202012Validator:
+        schema = json.loads((SCHEMAS / nome).read_text(encoding="utf-8"))
+        return Draft202012Validator(schema, registry=registry)
+
+    return cria

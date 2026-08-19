@@ -133,6 +133,7 @@ class AgentRuntime:
             tenant_id=config.tenant_id,
             store_id=config.store_id,
             agent_version=__version__,
+            config_version=config.config_version,
         )
         self._clip_store = clip_store or ClipStore(
             config.clips_dir,

@@ -7,6 +7,13 @@ câmera e ver o que sai, que é como as pendências do §10 vão ser medidas.
     uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 --stats
     uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 \\
         --outbox redis --dry-run --trigger-every 20 --stats
+    uv run python -m lince_agent --config config.exemplo.json --model models/yolox_s.onnx
+
+Há dois caminhos, e eles não se misturam. `--camera` monta **uma** câmera a partir de
+flags, que é como se aponta o pipeline para um stream e se olha o que sai. `--config`
+lê o documento da §5.2 — a lista de câmeras da loja com as zonas de cada uma, no mesmo
+formato que o `GET /v1/agents/config` vai devolver. Quando o poll existir, só a origem
+do documento muda; nada abaixo do `AgentConfig` percebe.
 
 **O gatilho é andaime.** O estágio 4 (motor de regras) não existe, então nada dispara
 eventos sozinho. `--trigger-after`, `--trigger-every` e `SIGUSR1` ocupam esse lugar
@@ -26,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +50,7 @@ from lince_agent.config import (
     RuleOptions,
     TrackingOptions,
 )
+from lince_agent.config_loader import ConfigError, carrega_arquivo
 from lince_agent.detect.state import DetectorStats
 from lince_agent.ffmpeg.capabilities import select_hwaccel
 from lince_agent.ffmpeg.probe import ProbeError, probe_stream
@@ -97,7 +106,15 @@ def build_parser() -> argparse.ArgumentParser:
         prog="lince-agent",
         description="Agente da borda: ingestão RTSP, clipe e envio para a nuvem",
     )
-    parser.add_argument("--camera", required=True, help="URL RTSP da câmera")
+    fonte = parser.add_mutually_exclusive_group(required=True)
+    fonte.add_argument("--camera", help="URL RTSP de uma câmera, configurada por flags")
+    fonte.add_argument(
+        "--config",
+        type=Path,
+        metavar="ARQUIVO",
+        help="documento da §5.2 com as câmeras da loja e as zonas de cada uma "
+        "(ver config.exemplo.json). É o mesmo formato que a nuvem vai servir",
+    )
     parser.add_argument("--camera-id", default="cam", help="identificador nos logs")
     parser.add_argument("--fps", type=float, default=3.0, help="taxa entregue à detecção")
     parser.add_argument("--width", type=int, default=640)
@@ -334,17 +351,134 @@ def _monta_tracking(args: argparse.Namespace) -> TrackingOptions:
     )
 
 
-def _monta_fila(args: argparse.Namespace, options: OutboxOptions) -> OutboxStore:
+FLAGS_DO_DOCUMENTO = {
+    "tenant_id": "--tenant-id",
+    "store_id": "--store-id",
+    "camera_id": "--camera-id",
+    "fps": "--fps",
+    "width": "--width",
+    "height": "--height",
+    "pix_fmt": "--pix-fmt",
+    "hwaccel": "--hwaccel",
+    "linha_saida": "--linha-saida",
+    "zona_caixa": "--zona-caixa",
+    "tempo_caixa": "--tempo-caixa",
+    "vida_minima": "--vida-minima",
+    "input_size": "--input-size",
+    "score_threshold": "--score-threshold",
+    "iou_threshold": "--iou-threshold",
+    "track_high_threshold": "--track-high-threshold",
+    "no_detect": "--no-detect",
+    "no_track": "--no-track",
+}
+"""Flags cujo assunto passa a ser do documento quando há `--config`.
+
+Ficam de fora as que são do box e não da loja: `--model`, `--provider`, `--clips-dir`,
+`--outbox`, `--redis-url`, `--api-url` e `--api-token`. Essas continuam valendo com
+`--config`, e é justamente essa divisão que o §5.2 exige.
+"""
+
+
+def _recusa_flags_do_documento(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Com `--config`, uma flag de zona digitada na linha de comando é erro, não sobra.
+
+    Ignorá-la em silêncio é o pior desfecho possível: quem passou `--linha-saida` acha
+    que recalibrou a câmera, o agente sobe com a linha do documento, e a diferença entre
+    as duas só aparece como alerta que não veio — ou como alerta demais (R-1).
+    """
+    conflitantes = sorted(
+        flag
+        for dest, flag in FLAGS_DO_DOCUMENTO.items()
+        if getattr(args, dest) != parser.get_default(dest)
+    )
+    if conflitantes:
+        parser.error(
+            f"--config já diz isso: {', '.join(conflitantes)}. Com um documento da §5.2, "
+            "câmeras, zonas e limiares vêm dele — edite o arquivo"
+        )
+
+
+def _com_hwaccel_verificado(config: AgentConfig) -> AgentConfig:
+    """O documento **pede** decode por hardware; a máquina decide se dá (§3.2).
+
+    A verificação não pode morar no loader: ela roda `ffmpeg -hwaccels`, e configuração
+    tem que carregar igual numa máquina sem ffmpeg — inclusive no teste. Aqui, no ponto
+    de entrada, ela acontece uma vez por valor pedido, não uma vez por câmera.
+    """
+    resolvido = {
+        pedido: select_hwaccel(pedido)
+        for pedido in {camera.decode.hwaccel for camera in config.cameras}
+    }
+    cameras = tuple(
+        replace(camera, decode=replace(camera.decode, hwaccel=resolvido[camera.decode.hwaccel]))
+        for camera in config.cameras
+    )
+    return replace(config, cameras=cameras)
+
+
+def _monta_config(parser: argparse.ArgumentParser, args: argparse.Namespace) -> AgentConfig:
+    """A `AgentConfig`, venha ela do documento da §5.2 ou das flags de uma câmera só."""
+    if args.config is not None:
+        _recusa_flags_do_documento(parser, args)
+        config = carrega_arquivo(
+            args.config,
+            clips_dir=args.clips_dir,
+            outbox=OutboxOptions(redis_url=args.redis_url),
+            cloud=CloudOptions(api_url=args.api_url, token=args.api_token),
+            model_path=args.model,
+            providers=tuple(args.providers) if args.providers else None,
+        )
+        if not config.detection.enabled:
+            log.warning(
+                "detecção desligada no documento: o agente ingere, mantém o buffer e "
+                "responde a gatilho manual, mas não decide nada (§3.2)."
+            )
+        return _com_hwaccel_verificado(config)
+
+    decode = DecodeOptions(
+        sample_fps=args.fps,
+        width=args.width,
+        height=args.height,
+        pixel_format=PixelFormat(args.pix_fmt),
+        hwaccel=select_hwaccel(HwAccel(args.hwaccel)),
+    )
+    return AgentConfig(
+        tenant_id=args.tenant_id,
+        store_id=args.store_id,
+        cameras=(
+            CameraConfig(
+                camera_id=args.camera_id,
+                url=args.camera,
+                decode=decode,
+                rules=_monta_regras(args),
+            ),
+        ),
+        clips_dir=args.clips_dir,
+        outbox=OutboxOptions(redis_url=args.redis_url),
+        cloud=CloudOptions(api_url=args.api_url, token=args.api_token),
+        detection=_monta_deteccao(args),
+        tracking=_monta_tracking(args),
+    )
+
+
+def _monta_fila(args: argparse.Namespace, config: AgentConfig) -> OutboxStore:
+    """A fila sai da `AgentConfig`, e não das flags, por causa do `store_id`.
+
+    Com `--config` ele vem do documento, e o prefixo das chaves do Redis é feito dele
+    (NFR-6). Ler `args.store_id` aqui daria a toda loja o prefixo default: duas lojas
+    no mesmo Redis dividiriam fila, e os eventos de uma subiriam com a credencial da
+    outra.
+    """
     if args.outbox == "memory":
         log.warning(
             "fila em RAM: andaime de desenvolvimento. Um restart perde todos os eventos "
             "que ainda não subiram — em loja, use --outbox redis (ADR-004)."
         )
-        return MemoryOutbox(options)
+        return MemoryOutbox(config.outbox)
 
     from lince_agent.outbox.redis_store import RedisOutbox
 
-    return RedisOutbox(args.store_id, options)
+    return RedisOutbox(config.store_id, config.outbox)
 
 
 def _format_health(health: CameraHealth, frame_bytes: int) -> str:
@@ -563,63 +697,51 @@ class _FragmentDumper:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
 
-    decode = DecodeOptions(
-        sample_fps=args.fps,
-        width=args.width,
-        height=args.height,
-        pixel_format=PixelFormat(args.pix_fmt),
-        hwaccel=select_hwaccel(HwAccel(args.hwaccel)),
-    )
-
     try:
-        info = probe_stream(args.camera, decode)
-    except ProbeError as error:
-        log.error("%s", error)
-        return 1
-    log.info(
-        "câmera entrega %s %dx%d, %.2f fps (nominal %.2f)",
-        info.codec,
-        info.width,
-        info.height,
-        info.avg_frame_rate,
-        info.r_frame_rate,
-    )
-    if args.probe_only:
-        return 0
-
-    opcoes_fila = OutboxOptions(redis_url=args.redis_url)
-    try:
-        config = AgentConfig(
-            tenant_id=args.tenant_id,
-            store_id=args.store_id,
-            cameras=(
-                CameraConfig(
-                    camera_id=args.camera_id,
-                    url=args.camera,
-                    decode=decode,
-                    rules=_monta_regras(args),
-                ),
-            ),
-            clips_dir=args.clips_dir,
-            outbox=opcoes_fila,
-            cloud=CloudOptions(api_url=args.api_url, token=args.api_token),
-            detection=_monta_deteccao(args),
-            tracking=_monta_tracking(args),
-        )
-    except ValueError as erro:
+        config = _monta_config(parser, args)
+    except (ConfigError, ValueError) as erro:
         # A configuração recusa na subida o que causaria falso positivo em massa: zona
         # fora do quadro, regra sem zona de caixa, resolução que não bate com o modelo.
         # As mensagens explicam o que fazer — um traceback as enterraria justamente
         # para quem está desenhando zonas pela primeira vez.
         log.error("configuração inválida: %s", erro)
         return 2
-    fila = _monta_fila(args, opcoes_fila)
+
+    for camera in config.cameras:
+        # Uma câmera por vez, e falhar em qualquer uma para o agente inteiro. Subir com
+        # sete de oito câmeras seria pior: a loja acha que está coberta, e o corredor
+        # que ficou de fora é justamente onde ninguém está olhando.
+        try:
+            info = probe_stream(camera.url, camera.decode)
+        except ProbeError as error:
+            log.error("%s: %s", camera.camera_id, error)
+            return 1
+        log.info(
+            "%s entrega %s %dx%d, %.2f fps (nominal %.2f)",
+            camera.camera_id,
+            info.codec,
+            info.width,
+            info.height,
+            info.avg_frame_rate,
+            info.r_frame_rate,
+        )
+    if args.probe_only:
+        return 0
+
+    if args.dump_tracks and len({(c.decode.width, c.decode.height) for c in config.cameras}) > 1:
+        # O dumper escreve num pipe `rawvideo`, cujo tamanho de frame é contrato: com
+        # duas resoluções, um dos vídeos sairia embaralhado e pareceria bug de tracking.
+        parser.error("--dump-tracks exige que todas as câmeras decodifiquem no mesmo tamanho")
+
+    decode = config.cameras[0].decode
+    fila = _monta_fila(args, config)
     cliente = (
         ClienteSeco()
         if args.dry_run
@@ -631,6 +753,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
+    frame_bytes = {camera.camera_id: camera.decode.frame_bytes for camera in config.cameras}
     dumper = _FragmentDumper(args.dump_fragments) if args.dump_fragments else None
     tracks_dumper = _TrackDumper(args.dump_tracks, decode) if args.dump_tracks else None
     runtime = AgentRuntime(
@@ -672,7 +795,9 @@ def main(argv: list[str] | None = None) -> int:
             if args.stats:
                 saude = runtime.health()
                 for camera in saude.cameras:
-                    print(_format_health(camera, decode.frame_bytes), flush=True)  # noqa: T201
+                    # O tamanho do frame é por câmera: duas câmeras em resoluções
+                    # diferentes têm bandas de pipe diferentes, e é isso que a linha mede.
+                    print(_format_health(camera, frame_bytes[camera.camera_id]), flush=True)  # noqa: T201
                 print(_format_deteccao(saude.detector), flush=True)  # noqa: T201
                 print(_format_tracking(saude.tracker), flush=True)  # noqa: T201
                 print(_format_regras(saude.rules), flush=True)  # noqa: T201

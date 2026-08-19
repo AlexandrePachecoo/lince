@@ -651,9 +651,24 @@ class AgentConfig:
     tracking: TrackingOptions = field(default_factory=TrackingOptions)
     ffmpeg_bin: str = "ffmpeg"
 
+    config_version: str | None = None
+    """Versão do documento que produziu esta configuração (§5.2). Opaca: o agente só a
+    repassa no evento (`versions.config`) e no heartbeat (§5.3). `None` é o agente
+    montado por flags de linha de comando — não há versão a declarar, e inventar uma
+    seria pior que não ter: a nuvem acharia que sabe sob qual calibração o evento
+    nasceu."""
+
     def __post_init__(self) -> None:
         if not self.tenant_id or not self.store_id:
             raise ValueError("tenant_id e store_id são obrigatórios (NFR-6)")
+        if self.config_version is not None and not 0 < len(self.config_version) <= 64:
+            # O limite é do contrato (`versions.config`, maxLength 64). Recusar aqui é
+            # a diferença entre não subir e subir para descobrir semanas depois, quando
+            # o link voltar, que a loja inteira foi para a fila morta por `4xx`.
+            raise ValueError(
+                f"config_version tem {len(self.config_version)} caracteres; o contrato "
+                "do §5 aceita de 1 a 64"
+            )
         if not self.cameras:
             raise ValueError("o agente precisa de ao menos uma câmera")
 

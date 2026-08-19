@@ -56,10 +56,10 @@ cd apps/agent && uv run ruff check src tests && uv run ruff format --check src t
 
 | Componente | Situação |
 |---|---|
-| `apps/agent` | Estágios 1 a 6 (§3.1 a §3.6) ligados por `runtime.py`. As zonas ainda vêm da linha de comando, não da nuvem |
+| `apps/agent` | Estágios 1 a 6 (§3.1 a §3.6) ligados por `runtime.py`. N câmeras com zonas próprias, vindas de um arquivo no formato da nuvem; falta o poll |
 | `apps/api` | vazio |
 | `apps/dashboard` | vazio |
-| `packages/shared` | JSON Schema do evento e do PATCH do clipe (§5). Heartbeat e config ainda não |
+| `packages/shared` | JSON Schema do evento, do PATCH do clipe e da configuração (§5). Heartbeat ainda não |
 
 O caminho **pessoa cruza a linha → clipe → fila local → nuvem → clipe apagado do
 disco** funciona ponta a ponta, sem andaime nenhum: a borda vê, dá identidade e
@@ -70,17 +70,26 @@ existindo para câmera sem zonas desenhadas e para teste de instalação, e o qu
 produz sobe como `source: "manual"` — de propósito, para não contaminar a métrica de
 falso positivo por câmera (R-1).
 
-O que falta para o estágio 4 estar pronto de verdade é **de onde vêm as zonas**: hoje
-são coordenadas digitadas em `--linha-saida` e `--zona-caixa`, e o agente só aceita uma
-câmera. Em produção elas descem versionadas da nuvem (§5.2), desenhadas sobre o frame
-no dashboard (§4.5).
+As zonas já não são digitadas na linha de comando: `--config` lê o documento da §5.2 —
+a loja inteira, N câmeras com zonas próprias — **no mesmo formato que o
+`GET /v1/agents/config` vai devolver** (`packages/shared/schemas/config.v1.json`,
+exemplo em `apps/agent/config.exemplo.json`). Quando o poll existir, só muda quem
+entrega o dicionário para `config_loader.monta_config`; nada abaixo do `AgentConfig`
+percebe. As flags de zona continuam existindo para apontar o pipeline para uma câmera e
+olhar o que sai, e são recusadas junto com `--config` em vez de ignoradas.
+
+O que separa o documento do que é do box é a divisão da §5.2, e ela é dura: o que desce
+da nuvem são **quais** limiares; onde o `.onnx` pousou, qual Redis, qual API e qual
+credencial são da máquina e entram por flag. Uma resposta HTTP não pode repointar o
+disco de uma loja.
 
 Onde encostar em cada coisa:
 
-- **Configuração (§5.2)** é o gargalo agora. `AgentConfig` já suporta N câmeras com
-  zonas próprias e valida tudo na subida; o que não existe é como expressá-las — falta
-  um arquivo de configuração e, depois, o poll da nuvem. `__main__.py` monta uma câmera
-  só, a partir de `--camera`.
+- **Configuração (§5.2)** ainda é o gargalo, mas a metade que falta agora é o
+  **transporte**: `GET /v1/agents/config` com `ETag`/`304`, poll de 30 s e cache local
+  da última configuração válida (§5.4) — mais o `config_version` que já viaja no evento
+  passar a valer alguma coisa do outro lado. O parser e o contrato já existem, e é
+  `tests/test_contrato_config.py` que impede os dois lados de divergirem.
 - **Heartbeat (§5.3)** já tem os dados reunidos em `AgentHealth`, agora incluindo
   `inference_fps` e `dropped_frames` por câmera e os contadores de descarte do §3.4;
   falta o transporte, que depende do registro da §5.1.
@@ -106,6 +115,11 @@ uv run pytest -m rtsp         # ponta a ponta; exige `pnpm rtsp:up`
 uv run pytest -m redis        # fila local durável; exige `pnpm infra:up`
 uv run pytest -m modelo       # o .onnx de verdade; exige `bash scripts/modelo.sh`
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 --stats
+
+# a loja inteira a partir do documento da §5.2 — mesmo formato que a nuvem vai servir.
+# O caminho do modelo é do box, não do documento, e por isso continua sendo flag:
+uv run python -m lince_agent --config config.exemplo.json \
+  --model models/yolox_s.onnx --dry-run --stats
 
 # detecção e tracking contra vídeo com pessoas de verdade (cam3):
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 \

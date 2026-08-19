@@ -7,19 +7,18 @@ antes de o evento ser recusado em produção — que é onde isso apareceria, nu
 como `4xx` de validação e fila morta crescendo.
 
 Nada de rede: os `$ref` entre schemas são resolvidos por um registry montado a partir
-dos arquivos do repositório.
+dos arquivos do repositório (fixtures `registry` e `validador`, no `conftest.py`).
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
+from conftest import SCHEMAS
 from eventos import IDENTIDADE, INSTANTE, rascunho, resultado
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
-from referencing import Registry, Resource
 
 from lince_agent.clip.state import ClipStatus
 from lince_agent.outbox.event import (
@@ -30,30 +29,17 @@ from lince_agent.outbox.event import (
     new_event_id,
 )
 
-SCHEMAS = Path(__file__).resolve().parents[3] / "packages" / "shared" / "schemas"
 
-
-@pytest.fixture(scope="session")
-def registry() -> Registry:
-    recursos = []
-    for arquivo in sorted(SCHEMAS.glob("*.json")):
-        conteudo = json.loads(arquivo.read_text(encoding="utf-8"))
-        recursos.append((conteudo["$id"], Resource.from_contents(conteudo)))
-    assert recursos, f"nenhum schema em {SCHEMAS}"
-    return Registry().with_resources(recursos)
-
-
-def validador(nome: str, registry: Registry) -> Draft202012Validator:
-    schema = json.loads((SCHEMAS / nome).read_text(encoding="utf-8"))
-    return Draft202012Validator(schema, registry=registry)
-
-
-@pytest.mark.parametrize("nome", ["common.v1.json", "event.v1.json", "event-clip.v1.json"])
-def test_o_schema_em_si_e_valido(nome, registry):
+@pytest.mark.parametrize("caminho", sorted(SCHEMAS.glob("*.json")), ids=lambda c: c.name)
+def test_o_schema_em_si_e_valido(caminho):
     """Um erro de digitação em `type` ou `$defs` produz um schema que aceita tudo —
-    e os testes de payload abaixo passariam sem verificar nada."""
-    schema = json.loads((SCHEMAS / nome).read_text(encoding="utf-8"))
-    Draft202012Validator.check_schema(schema)
+    e os testes de payload abaixo passariam sem verificar nada.
+
+    O parâmetro é um glob, e não uma lista: schema novo entra no repositório sem
+    ninguém lembrar de acrescentá-lo aqui, e um schema quebrado que ninguém confere é
+    pior que schema nenhum.
+    """
+    Draft202012Validator.check_schema(json.loads(caminho.read_text(encoding="utf-8")))
 
 
 def payload_real() -> dict:
@@ -63,11 +49,11 @@ def payload_real() -> dict:
     )
 
 
-def test_payload_real_do_agente_valida(registry):
-    validador("event.v1.json", registry).validate(payload_real())
+def test_payload_real_do_agente_valida(validador):
+    validador("event.v1.json").validate(payload_real())
 
 
-def test_evento_manual_sem_regra_valida(registry):
+def test_evento_manual_sem_regra_valida(validador):
     event_id = new_event_id()
     payload = build_event_payload(
         rascunho(event_id, source=EventSource.MANUAL, rule_id=None, rule_version=None),
@@ -75,17 +61,17 @@ def test_evento_manual_sem_regra_valida(registry):
         identity=IDENTIDADE,
         reported_at=INSTANTE,
     )
-    validador("event.v1.json", registry).validate(payload)
+    validador("event.v1.json").validate(payload)
 
 
-def test_patch_do_clipe_valida(registry):
+def test_patch_do_clipe_valida(validador):
     event_id = new_event_id()
-    validador("event-clip.v1.json", registry).validate(
+    validador("event-clip.v1.json").validate(
         build_clip_patch(
             clip_block(resultado(event_id)), status=ClipStatus.OK, object_key="rede-abc/x.mp4"
         )
     )
-    validador("event-clip.v1.json", registry).validate(
+    validador("event-clip.v1.json").validate(
         build_clip_patch(
             clip_block(resultado(event_id)), status=ClipStatus.CLIP_FAILED, error="esgotou"
         )
@@ -106,7 +92,7 @@ def test_patch_do_clipe_valida(registry):
         ("tenant vazio", lambda p: p.update(tenant_id="")),
     ],
 )
-def test_payload_adulterado_e_rejeitado(nome, estrago, registry):
+def test_payload_adulterado_e_rejeitado(nome, estrago, validador):
     """Sem os casos negativos, os testes positivos podem estar verdes por vacuidade —
     um schema frouxo aceita tudo, inclusive o que a API vai recusar.
 
@@ -117,10 +103,10 @@ def test_payload_adulterado_e_rejeitado(nome, estrago, registry):
     estrago(payload)
 
     with pytest.raises(ValidationError):
-        validador("event.v1.json", registry).validate(payload)
+        validador("event.v1.json").validate(payload)
 
 
-def test_campo_novo_no_agente_sem_schema_quebra_alto(registry):
+def test_campo_novo_no_agente_sem_schema_quebra_alto(validador):
     """`additionalProperties: false` é escolha consciente: a incompatibilidade estoura
     no primeiro evento em vez de descartar em silêncio um campo que alguém achou que
     estava salvando."""
@@ -128,4 +114,4 @@ def test_campo_novo_no_agente_sem_schema_quebra_alto(registry):
     payload["track_id"] = 42
 
     with pytest.raises(ValidationError, match="track_id"):
-        validador("event.v1.json", registry).validate(payload)
+        validador("event.v1.json").validate(payload)

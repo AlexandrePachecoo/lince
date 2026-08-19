@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/config/v1.json",
+  "title": "GET /v1/agents/config",
+  "description": "Configuração da loja: câmeras, zonas, regras e limiares (§5.2). Puxada pelo agente, nunca empurrada (ADR-003). O mesmo documento é o que o agente lê de um arquivo local enquanto o endpoint não existe — é de propósito, para que só a origem mude quando ele existir. O que é do box e não da loja (URL do Redis, diretório dos clipes, caminho do .onnx, credencial) NÃO está aqui: repointar o disco de uma loja não pode ser efeito de uma resposta HTTP.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "config_version", "tenant_id", "store_id", "cameras"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "config_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "Opaco para o agente: ele só compara com o que tem e reporta no evento (`versions.config`) e no heartbeat (§5.3). É o que permite ler uma taxa histórica de falso positivo — metade dos eventos de um mês nasceu sob outros limiares."
+    },
+    "tenant_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+    "store_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+    "cameras": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/camera" },
+      "description": "`camera_id` único dentro da lista. JSON Schema não expressa essa unicidade; quem valida é o agente, e a consequência de repetir é clipe indo para o buffer da câmera errada."
+    },
+    "detection": { "$ref": "#/$defs/detection" },
+    "tracking": { "$ref": "#/$defs/tracking" }
+  },
+  "$defs": {
+    "fracao": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Limiar de score ou de IoU."
+    },
+    "positivo": { "type": "number", "exclusiveMinimum": 0 },
+    "nao_negativo": { "type": "number", "minimum": 0 },
+    "ponto": {
+      "type": "array",
+      "prefixItems": [{ "type": "number" }, { "type": "number" }],
+      "items": false,
+      "minItems": 2,
+      "description": "`[x, y]` em coordenadas do frame **decodificado** — o mesmo espaço em que o dashboard desenha (§4.5) e em que as caixas saem do §3.2. O eixo y cresce para baixo. Ponto fora de `decode.width`/`decode.height` é recusado pelo agente na subida: uma zona fora do quadro não contém ninguém, o tempo de caixa fica zero, e toda saída da loja vira alerta (R-1)."
+    },
+    "linha_orientada": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origem", "destino"],
+      "properties": {
+        "origem": { "$ref": "#/$defs/ponto" },
+        "destino": { "$ref": "#/$defs/ponto" }
+      },
+      "description": "A linha de saída, orientada de `origem` para `destino`: desenhe da esquerda para a direita e o lado de dentro da loja fica embaixo (y maior). Cruzar de dentro para fora dispara; o inverso é registrado como entrada. Os campos são nomeados, e não um par de pontos solto, porque desenhar a linha ao contrário é o erro de operação mais provável e o payload precisa ser legível por quem for depurá-lo."
+    },
+    "poligono": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vertices"],
+      "properties": {
+        "vertices": {
+          "type": "array",
+          "minItems": 3,
+          "items": { "$ref": "#/$defs/ponto" },
+          "description": "Fechado implicitamente: o último vértice liga no primeiro. Convexidade não é exigida — caixa de mercado de bairro raramente é retângulo."
+        }
+      }
+    },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["camera_id", "url"],
+      "properties": {
+        "camera_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "description": "RTSP do substream (§3.1). Pode carregar credencial, então nunca vai para log nem para o evento."
+        },
+        "detect": {
+          "type": "boolean",
+          "description": "Se a câmera é elegível para IA. `false` é o R-3: ângulo, altura ou contraluz que a tornam inútil para detecção. Ela continua alimentando o buffer do clipe e respondendo a gatilho manual, sem gastar inferência."
+        },
+        "decode": { "$ref": "#/$defs/decode" },
+        "supervision": { "$ref": "#/$defs/supervision" },
+        "clip": { "$ref": "#/$defs/clip" },
+        "rules": { "$ref": "#/$defs/rules" }
+      }
+    },
+    "decode": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "O que vira argumento do ffmpeg (§3.1). Todo campo é opcional: ausente significa o default do agente, que NÃO é repetido aqui de propósito — dois lugares declarando o mesmo default divergem, e o segundo é sempre o que ninguém atualiza.",
+      "properties": {
+        "sample_fps": { "$ref": "#/$defs/positivo" },
+        "width": { "type": "integer", "exclusiveMinimum": 0 },
+        "height": { "type": "integer", "exclusiveMinimum": 0 },
+        "pixel_format": { "enum": ["bgr24", "nv12", "yuv420p"] },
+        "hwaccel": {
+          "enum": ["none", "cuda", "cuda-gpu-filter"],
+          "description": "Pedido, não garantia: o agente confere em tempo de execução e cai para CPU se a placa ou o driver não estiverem lá (§3.2)."
+        },
+        "rtsp_transport": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "socket_timeout_s": { "$ref": "#/$defs/positivo" },
+        "probesize_bytes": { "type": "integer", "exclusiveMinimum": 0 },
+        "analyze_duration_s": { "$ref": "#/$defs/positivo" },
+        "low_latency": { "type": "boolean" },
+        "wallclock_timestamps": { "type": "boolean" },
+        "log_level": { "type": "string", "minLength": 1, "maxLength": 16 }
+      }
+    },
+    "supervision": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Reconexão e watchdog (§3.1). Nada disto é delegável ao ffmpeg: `-reconnect` é opção de HTTP e é ignorada em silêncio numa entrada RTSP.",
+      "properties": {
+        "backoff_base_s": { "$ref": "#/$defs/positivo" },
+        "backoff_cap_s": { "$ref": "#/$defs/positivo" },
+        "backoff_jitter_s": { "$ref": "#/$defs/nao_negativo" },
+        "offline_after_failures": { "type": "integer", "minimum": 1 },
+        "stall_timeout_s": { "$ref": "#/$defs/positivo" },
+        "stop_grace_s": { "$ref": "#/$defs/nao_negativo" }
+      }
+    },
+    "clip": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Buffer circular e corte (§3.5). As relações entre os campos — `window_s` precisa cobrir pré-roll + pós-roll + tolerância, e os rolls precisam ser iguais entre as câmeras do mesmo agente — são verificadas pelo agente, não aqui: JSON Schema não as expressa, e recusar na subida com uma mensagem que diz o que fazer vale mais que um `4xx` genérico.",
+      "properties": {
+        "window_s": { "$ref": "#/$defs/positivo" },
+        "pre_roll_s": { "$ref": "#/$defs/positivo" },
+        "post_roll_s": { "$ref": "#/$defs/positivo" },
+        "post_roll_grace_s": { "$ref": "#/$defs/nao_negativo" },
+        "max_bytes": { "type": "integer", "exclusiveMinimum": 0 },
+        "max_disk_bytes": { "type": "integer", "exclusiveMinimum": 0 },
+        "remux_timeout_s": { "$ref": "#/$defs/positivo" },
+        "pending_requests": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Estágio 4 (§3.4), **por câmera**: a linha de saída de uma é o corredor da outra. Habilitada exige `linha_saida` e ao menos uma zona de caixa — sem zona, o tempo no caixa é sempre zero e toda saída da loja vira alerta (R-1). Quem recusa é o agente, na subida.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "rule_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+        "rule_version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Sobe no evento (`rule.version`). Incremente a cada recalibração de zona ou limiar desta câmera, senão duas semanas de taxa de falso positivo não são comparáveis (§6)."
+        },
+        "linha_saida": { "$ref": "#/$defs/linha_orientada" },
+        "zonas_caixa": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/poligono" },
+          "description": "Mais de uma porque mercado de bairro tem duas ou três posições de caixa. Engolir o corredor entre elas num polígono só transformaria o corredor em zona de caixa, e quem passa direto sairia descartado."
+        },
+        "tempo_caixa_min_s": {
+          "$ref": "#/$defs/positivo",
+          "description": "O N da regra: cruzou a saída sem ter ficado N segundos no caixa. Pendência §10.5 — é hipótese de projeto até haver dado de loja."
+        },
+        "vida_min_s": { "$ref": "#/$defs/nao_negativo" },
+        "hits_min": { "type": "integer", "minimum": 1 },
+        "intervalo_max_s": { "$ref": "#/$defs/positivo" },
+        "janela_tempo_caixa": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "detection": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Estágio 2 (§3.2): um modelo e uma fila para o agente inteiro (ADR-007). O arquivo do modelo não está aqui — ele desce pelo `GET /v1/models/current` com checksum (ADR-006), e onde ele pousa no disco é assunto do box.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "input_size": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "multipleOf": 32,
+          "description": "Lado da entrada do modelo, e o maior lado de `decode` precisa bater exatamente com ele: nenhum redimensionamento acontece em Python. Múltiplo de 32 porque é o maior stride da grade de âncoras."
+        },
+        "score_threshold": {
+          "$ref": "#/$defs/fracao",
+          "description": "**Piso** do detector, não o limiar de decisão — este mora em `tracking.high_threshold`. Baixo de propósito: é o que alimenta a segunda passada do ByteTrack, e subir daqui esconde do tracker justamente o dado de que ele precisa (§3.3)."
+        },
+        "iou_threshold": { "$ref": "#/$defs/fracao" },
+        "classes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "integer", "minimum": 0 },
+          "description": "Índices COCO de interesse; 0 é `person`. As outras 79 seriam inferência paga e descartada três estágios depois."
+        },
+        "queue_size": { "type": "integer", "minimum": 1 },
+        "fps_window": { "type": "integer", "minimum": 2 }
+      }
+    },
+    "tracking": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Estágio 3 (§3.3). Toda janela é em **segundos, não em frames**: a cadência é 3 fps e varia com o descarte do §3.2, então contar frames faria a tolerância a oclusão mudar sozinha conforme a carga do box. Pelo mesmo motivo, os limiares de IoU aqui são bem mais frouxos que os das implementações de referência, que assumem 30 fps.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "high_threshold": { "$ref": "#/$defs/fracao" },
+        "iou_min": { "$ref": "#/$defs/fracao" },
+        "iou_min_baixa": { "$ref": "#/$defs/fracao" },
+        "iou_min_novo": { "$ref": "#/$defs/fracao" },
+        "min_hits": { "type": "integer", "minimum": 1 },
+        "max_perdido_s": { "$ref": "#/$defs/nao_negativo" },
+        "max_tracks": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

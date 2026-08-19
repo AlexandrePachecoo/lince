@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "config_version": "exemplo-1",
+  "tenant_id": "dev",
+  "store_id": "loja-dev",
+  "cameras": [
+    {
+      "camera_id": "cam3",
+      "url": "rtsp://localhost:8554/cam3",
+      "rules": {
+        "enabled": true,
+        "rule_id": "saida-sem-caixa",
+        "rule_version": 1,
+        "linha_saida": {
+          "origem": [0, 400],
+          "destino": [640, 400]
+        },
+        "zonas_caixa": [
+          { "vertices": [[0, 410], [260, 410], [260, 478], [0, 478]] }
+        ],
+        "tempo_caixa_min_s": 3,
+        "vida_min_s": 1
+      }
+    },
+    {
+      "camera_id": "cam1",
+      "url": "rtsp://localhost:8554/cam1"
+    }
+  ],
+  "detection": {
+    "enabled": true
+  }
+}
