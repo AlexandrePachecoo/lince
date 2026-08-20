@@ -1,0 +1,95 @@
+// Schema mínimo para servir GET /v1/agents/config (§5.2). Nenhuma outra rota
+// existe ainda — não há EVENTO, TRIAGEM, etc. do diagrama ER de docs/arquitetura.md §6.
+//
+// Zonas e regras são JSONB por câmera, não tabelas ZONA/REGRA_CONFIG normalizadas:
+// decisão explícita desta fatia, porque não há dashboard ainda para justificar editar
+// zona por zona num formulário. Normalizar fica para quando essa necessidade existir.
+//
+// config_version/ETag do documento NÃO são coluna nenhuma aqui: são hash do conteúdo,
+// calculados sob demanda em src/config/. Uma coluna exigiria lembrar de bumpá-la em
+// todo caminho de escrita futuro — e hoje não existe nenhum. Ver src/config/etag.ts.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Tenant {
+  id       String   @id
+  nome     String
+  criadoEm DateTime @default(now()) @map("criado_em")
+
+  lojas Loja[]
+
+  @@map("tenant")
+}
+
+model Loja {
+  id        String @id
+  tenantId  String @map("tenant_id")
+  nome      String
+
+  // Blocos de nível-loja do documento config.v1.json (§5.2). JSONB porque o schema
+  // de verdade é o JSON Schema em packages/shared/schemas/config.v1.json, validado
+  // em app (src/config/schema-validator.ts) — não há necessidade de espelhar cada
+  // campo em coluna própria do Postgres.
+  detection Json?
+  tracking  Json?
+
+  criadoEm     DateTime @default(now()) @map("criado_em")
+  atualizadoEm DateTime @updatedAt @map("atualizado_em")
+
+  tenant  Tenant   @relation(fields: [tenantId], references: [id])
+  cameras Camera[]
+  agentes Agente[]
+
+  @@index([tenantId])
+  @@map("loja")
+}
+
+model Camera {
+  id       String @id @default(uuid())
+  cameraId String @map("camera_id")
+  lojaId   String @map("loja_id")
+  url      String
+  detect   Boolean @default(true)
+
+  // Blocos por câmera do documento (§5.2): decode, supervision, clip, rules.
+  decode      Json?
+  supervision Json?
+  clip        Json?
+  rules       Json?
+
+  criadoEm     DateTime @default(now()) @map("criado_em")
+  atualizadoEm DateTime @updatedAt @map("atualizado_em")
+
+  loja Loja @relation(fields: [lojaId], references: [id])
+
+  // camera_id é único dentro da loja (config.v1.json exige isso; ver comentário na
+  // descrição de "cameras" do schema — repetir camera_id manda clipe pro buffer errado).
+  @@unique([lojaId, cameraId])
+  @@index([lojaId])
+  @@map("camera")
+}
+
+model Agente {
+  id          String   @id @default(uuid())
+  lojaId      String   @map("loja_id")
+  // SHA-256 hex do token, nunca o token em claro — mesmo sendo seed de dev (§5.1
+  // ainda não tem POST /v1/agents/register; este é o token semeado direto no banco).
+  tokenHash   String   @unique @map("token_hash")
+  // Prefixo em claro só para log/debug sem reconstituir o segredo.
+  tokenPrefix String   @map("token_prefix")
+  ativo       Boolean  @default(true)
+  criadoEm    DateTime @default(now()) @map("criado_em")
+  ultimoUsoEm DateTime? @map("ultimo_uso_em")
+
+  loja Loja @relation(fields: [lojaId], references: [id])
+
+  @@index([lojaId])
+  @@map("agente")
+}

@@ -31,11 +31,12 @@ models/
 
 # --- Mídia ------------------------------------------------------------------
 # Clipe de evento é dado pessoal (R-9). Não entra no repositório em hipótese
-# alguma, nem como fixture.
+# alguma, nem como fixture. `.ts` NÃO entra aqui: colide com o TypeScript de
+# apps/api e apps/dashboard, e o agente não produz segmento MPEG-TS (os clipes
+# saem em fMP4 -- init.mp4 + frag_NNNNN.mp4 --, já cobertos por *.mp4).
 clips/
 *.mp4
 *.mkv
-*.ts
 
 # --- Prisma -----------------------------------------------------------------
 prisma/*.db

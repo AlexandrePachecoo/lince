@@ -57,7 +57,7 @@ cd apps/agent && uv run ruff check src tests && uv run ruff format --check src t
 | Componente | Situação |
 |---|---|
 | `apps/agent` | Estágios 1 a 6 (§3.1 a §3.6) ligados por `runtime.py`. N câmeras com zonas próprias, vindas do `GET /v1/agents/config` com `ETag`/`304`, poll de 30 s, cache local e troca a quente |
-| `apps/api` | vazio |
+| `apps/api` | `GET /v1/agents/config` de verdade (Fastify + Prisma + Postgres), com `ETag`/`304`, autenticação por token semeado e câmera em JSONB. Resto (registro do agente, eventos, heartbeat, modelo, dashboard) ainda não existe |
 | `apps/dashboard` | vazio |
 | `packages/shared` | JSON Schema do evento, do PATCH do clipe e da configuração (§5). Heartbeat ainda não |
 
@@ -103,13 +103,31 @@ da nuvem são **quais** limiares; onde o `.onnx` pousou, qual Redis, qual API e 
 credencial são da máquina e entram por flag. Uma resposta HTTP não pode repointar o
 disco de uma loja.
 
+`apps/api` existe agora, mas só serve `GET /v1/agents/config` — ver
+[`apps/api/prisma/schema.prisma`](apps/api/prisma/schema.prisma) e
+[`apps/api/src/routes/agents/config.ts`](apps/api/src/routes/agents/config.ts). Decisões
+que valem registrar porque a próxima rota vai bater nelas de novo:
+
+- `config_version`/`ETag` **não são coluna nenhuma no Postgres** — são hash SHA-256 do
+  documento canônico (`apps/api/src/config/canonical-json.ts`), calculado sob demanda a
+  cada `GET`. Uma coluna exigiria lembrar de bumpá-la em todo caminho de escrita futuro;
+  hash sob demanda é correto por construção. `ETag` e `config_version` são o mesmo valor
+  — uma fonte, não duas rotinas de hash para manter sincronizadas.
+- Câmera é **JSONB por câmera** (`decode`/`supervision`/`clip`/`rules`), não tabelas
+  `ZONA`/`REGRA_CONFIG` normalizadas do §6 — decisão desta fatia, para quando o
+  dashboard existir e precisar editar zona por zona num formulário.
+- Autenticação é por **token semeado direto no banco** (`scripts/seed.ts`), hash SHA-256
+  em `Agente.tokenHash` — nunca o token em claro, nem em seed de dev. Não existe
+  `POST /v1/agents/register` ainda; é a próxima peça óbvia do §5.1.
+- O documento que a API monta é validado contra
+  `packages/shared/schemas/config.v1.json` via Ajv antes de responder — defesa em
+  profundidade, o par do lado da API do que `tests/test_contrato_config.py` garante do
+  lado do agente. Uma falha aí vira `500` (bug interno), nunca um `200` malformado.
+
 Onde encostar em cada coisa:
 
-- **Configuração (§5.2)** está fechada do lado do agente. O que falta é o outro lado:
-  o `GET /v1/agents/config` de verdade, servido pela API, com `ETag` estável e o
-  `config_version` valendo alguma coisa. Quem impede os dois lados de divergirem é
-  `tests/test_contrato_config.py`; quem impede o agente de aplicar o que não pode é
-  `tests/test_config_diff.py`.
+- **Registro do agente (§5.1)** é a peça que falta para tirar o token semeado do seed e
+  ter `POST /v1/agents/register` de verdade trocando token de bootstrap por credencial.
 - **Heartbeat (§5.3)** já tem os dados reunidos em `AgentHealth`, agora incluindo
   `inference_fps` e `dropped_frames` por câmera e os contadores de descarte do §3.4;
   falta o transporte, que depende do registro da §5.1.
@@ -165,6 +183,22 @@ uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 --camera-id cam
   --model models/yolox_s.onnx --dry-run --stats --duration 60 \
   --linha-saida 0,400,640,400 --zona-caixa 0,410,260,410,260,478,0,478 \
   --tempo-caixa 3 --vida-minima 1
+```
+
+```bash
+cd apps/api
+cp .env.example .env           # senha já bate com infra/.env por padrão
+pnpm install
+pnpm migrate                   # aplica prisma/migrations contra DATABASE_URL
+DATABASE_URL=$TEST_DATABASE_URL pnpm exec prisma migrate deploy   # só na 1ª vez, schema de teste
+pnpm test                      # Postgres real (TEST_DATABASE_URL), nada mockado
+pnpm lint
+pnpm seed                      # tenant/loja/agente/câmeras de dev, espelha config.exemplo.json
+pnpm dev                       # sobe em :3000
+
+# a mesma loja semeada, agora puxada pela API de verdade (em vez de --config):
+cd ../agent && uv run python -m lince_agent --config-nuvem --api-url http://localhost:3000 \
+  --api-token dev-agent-token-local-only --model models/yolox_s.onnx --dry-run --stats
 ```
 
 Na linha `[regras]` o que se vigia são os **descartes**, não os eventos: numa loja de
