@@ -96,6 +96,29 @@ class RuleEngine:
             self.expirados += sum(1 for estado in self._tracks.values() if not estado.decidido)
         self._tracks.clear()
 
+    def reconfigure(self, options: RuleOptions) -> None:
+        """Troca zonas, tempos e limiares desta câmera, e **esquece os tracks em curso**.
+
+        Zerar não é conservadorismo, é correção. O estado por track guarda duas coisas
+        medidas contra a calibração antiga: o tempo acumulado dentro da zona de caixa e
+        o último ponto com lado conhecido da linha de saída. Com zonas novas, o tempo
+        foi contado dentro de um polígono que não existe mais, e o lado é o lado de uma
+        linha que mudou de lugar — uma pessoa parada no caixa poderia "atravessar" sem
+        andar um centímetro, só porque a linha veio até ela.
+
+        O preço é conhecido e pequeno: quem estava em trânsito no instante da troca não
+        gera evento, e conta como `expirados`. Alguns segundos de cegueira numa câmera,
+        no minuto em que alguém está recalibrando aquela câmera pelo dashboard. O outro
+        lado do erro seria um evento medido metade numa calibração e metade na outra,
+        que sobe com `versions.config` de uma só e é indefensável na triagem.
+
+        `_tempos` é recriado porque o `maxlen` vem de `janela_tempo_caixa`; as amostras
+        antigas são de outra zona e não devem sobreviver à troca.
+        """
+        self._options = options
+        self._tempos = deque(maxlen=max(options.janela_tempo_caixa, 1))
+        self.reset("configuração nova")
+
     # --- por track ----------------------------------------------------------
 
     def _avalia(self, track: Track, agora: float) -> RuleTrigger | None:
@@ -289,6 +312,20 @@ class RuleEnginePool:
         linha numa câmera.
         """
         self._motores[camera_id] = RuleEngine(camera_id, options)
+
+    def reconfigure(self, camera_id: str, options: RuleOptions) -> bool:
+        """Recalibra uma câmera com o agente em pé (§5.2). Devolve se a câmera existia.
+
+        Não usa `register`, que recriaria o motor e zeraria os contadores junto — e
+        `eventos`, `travessias_*` e `descartes` são a métrica de falso positivo por
+        câmera (R-1). Perdê-los a cada recalibração destruiria exatamente a série que
+        diz se a recalibração funcionou.
+        """
+        motor = self._motores.get(camera_id)
+        if motor is None:
+            return False
+        motor.reconfigure(options)
+        return True
 
     def update(self, resultado: TrackingResult) -> tuple[RuleTrigger, ...]:
         motor = self._motores.get(resultado.camera_id)

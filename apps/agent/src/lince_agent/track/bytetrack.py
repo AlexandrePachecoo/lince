@@ -98,6 +98,15 @@ class ByteTracker:
         self._ultimo_at: float | None = None
         self.counters = TrackerCounters()
 
+    def reconfigure(self, options: TrackingOptions) -> None:
+        """Troca os limiares a partir do próximo `update`, preservando os tracks.
+
+        Seguro porque `TrackingOptions` só carrega limiares de associação e de morte —
+        nada dele foi congelado em estado na construção. O `max_tracks` novo, se for
+        menor, é aplicado na próxima poda, não retroativamente.
+        """
+        self._options = options
+
     # --- ciclo principal ----------------------------------------------------
 
     def update(self, deteccoes: tuple[Detection, ...], *, at: float) -> tuple[Track, ...]:

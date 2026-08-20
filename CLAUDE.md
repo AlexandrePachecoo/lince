@@ -56,7 +56,7 @@ cd apps/agent && uv run ruff check src tests && uv run ruff format --check src t
 
 | Componente | Situação |
 |---|---|
-| `apps/agent` | Estágios 1 a 6 (§3.1 a §3.6) ligados por `runtime.py`. N câmeras com zonas próprias, vindas de um arquivo no formato da nuvem; falta o poll |
+| `apps/agent` | Estágios 1 a 6 (§3.1 a §3.6) ligados por `runtime.py`. N câmeras com zonas próprias, vindas do `GET /v1/agents/config` com `ETag`/`304`, poll de 30 s, cache local e troca a quente |
 | `apps/api` | vazio |
 | `apps/dashboard` | vazio |
 | `packages/shared` | JSON Schema do evento, do PATCH do clipe e da configuração (§5). Heartbeat ainda não |
@@ -70,13 +70,33 @@ existindo para câmera sem zonas desenhadas e para teste de instalação, e o qu
 produz sobe como `source: "manual"` — de propósito, para não contaminar a métrica de
 falso positivo por câmera (R-1).
 
-As zonas já não são digitadas na linha de comando: `--config` lê o documento da §5.2 —
-a loja inteira, N câmeras com zonas próprias — **no mesmo formato que o
-`GET /v1/agents/config` vai devolver** (`packages/shared/schemas/config.v1.json`,
-exemplo em `apps/agent/config.exemplo.json`). Quando o poll existir, só muda quem
-entrega o dicionário para `config_loader.monta_config`; nada abaixo do `AgentConfig`
-percebe. As flags de zona continuam existindo para apontar o pipeline para uma câmera e
-olhar o que sai, e são recusadas junto com `--config` em vez de ignoradas.
+As zonas já não são digitadas na linha de comando, e já não vêm só de arquivo. Há duas
+fontes do mesmo documento da §5.2 (`packages/shared/schemas/config.v1.json`, exemplo em
+`apps/agent/config.exemplo.json`): `--config ARQUIVO` e `--config-nuvem`, que puxa do
+`GET /v1/agents/config` e segue consultando a cada 30 s. As duas passam pelo **mesmo**
+`config_loader.monta_config`; nada abaixo do `AgentConfig` sabe de onde veio. As flags de
+zona continuam existindo para apontar o pipeline para uma câmera e olhar o que sai, e são
+recusadas junto com as duas em vez de ignoradas.
+
+O transporte da configuração está inteiro e é onde mora a decisão mais fácil de errar do
+§5.2, a de **o que dá para trocar com o agente em pé**:
+
+- `config_diff.py` classifica cada campo como `A_QUENTE` ou `ESTRUTURAL`, e
+  `test_config_diff.py` falha se um campo novo ficar sem classificação. Isso não é zelo:
+  campo sem classificação é campo ignorado pelo diff, e ignorado pelo diff significa
+  *trocado a quente sem ninguém reiniciar nada* — o lado errado do erro.
+- **Tudo ou nada por documento.** Um campo estrutural diferente e nada é aplicado, nem a
+  metade quente. O evento sobe com `versions.config`, e um agente rodando "a v7 com as
+  câmeras da v6" declararia v7: a investigação de um falso positivo partiria de uma
+  calibração que nunca existiu (R-1).
+- Recalibrar uma câmera **zera os tracks em curso dela**, e só dela. O tempo acumulado no
+  caixa foi medido dentro de um polígono que não existe mais. Custa segundos de cegueira
+  numa câmera; o outro lado seria um evento medido metade em cada calibração.
+- Os limiares de tracking, ao contrário, trocam **sem** zerar nada: são limiares de
+  associação, não estado, e o Kalman de quem está andando continua válido.
+- O cache local (§5.4) guarda o **documento cru**, não o `AgentConfig` — um terceiro
+  formato seria o menos testado dos três. E o que o cache resolve não é o poll em regime,
+  é a subida: box que reinicia com o link caído.
 
 O que separa o documento do que é do box é a divisão da §5.2, e ela é dura: o que desce
 da nuvem são **quais** limiares; onde o `.onnx` pousou, qual Redis, qual API e qual
@@ -85,11 +105,11 @@ disco de uma loja.
 
 Onde encostar em cada coisa:
 
-- **Configuração (§5.2)** ainda é o gargalo, mas a metade que falta agora é o
-  **transporte**: `GET /v1/agents/config` com `ETag`/`304`, poll de 30 s e cache local
-  da última configuração válida (§5.4) — mais o `config_version` que já viaja no evento
-  passar a valer alguma coisa do outro lado. O parser e o contrato já existem, e é
-  `tests/test_contrato_config.py` que impede os dois lados de divergirem.
+- **Configuração (§5.2)** está fechada do lado do agente. O que falta é o outro lado:
+  o `GET /v1/agents/config` de verdade, servido pela API, com `ETag` estável e o
+  `config_version` valendo alguma coisa. Quem impede os dois lados de divergirem é
+  `tests/test_contrato_config.py`; quem impede o agente de aplicar o que não pode é
+  `tests/test_config_diff.py`.
 - **Heartbeat (§5.3)** já tem os dados reunidos em `AgentHealth`, agora incluindo
   `inference_fps` e `dropped_frames` por câmera e os contadores de descarte do §3.4;
   falta o transporte, que depende do registro da §5.1.
@@ -121,6 +141,11 @@ uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 --stats
 uv run python -m lince_agent --config config.exemplo.json \
   --model models/yolox_s.onnx --dry-run --stats
 
+# o mesmo documento, agora puxado da nuvem a cada 30 s (§5.2), com cache local para
+# reiniciar sem internet (§5.4). `--config`, `--config-nuvem` e `--camera` se excluem:
+uv run python -m lince_agent --config-nuvem --api-url http://localhost:3000 \
+  --model models/yolox_s.onnx --dry-run --stats
+
 # detecção e tracking contra vídeo com pessoas de verdade (cam3):
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 \
   --model models/yolox_s.onnx --stats
@@ -145,6 +170,11 @@ uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 --camera-id cam
 Na linha `[regras]` o que se vigia são os **descartes**, não os eventos: numa loja de
 verdade `pagou` tem que dominar tudo. Perto de zero com eventos subindo é zona de caixa
 errada; `vida curta` alto é o tracker fragmentando (R-2), e aí mexer no N não adianta.
+
+Na linha `[config]` o que se vigia é a **idade do último sucesso**, não a contagem de
+`304`: com o link caído o poll falha em silêncio por desenho (§5.4), e é esse relógio
+andando que denuncia uma loja rodando calibração velha. `pendente=` aparecendo é
+configuração válida que exige reinício, e o log diz quais campos a barraram.
 
 ## Convenções
 
@@ -234,6 +264,32 @@ Não reintroduza nenhuma destas — cada uma custou depuração e tem teste guar
 - **Na reconexão da câmera os IDs de track recomeçam do 1.** Quem guarda estado por
   `track_id` — o §3.4 guarda — tem que zerar junto com o `TrackerPool`, senão a primeira
   pessoa da sessão nova herda o desfecho de outra e nunca mais alerta.
+- **`urllib` levanta `HTTPError` para o `304` também.** No poll de configuração o `304`
+  é o caminho **saudável** e o mais frequente de todos — 2 880 vezes por dia, por loja.
+  Tratá-lo como exceção põe o agente em backoff exponencial por estar tudo bem, e a loja
+  para de receber calibração sem um erro em lugar nenhum.
+- **`classify_response` não serve ao poll de configuração.** Ela é do envio de evento e
+  diverge em dois pontos que doem: `304` cairia em `RETRY`, e `404` significa "evento
+  desconhecido, reposte" no envio e "esta nuvem não conhece este agente" no poll. Por
+  isso existe `classify_config_response`, e por isso ela tem teste comparando as duas.
+- **`200` sem corpo não é configuração.** É proxy, redirecionamento capturado ou API meio
+  implantada. Passá-lo ao loader contaria erro de contrato num problema de rede e mandaria
+  procurar o bug no documento em vez de no caminho até ele.
+- **Documento inválido não pode avançar o `ETag` nem entrar no cache.** Avançar o `ETag`
+  faria a nuvem responder `304` para um documento que este agente nunca conseguiu ler — e
+  o conserto, publicado em seguida, viria como `304` também. Cachear é pior: vira a
+  configuração de subida do próximo boot sem rede, e aí a loja não sobe mais.
+- **`200` sem `ETag` tem que *esquecer* o anterior.** Manter o antigo pede um `304` que
+  significaria "você ainda tem a v1" quando o agente já está na v2, e o poll para de
+  enxergar toda mudança seguinte. Falha permanente e sem sintoma.
+- **Contador de transporte não pode dizer "aplicado".** O poller não sabe se o runtime
+  aplicou: documento estrutural é recebido, validado, cacheado e **recusado**. Por isso
+  `ConfigPollerStats.recebidos` e `ConfigHealth.aplicacoes` são números diferentes, lado
+  a lado no `--stats`.
+- **`pkill -f` casa com a própria linha de comando do shell que o executa.** Não é bug do
+  projeto, mas custou uma depuração aqui: um `pkill -f "tmp/nuvem.py"` dentro de um script
+  que menciona esse caminho mata o próprio script, e o sintoma é um comando que "sai com
+  144" sem log nenhum.
 - **Detecção fraca nunca cria track.** O piso do detector é 0,10 para alimentar a segunda
   passada do ByteTrack, e é a regra "só continua track existente" que impede isso de
   virar falso positivo.

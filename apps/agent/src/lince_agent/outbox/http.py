@@ -52,9 +52,14 @@ class CloudResponse:
     """Cabeçalho `Retry-After` sem interpretar: convertê-lo exige relógio, e este
     módulo não tem nem quer ter um."""
 
+    etag: str | None = None
+    """Cabeçalho `ETag` da resposta, opaco (§5.2). Só o `GET /v1/agents/config` o usa;
+    guardá-lo aqui em vez de num tipo próprio evita um segundo formato de resposta para
+    manter em sincronia — o valor é `None` para todo o resto sem custo nenhum."""
+
 
 class CloudClient(Protocol):
-    """As três chamadas do agente para a nuvem (§5.2)."""
+    """As quatro chamadas do agente para a nuvem (§5.2)."""
 
     def post_event(self, payload: dict[str, object], *, event_id: str) -> CloudResponse: ...
 
@@ -63,6 +68,11 @@ class CloudClient(Protocol):
         ...
 
     def patch_event(self, event_id: str, payload: dict[str, object]) -> CloudResponse: ...
+
+    def get_config(self, *, etag: str | None = None) -> CloudResponse:
+        """Configuração da loja (§5.2). Com `etag`, manda `If-None-Match` e a nuvem
+        responde `304` sem corpo quando nada mudou."""
+        ...
 
 
 class HttpCloudClient:
@@ -102,6 +112,27 @@ class HttpCloudClient:
             "PATCH", urljoin(self._base_url, f"v1/events/{event_id}"), payload
         )
 
+    def get_config(self, *, etag: str | None = None) -> CloudResponse:
+        """Configuração da loja (§5.2), condicionada ao `ETag` que o agente já tem.
+
+        Sem corpo — e é por isso que não passa por `_json_request`. Um `GET` com
+        `Content-Type: application/json` e zero byte de corpo não dá erro em lugar
+        nenhum, mas é mentira sobre o que a requisição carrega, e alguns proxies
+        respondem a isso de maneiras criativas.
+        """
+        cabecalhos = self._cabecalhos()
+        if etag:
+            # `If-None-Match` é o outro lado do `ETag`: sem ele, a nuvem devolve o
+            # documento inteiro a cada 30 s para sempre, e o `304` do §5.2 — que é o
+            # caso comum, milhares de vezes por dia — nunca acontece.
+            cabecalhos["If-None-Match"] = etag
+        requisicao = urllib.request.Request(  # noqa: S310 - base_url é configuração
+            urljoin(self._base_url, "v1/agents/config"),
+            method="GET",
+            headers=cabecalhos,
+        )
+        return self._enviar(requisicao, timeout_s=self._timeout_s)
+
     def put_clip(self, url: str, path: Path, *, content_type: str = "video/mp4") -> CloudResponse:
         tamanho = path.stat().st_size
         with path.open("rb") as arquivo:
@@ -125,6 +156,15 @@ class HttpCloudClient:
     def _user_agent(self) -> str:
         return f"lince-agent/{__version__}"
 
+    def _cabecalhos(self, **extras: str) -> dict[str, str]:
+        """Os cabeçalhos comuns a toda chamada à API. O `PUT` no R2 não passa por aqui:
+        lá a credencial está na assinatura da URL, e mandar o nosso `Bearer` junto seria
+        vazar a credencial da loja para um terceiro."""
+        cabecalhos = {"Accept": _JSON, "User-Agent": self._user_agent, **extras}
+        if self._token:
+            cabecalhos["Authorization"] = f"Bearer {self._token}"
+        return cabecalhos
+
     def _json_request(
         self,
         metodo: str,
@@ -133,14 +173,7 @@ class HttpCloudClient:
         *,
         extra_headers: dict[str, str] | None = None,
     ) -> CloudResponse:
-        cabecalhos = {
-            "Content-Type": _JSON,
-            "Accept": _JSON,
-            "User-Agent": self._user_agent,
-            **(extra_headers or {}),
-        }
-        if self._token:
-            cabecalhos["Authorization"] = f"Bearer {self._token}"
+        cabecalhos = self._cabecalhos(**{"Content-Type": _JSON, **(extra_headers or {})})
 
         requisicao = urllib.request.Request(  # noqa: S310 - base_url é configuração
             url,
@@ -157,14 +190,19 @@ class HttpCloudClient:
                     status=resposta.status,
                     body=_corpo_json(resposta.read(), resposta.headers.get("Content-Type")),
                     retry_after=resposta.headers.get("Retry-After"),
+                    etag=resposta.headers.get("ETag"),
                 )
         except urllib.error.HTTPError as erro:
             # Não é falha de rede: é a resposta do servidor, com corpo e cabeçalhos.
+            # É por aqui que o `304` do §5.2 chega — o `urllib` levanta tudo que não é
+            # 2xx, inclusive o redirecionamento condicional que é o caminho comum do
+            # poll de configuração.
             with erro:
                 return CloudResponse(
                     status=erro.code,
                     body=_corpo_json(erro.read(), erro.headers.get("Content-Type")),
                     retry_after=erro.headers.get("Retry-After"),
+                    etag=erro.headers.get("ETag"),
                 )
         except (urllib.error.URLError, TimeoutError, OSError) as erro:
             raise NetworkError(f"{requisicao.get_method()} {requisicao.full_url}: {erro}") from erro

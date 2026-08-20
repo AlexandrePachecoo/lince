@@ -50,6 +50,7 @@ class DetectorFalso:
         self.chamou = threading.Event()
         """Disparado a cada inferência, para o teste esperar sem `sleep` quando o
         worker está rodando na própria thread."""
+        self.reconfiguracoes: list[object] = []
 
     def detect(self, frame: Frame) -> tuple[Detection, ...]:
         self.vistos.append(frame)
@@ -58,6 +59,15 @@ class DetectorFalso:
 
     def info(self) -> DetectorInfo | None:
         return self._info
+
+    def reconfigure(self, options) -> None:
+        """Guarda o que a troca a quente do §5.2 entregou.
+
+        Faz parte do Protocol `Detector`, e não é enfeite: o `AgentRuntime` chama isto
+        em toda configuração nova. Um dublê sem o método faria a aplicação estourar num
+        `AttributeError` que só apareceria com o poll ligado, em produção.
+        """
+        self.reconfiguracoes.append(options)
 
     def close(self) -> None:
         self.fechado = True
@@ -84,6 +94,9 @@ class DetectorTravado:
     def info(self) -> DetectorInfo | None:
         return INFO
 
+    def reconfigure(self, options) -> None:
+        return None
+
     def close(self) -> None:
         self.solta.set()
 
@@ -104,6 +117,9 @@ class DetectorQueFalha:
 
     def info(self) -> DetectorInfo | None:
         return INFO
+
+    def reconfigure(self, options) -> None:
+        return None
 
     def close(self) -> None:
         return None

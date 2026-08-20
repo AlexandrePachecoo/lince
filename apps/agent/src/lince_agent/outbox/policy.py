@@ -71,6 +71,47 @@ def classify_response(status: int) -> Outcome:
     return Outcome.RETRY
 
 
+class ConfigOutcome(StrEnum):
+    """O que fazer com a resposta do `GET /v1/agents/config` (§5.2)."""
+
+    NOVA = "nova"
+    """`2xx` com corpo: documento novo para validar e, se passar, aplicar."""
+
+    SEM_MUDANCA = "sem_mudanca"
+    """`304`: o `ETag` que mandamos ainda vale. É o caso comum — 2 880 polls por dia,
+    e todos menos um punhado caem aqui."""
+
+    TENTAR_DEPOIS = "tentar_depois"
+    """Falha temporária. O agente segue com a configuração em pé (§5.4)."""
+
+    RECUSADA = "recusada"
+    """`4xx`: a nuvem entende o pedido e não vai atendê-lo. Credencial errada
+    (`401`/`403`) ou agente desconhecido (`404`). Continua sendo retry — lento, e é
+    por isso que não vira exceção — mas merece log próprio, porque a ação é humana."""
+
+
+def classify_config_response(status: int, *, tem_corpo: bool) -> ConfigOutcome:
+    """Traduz o código do poll de configuração em decisão.
+
+    Deliberadamente **não** é `classify_response`: aquela é do envio de evento, onde
+    `304` não existe e cairia em `RETRY`, e onde `404` significa "evento desconhecido".
+    Reusá-la aqui daria um agente que trata "nada mudou" como falha de rede e entra em
+    backoff exponencial contra uma nuvem que respondeu certo — a loja pararia de receber
+    calibração nova sem nenhum erro em lugar nenhum.
+
+    `tem_corpo` existe porque um `200` sem corpo não é configuração: é um proxy, um
+    redirecionamento capturado ou uma API meio implantada. Tratá-lo como documento
+    faria o loader recusar e contar erro de contrato quando o problema é de transporte.
+    """
+    if status == 304:
+        return ConfigOutcome.SEM_MUDANCA
+    if 200 <= status < 300:
+        return ConfigOutcome.NOVA if tem_corpo else ConfigOutcome.TENTAR_DEPOIS
+    if 400 <= status < 500 and status not in (408, 429):
+        return ConfigOutcome.RECUSADA
+    return ConfigOutcome.TENTAR_DEPOIS
+
+
 def parse_retry_after(header: str | None, *, now_s: float) -> float | None:
     """Lê o cabeçalho `Retry-After` nos dois formatos que o HTTP permite.
 

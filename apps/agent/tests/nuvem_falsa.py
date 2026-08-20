@@ -62,15 +62,21 @@ class ServidorFalso:
                     self.send_response(resposta.status)
                     for nome, valor in resposta.cabecalhos.items():
                         self.send_header(nome, valor)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(bruto)))
+                    # `304` e `204` não podem ter corpo, e anunciar `Content-Length` num
+                    # deles faz o cliente esperar bytes que nunca vêm — em HTTP/1.1 com
+                    # conexão persistente, isso é o poll de config travando por timeout
+                    # justamente no caminho que roda milhares de vezes por dia.
+                    if resposta.status not in (204, 304):
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(bruto)))
                     self.end_headers()
-                    if bruto:
+                    if bruto and resposta.status not in (204, 304):
                         self.wfile.write(bruto)
                 except (BrokenPipeError, ConnectionResetError):
                     # Esperado no teste de timeout: o cliente desistiu antes.
                     pass
 
+            do_GET = _atende
             do_POST = _atende
             do_PUT = _atende
             do_PATCH = _atende

@@ -22,13 +22,18 @@ fonte: o agente valida o payload real contra o schema nos testes
 
 Reservado, ainda não escrito: `heartbeat.v1.json` (§5.3).
 
-`config.v1.json` é o único que já circula fora de uma resposta HTTP: enquanto o
-endpoint não existe, o agente lê **o mesmo documento** de um arquivo local
-(`apps/agent/config.exemplo.json`, `--config`). É de propósito — quando o poll entrar,
-só muda quem entrega o dicionário, e o parser que já roda em produção é o mesmo que
-sempre rodou. O que é do box e não da loja (URL do Redis, diretório dos clipes, caminho
-do `.onnx`, credencial) fica **fora** do documento: repointar o disco de uma loja não
-pode ser efeito de uma resposta HTTP.
+`config.v1.json` é o único que circula fora de uma resposta HTTP: o agente lê **o mesmo
+documento** de um arquivo local (`apps/agent/config.exemplo.json`, `--config`), do
+`GET /v1/agents/config` (`--config-nuvem`) e do cache em disco da última configuração
+válida (§5.4). Três origens, um formato e um parser — que é o que impede a definição de
+existir em dois lugares e divergir. O que é do box e não da loja (URL do Redis, diretório
+dos clipes, caminho do `.onnx`, credencial) fica **fora** do documento: repointar o disco
+de uma loja não pode ser efeito de uma resposta HTTP.
+
+O endpoint ainda não existe do lado da API. Quando existir, três coisas precisam ser
+verdade e nenhuma delas está no schema: o `ETag` tem que ser **estável** para o mesmo
+conteúdo (senão todo poll baixa o documento inteiro), tem que **mudar** quando o
+conteúdo muda, e o `If-None-Match` do agente tem que ser honrado com `304` sem corpo.
 
 ## Versionamento
 

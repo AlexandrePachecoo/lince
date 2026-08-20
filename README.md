@@ -9,9 +9,11 @@ passa por triagem humana.
 
 > **Status:** agente com os seis estágios da borda ligados ponta a ponta (§3.1 a
 > §3.6). A borda **decide sozinha**: uma pessoa cruza a linha de saída sem ter passado
-> no caixa e o evento sobe com o clipe, sem ninguém puxar gatilho. O que ainda falta no
-> agente é de onde vêm as zonas — hoje são coordenadas na linha de comando, e em
-> produção elas descem versionadas da nuvem (§5.2). API e dashboard ainda não existem.
+> no caixa e o evento sobe com o clipe, sem ninguém puxar gatilho. As zonas já descem
+> da nuvem: `--config-nuvem` puxa o documento da §5.2 do `GET /v1/agents/config`, com
+> `ETag`/`304`, poll de 30 s, cache local para reiniciar sem internet e recalibração
+> aplicada com o agente em pé. Ainda faltam o registro (§5.1), o heartbeat (§5.3) e o
+> download de modelo — e a API que serve tudo isso, que ainda não existe.
 > Leia [`docs/arquitetura.md`](docs/arquitetura.md) antes de escrever código, e
 > [`CLAUDE.md`](CLAUDE.md) para as convenções — em especial a regra de que toda
 > função nova precisa de teste automatizado.
@@ -103,6 +105,45 @@ da loja fica embaixo (`y` maior), e só cruzar de dentro para fora dispara. Na l
 `[regras]` o que se vigia são os descartes — numa loja de verdade `pagou` tem que
 dominar tudo. Perto de zero com eventos subindo é zona de caixa errada; `vida curta`
 alto é o tracker fragmentando (R-2).
+
+### A configuração vindo da nuvem (§5.2)
+
+`--config` lê o documento de um arquivo; `--config-nuvem` puxa **o mesmo documento** do
+`GET /v1/agents/config` e segue consultando a cada 30 s (ADR-003):
+
+```bash
+uv run python -m lince_agent --config-nuvem --api-url http://localhost:3000 \
+  --model models/yolox_s.onnx --dry-run --stats
+```
+
+O que é da loja desce no documento; o que é do box — `--model`, `--clips-dir`,
+`--redis-url`, `--api-url`, `--api-token`, `--config-cache` — continua entrando por
+flag. Uma resposta HTTP não repointa o disco de uma loja.
+
+Na subida o agente vai à nuvem e, se ela não responder, usa o **cache local** da última
+configuração válida (§5.4) — é o que faz um box reiniciar sem internet em vez de acordar
+cego. Sem nuvem e sem cache ele não sobe: um agente sem câmera e sem zona pareceria
+saudável no heartbeat e nunca alertaria.
+
+A linha `[config]` do `--stats` mostra o que importa vigiar:
+
+```
+[config]   versão=v2 último=14s atrás 304=1 recebidos=1 aplicados=1 reinício-pendente=0 …
+```
+
+O número a acompanhar é **`último`**, não a contagem de `304`: com o link caído o poll
+falha em silêncio por desenho, e é esse relógio andando que denuncia uma loja rodando
+calibração velha. `recebidos` e `aplicados` são propositalmente separados — e
+`pendente=` aparecendo significa configuração válida que o agente **não** aplicou:
+
+- **zonas, tempos e limiares** (`rules`, `tracking`, os limiares de `detection`) trocam
+  com o agente em pé, e a câmera recalibrada esquece os tracks em curso — tempo de caixa
+  medido dentro de um polígono que não existe mais não vale para o novo;
+- **mudança estrutural** (câmera entrando ou saindo, `url`, `decode`, `clip`,
+  `model_path`) não é aplicada, nem em parte: o agente segue na versão antiga e expõe a
+  nova como pendente de reinício, com os campos que a barraram no log. Aplicar só a
+  metade quente faria o evento subir declarando um `versions.config` que nunca rodou —
+  e é esse campo que vai explicar um falso positivo depois (R-1).
 
 **Primeira vez, ou numa máquina nova?** O passo a passo completo — instalação por
 sistema operacional, verificação e troubleshooting — está em

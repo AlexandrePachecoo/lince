@@ -59,6 +59,23 @@ class TrackerPool:
         """Faz a câmera aparecer na telemetria antes do primeiro frame."""
         self._tracker(camera_id)
 
+    def reconfigure(self, options: TrackingOptions) -> None:
+        """Troca os limiares de associação sem derrubar os tracks vivos (§5.2).
+
+        Os tracks **não** são zerados, e isso é deliberado: o que muda aqui são limiares
+        de associação, não estado. O Kalman de quem está andando pela loja continua
+        válido — posição, velocidade e histórico de hits não dependem de qual IoU mínima
+        foi usada para chegar até aqui. Zerar custaria uma janela de cegueira em cada
+        recalibração, sem comprar nada.
+
+        Vale a partir do frame seguinte porque `ByteTracker.update` lê `self._options`
+        a cada chamada. Substituir o objeto em cada tracker vivo é o suficiente; um
+        tracker criado depois já nasce com o novo, pelo `self._options` do pool.
+        """
+        self._options = options
+        for tracker in self._trackers.values():
+            tracker.reconfigure(options)
+
     def update(self, resultado: DetectionResult) -> TrackingResult:
         """Rastreia as detecções de um frame e devolve os tracks vivos daquela câmera."""
         inicio = self._clock()

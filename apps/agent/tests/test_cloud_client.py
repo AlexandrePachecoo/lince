@@ -205,3 +205,80 @@ def test_user_agent_identifica_a_versao_do_agente(nuvem, cliente):
     cliente.post_event(EVENTO, event_id="e1")
 
     assert nuvem.recebidas[0].cabecalhos["User-Agent"].startswith("lince-agent/")
+
+
+# --------------------------------------------------------------------------- §5.2 config
+
+
+def test_get_config_sem_etag_nao_manda_if_none_match(nuvem, cliente):
+    """Na primeira subida não há `ETag` para condicionar. Mandar `If-None-Match` vazio
+    ou com um valor inventado faria a nuvem responder `304` para um agente que não tem
+    configuração nenhuma — e ele subiria mudo, sem câmera e sem zona."""
+    nuvem.roteiro = [Resposta(status=200, corpo={"schema_version": 1}, cabecalhos={"ETag": '"v1"'})]
+
+    resposta = cliente.get_config()
+
+    recebida = nuvem.recebidas[0]
+    assert recebida.metodo == "GET"
+    assert recebida.caminho == "/v1/agents/config"
+    assert "If-None-Match" not in recebida.cabecalhos
+    assert recebida.cabecalhos["Authorization"] == "Bearer tok-123"
+    assert resposta.status == 200
+    assert resposta.etag == '"v1"'
+
+
+def test_get_config_condicionado_manda_o_etag_que_o_agente_tem(nuvem, cliente):
+    """Sem `If-None-Match`, a nuvem devolve o documento inteiro a cada 30 s para
+    sempre: 2.880 vezes por dia, por loja, para dizer que nada mudou. O `304` do §5.2
+    só existe se o agente perguntar de forma condicional."""
+    nuvem.roteiro = [Resposta(status=304)]
+
+    cliente.get_config(etag='"v7"')
+
+    assert nuvem.recebidas[0].cabecalhos["If-None-Match"] == '"v7"'
+
+
+def test_304_chega_como_resposta_e_nao_como_excecao(nuvem, cliente):
+    """`urllib` levanta `HTTPError` para tudo que não é 2xx — inclusive para o `304`,
+    que aqui é o caminho **saudável** e o mais frequente de todos. Tratá-lo como
+    exceção transformaria o caso normal do poll em erro contado e em backoff, e a loja
+    entraria em espera exponencial por estar tudo bem."""
+    nuvem.roteiro = [Resposta(status=304)]
+
+    resposta = cliente.get_config(etag='"v7"')
+
+    assert isinstance(resposta, CloudResponse)
+    assert resposta.status == 304
+    assert resposta.body is None
+
+
+def test_get_config_nao_manda_corpo(nuvem, cliente):
+    """Um `GET` com `Content-Type: application/json` e zero byte de corpo é mentira
+    sobre o que a requisição carrega. Não dá erro em lugar nenhum, e é exatamente por
+    isso que vale um teste: proxies respondem a isso de maneiras criativas."""
+    cliente.get_config()
+
+    recebida = nuvem.recebidas[0]
+    assert recebida.corpo == b""
+    assert "Content-Type" not in recebida.cabecalhos
+
+
+def test_erro_de_config_preserva_status_e_retry_after(nuvem, cliente):
+    """`503` com `Retry-After` é a nuvem dizendo quando volta. Perder o cabeçalho no
+    caminho faz o agente martelar uma API que já está em apuros."""
+    nuvem.roteiro = [Resposta(status=503, cabecalhos={"Retry-After": "120"})]
+
+    resposta = cliente.get_config()
+
+    assert resposta.status == 503
+    assert resposta.retry_after == "120"
+
+
+def test_nuvem_inalcancavel_no_get_config_vira_network_error(nuvem):
+    """Sem resposta não há como distinguir "a nuvem recusou" de "o link da loja caiu",
+    e a única suposição segura é a segunda: seguir com a configuração em pé (§5.4)."""
+    nuvem.encerra()
+    cliente = HttpCloudClient(nuvem.url, timeout_s=PRAZO_S)
+
+    with pytest.raises(NetworkError):
+        cliente.get_config()

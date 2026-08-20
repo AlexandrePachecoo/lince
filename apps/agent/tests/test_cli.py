@@ -68,7 +68,7 @@ def test_config_traz_loja_camera_e_versao(tmp_path):
     parser = cli.build_parser()
     args = parser.parse_args(["--config", str(escreve_config(tmp_path))])
 
-    config = cli._monta_config(parser, args)
+    config, _ = cli._monta_config(parser, args)
 
     assert (config.tenant_id, config.store_id) == ("rede-abc", "loja-7")
     assert config.config_version == "cfg-1"
@@ -98,7 +98,7 @@ def test_flags_do_box_continuam_valendo_com_config(tmp_path):
         ["--config", str(caminho), "--model", str(tmp_path / "m.onnx"), "--api-url", "http://api"]
     )
 
-    config = cli._monta_config(parser, args)
+    config, _ = cli._monta_config(parser, args)
 
     assert config.detection.enabled
     assert config.detection.model_path == tmp_path / "m.onnx"
@@ -178,7 +178,8 @@ def test_fila_em_ram_avisa_que_nao_e_duravel(caplog):
     args = cli.build_parser().parse_args(["--camera", "rtsp://x", "--outbox", "memory"])
 
     with caplog.at_level("WARNING"):
-        fila = cli._monta_fila(args, cli._monta_config(cli.build_parser(), args))
+        config, _ = cli._monta_config(cli.build_parser(), args)
+        fila = cli._monta_fila(args, config)
 
     assert isinstance(fila, MemoryOutbox)
     assert "restart" in caplog.text
@@ -671,3 +672,164 @@ def test_linha_de_regras_destaca_os_descartes():
     assert "25 pagou" in linha and "3 vida curta" in linha
     assert "11.5s" in linha
     assert "cam2=sem zonas" in linha
+
+
+# --------------------------------------------------------------- §5.2 configuração da nuvem
+
+
+DOCUMENTO_DA_NUVEM = {
+    "schema_version": 1,
+    "config_version": "nuvem-3",
+    "tenant_id": "rede-abc",
+    "store_id": "loja-7",
+    "cameras": [{"camera_id": "porta", "url": "rtsp://cam/stream"}],
+}
+
+
+class NuvemDeMentira:
+    """Só o `get_config`: é o único método que a subida com `--config-nuvem` usa."""
+
+    def __init__(self, resposta=None, erro=None):
+        self.resposta = resposta
+        self.erro = erro
+        self.etags: list[str | None] = []
+
+    def get_config(self, *, etag=None):
+        self.etags.append(etag)
+        if self.erro is not None:
+            raise self.erro
+        return self.resposta
+
+
+def args_da_nuvem(tmp_path, *extras):
+    parser = cli.build_parser()
+    return parser, parser.parse_args(
+        ["--config-nuvem", "--clips-dir", str(tmp_path / "clipes"), *extras]
+    )
+
+
+def test_config_nuvem_nao_convive_com_camera_nem_com_config():
+    """As três são fontes de configuração e se contradizem. Escolher uma em silêncio
+    faria o agente subir com uma loja diferente da que quem digitou pediu."""
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["--camera", "rtsp://x", "--config-nuvem"])
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["--config", "loja.json", "--config-nuvem"])
+
+
+def test_config_nuvem_monta_a_loja_e_cacheia(tmp_path):
+    """O caminho feliz: o documento da nuvem é o mesmo formato do arquivo, montado pelo
+    mesmo loader. E o que subiu vai para o cache, porque o próximo boot pode ser sem
+    rede (§5.4)."""
+    from lince_agent.config_cache import ConfigCache
+    from lince_agent.outbox.http import CloudResponse
+
+    parser, args = args_da_nuvem(tmp_path)
+    nuvem = NuvemDeMentira(CloudResponse(status=200, body=dict(DOCUMENTO_DA_NUVEM), etag='"e3"'))
+
+    config, etag = cli._monta_config(parser, args, nuvem)
+
+    assert config.store_id == "loja-7"
+    assert config.config_version == "nuvem-3"
+    assert etag == '"e3"'
+    guardado = ConfigCache(cli._caminho_do_cache(args)).le()
+    assert guardado is not None
+    assert guardado.etag == '"e3"'
+
+
+def test_subida_sem_rede_usa_o_cache_local(tmp_path):
+    """O cenário que o cache existe para resolver: o box reinicia — energia, watchtower,
+    `docker restart` — e a internet da loja está fora. Sem isto a loja fica cega
+    justamente no dia em que ninguém consegue chegar nela remotamente (§5.4)."""
+    from lince_agent.config_cache import ConfigCache
+    from lince_agent.outbox.http import NetworkError
+
+    parser, args = args_da_nuvem(tmp_path)
+    ConfigCache(cli._caminho_do_cache(args)).grava(DOCUMENTO_DA_NUVEM, etag='"e3"')
+
+    config, etag = cli._monta_config(parser, args, NuvemDeMentira(erro=NetworkError("sem link")))
+
+    assert config.config_version == "nuvem-3"
+    assert etag == '"e3"', "o ETag do cache poupa o download inteiro no primeiro poll"
+
+
+def test_subida_manda_o_etag_do_cache(tmp_path):
+    """Sem isto, todo reinício de agente baixa o documento inteiro de novo — e um box em
+    crash loop faria isso a cada poucos segundos, contra a API de todas as lojas."""
+    from lince_agent.config_cache import ConfigCache
+    from lince_agent.outbox.http import CloudResponse
+
+    parser, args = args_da_nuvem(tmp_path)
+    ConfigCache(cli._caminho_do_cache(args)).grava(DOCUMENTO_DA_NUVEM, etag='"e3"')
+    nuvem = NuvemDeMentira(CloudResponse(status=304))
+
+    config, _ = cli._monta_config(parser, args, nuvem)
+
+    assert nuvem.etags == ['"e3"']
+    assert config.config_version == "nuvem-3"
+
+
+def test_sem_nuvem_e_sem_cache_o_agente_nao_sobe(tmp_path):
+    """Um agente sem configuração não tem câmera, não tem zona e não tem o que decidir.
+    Subir assim seria parecer saudável no heartbeat e nunca alertar — a mesma falha que
+    o agente já recusa quando o modelo não abre."""
+    from lince_agent.outbox.http import NetworkError
+
+    parser, args = args_da_nuvem(tmp_path)
+
+    with pytest.raises(cli.ConfigError, match="sem configuração"):
+        cli._monta_config(parser, args, NuvemDeMentira(erro=NetworkError("sem link")))
+
+
+def test_nuvem_que_recusa_e_sem_cache_tambem_nao_sobe(tmp_path):
+    """`401` no primeiro boot é credencial errada no provisionamento. Subir mudo
+    esconderia o erro de instalação até alguém reparar que a loja nunca alertou."""
+    from lince_agent.outbox.http import CloudResponse
+
+    parser, args = args_da_nuvem(tmp_path)
+
+    with pytest.raises(cli.ConfigError, match="sem configuração"):
+        cli._monta_config(parser, args, NuvemDeMentira(CloudResponse(status=401)))
+
+
+def test_documento_invalido_da_nuvem_nao_entra_no_cache(tmp_path):
+    """Cachear um documento que este agente não consegue montar transformaria o plano B
+    da próxima subida numa falha garantida — e o conserto exigiria ir até o box."""
+    from lince_agent.config_cache import ConfigCache
+    from lince_agent.outbox.http import CloudResponse
+
+    parser, args = args_da_nuvem(tmp_path)
+    nuvem = NuvemDeMentira(CloudResponse(status=200, body={"schema_version": 1}, etag='"ruim"'))
+
+    with pytest.raises(cli.ConfigError):
+        cli._monta_config(parser, args, nuvem)
+
+    assert ConfigCache(cli._caminho_do_cache(args)).le() is None
+
+
+def test_flag_de_zona_junto_com_config_nuvem_e_erro(tmp_path):
+    """Mesma regra do `--config`: com a loja vindo da nuvem, uma zona digitada na linha
+    de comando é erro e não sobra. Ignorá-la faria quem calibrou acreditar que
+    recalibrou."""
+    parser = cli.build_parser()
+    args = parser.parse_args(["--config-nuvem", "--linha-saida", "0,400,640,400"])
+
+    with pytest.raises(SystemExit):
+        cli._monta_config(parser, args, NuvemDeMentira())
+
+
+def test_cache_default_fica_ao_lado_dos_clipes(tmp_path):
+    """O diretório de clipes é o que o box já garante existir e que já sobrevive a
+    restart de container. Um default em `/tmp` perderia o cache no primeiro boot."""
+    _, args = args_da_nuvem(tmp_path)
+
+    assert cli._caminho_do_cache(args).parent == tmp_path / "clipes"
+
+
+def test_config_cache_explicito_ganha_do_default(tmp_path):
+    """O caminho do cache é do box, não da loja: quem monta o volume decide onde ele
+    fica, e uma resposta HTTP não pode repointá-lo (§5.2)."""
+    escolhido = tmp_path / "estado" / "cfg.json"
+    _, args = args_da_nuvem(tmp_path, "--config-cache", str(escolhido))
+
+    assert cli._caminho_do_cache(args) == escolhido

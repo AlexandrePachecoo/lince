@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from lince_agent.config import DetectionOptions
 from lince_agent.detect.state import Detection, DetectorInfo
 from lince_agent.ffmpeg.rawframe import Frame
 
@@ -24,6 +25,16 @@ class Detector(Protocol):
 
     def info(self) -> DetectorInfo | None:
         """Identidade do modelo carregado, ou `None` quando não há modelo."""
+        ...
+
+    def reconfigure(self, options: DetectionOptions) -> None:
+        """Troca os limiares de pós-processamento com o agente em pé (§5.2).
+
+        Só o que é lido a cada `detect` — `score_threshold`, `iou_threshold`, `classes`.
+        `model_path`, `providers` e `input_size` já viraram sessão do ONNX Runtime na
+        subida e são estruturais; quem separa os dois casos é o `config_diff`, e um
+        detector nunca recebe aqui uma mudança que não saiba aplicar.
+        """
         ...
 
     def close(self) -> None: ...
@@ -43,6 +54,10 @@ class NullDetector:
         return ()
 
     def info(self) -> DetectorInfo | None:
+        return None
+
+    def reconfigure(self, options: DetectionOptions) -> None:
+        """Não há limiar para trocar em quem não detecta nada."""
         return None
 
     def close(self) -> None:

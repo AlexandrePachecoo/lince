@@ -153,6 +153,16 @@ class OnnxDetector:
     def info(self) -> DetectorInfo | None:
         return self._info
 
+    def reconfigure(self, options: DetectionOptions) -> None:
+        """Troca os limiares do pós-processamento a partir do frame seguinte (§5.2).
+
+        Basta substituir o objeto: `detect` lê `score_threshold`, `classes` e
+        `iou_threshold` a cada chamada. A sessão do ONNX Runtime e o `PreprocessSpec`
+        não são tocados — são eles que o `config_diff` classifica como estrutural, e um
+        `input_size` diferente aqui deslocaria toda caixa em silêncio.
+        """
+        self._options = options
+
     def close(self) -> None:
         self._session = None
 

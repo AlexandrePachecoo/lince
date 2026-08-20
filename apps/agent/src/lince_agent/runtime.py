@@ -33,7 +33,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from lince_agent import __version__
 from lince_agent.clip.buffer import ClipBuffer
@@ -41,6 +41,7 @@ from lince_agent.clip.recorder import ClipRecorder
 from lince_agent.clip.state import BufferStats, ClipResult, ClipStatus, RecorderStats
 from lince_agent.clip.store import ClipStore
 from lince_agent.config import AgentConfig, CameraConfig
+from lince_agent.config_diff import Diff, Veredito, classifica
 from lince_agent.detect.detector import Detector, NullDetector
 from lince_agent.detect.state import DetectionResult, DetectorStats
 from lince_agent.detect.worker import DetectorWorker
@@ -74,6 +75,35 @@ senão uma rajada descartaria o rascunho de um clipe que ainda vai chegar — e 
 
 
 @dataclass(frozen=True, slots=True)
+class ConfigHealth:
+    """Sob qual configuração o agente está de fato rodando (§5.2, §5.3).
+
+    Separado das estatísticas de transporte do `ConfigPoller` de propósito: o poller
+    sabe quantos `304` chegaram, e o runtime sabe o que está em pé. Juntar os dois num
+    objeto só faria um deles reportar o que não observa — e `config_version` é o campo
+    que vai explicar um falso positivo depois (R-1), então ele precisa vir de quem
+    realmente aplicou a configuração, não de quem a baixou.
+    """
+
+    config_version: str | None = None
+    """A versão que está valendo agora, e a mesma que sai em `versions.config` de todo
+    evento emitido a partir de agora."""
+
+    pendente_version: str | None = None
+    """Versão que a nuvem serviu, que é válida, e que o agente **não** aplicou porque
+    exige reinício. Diferente de `None` é o que o §5.3 precisa expor para a nuvem saber
+    que aquela loja está rodando calibração antiga — sem isso, o dashboard mostra a
+    configuração salva e o box roda outra, em silêncio."""
+
+    pendente_motivos: tuple[str, ...] = ()
+    """Os campos estruturais que barraram a aplicação, com caminho completo. É o que
+    responde "por que aquela loja não pegou a configuração nova" sem acesso ao box."""
+
+    aplicacoes: int = 0
+    recusas_estruturais: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class AgentHealth:
     """Tudo que o agente sabe sobre si. É o corpo do heartbeat do §5.3 antes de existir
     heartbeat: os mesmos campos, coletados no mesmo lugar, esperando só o transporte."""
@@ -86,6 +116,7 @@ class AgentHealth:
     recorder: RecorderStats = field(default_factory=RecorderStats)
     outbox: OutboxStats = field(default_factory=OutboxStats)
     sender: SenderStats = field(default_factory=SenderStats)
+    config: ConfigHealth = field(default_factory=ConfigHealth)
     uptime_s: float = 0.0
     frames_ingested: int = 0
     """Frames que chegaram da ingestão, contando os das câmeras que o R-3 marcou como
@@ -178,6 +209,11 @@ class AgentRuntime:
         self._frames = 0
         self._enqueue_failures = 0
         self._iniciado_em: float | None = None
+
+        self._config_pendente: str | None = None
+        self._config_motivos: tuple[str, ...] = ()
+        self._config_aplicacoes = 0
+        self._config_recusas = 0
 
     # --- ciclo de vida ------------------------------------------------------
 
@@ -409,6 +445,82 @@ class AgentRuntime:
                 log.error("rascunho %s descartado: gatilhos demais sem clipe", event_id)
                 del self._rascunhos[event_id]
 
+    # --- configuração -------------------------------------------------------
+
+    def aplica_config(self, nova: AgentConfig) -> Diff:
+        """Troca a calibração com o agente em pé, se a nova só mexer em limiares (§5.2).
+
+        **Tudo ou nada.** Um único campo estrutural diferente e nada é aplicado: o
+        agente segue com a configuração em pé e marca a nova como pendente de reinício.
+        Aplicar só a metade quente deixaria o evento subindo com `versions.config` de
+        uma calibração que não é a que rodou, e é justamente esse campo que precisa ser
+        confiável quando alguém for entender um falso positivo (R-1).
+
+        Devolve o `Diff` para quem chamou registrar; o log fica aqui porque é no box que
+        alguém vai procurar.
+        """
+        with self._lock:
+            diff = classifica(self._config, nova)
+
+            if diff.veredito is Veredito.ESTRUTURAL:
+                self._config_recusas += 1
+                self._config_pendente = nova.config_version
+                self._config_motivos = diff.estruturais
+                log.warning(
+                    "configuração %s não aplicada: %d campo(s) exigem reinício (%s). "
+                    "O agente segue na %s",
+                    nova.config_version,
+                    len(diff.estruturais),
+                    ", ".join(diff.estruturais),
+                    self._config.config_version,
+                )
+                return diff
+
+            anterior = self._config
+            self._config = nova
+            # A identidade é congelada e viaja em todo evento. Sem trocá-la aqui, o
+            # próximo evento subiria com os limiares novos declarando a versão antiga —
+            # exatamente a mentira que o "tudo ou nada" acima existe para evitar.
+            self._identity = replace(self._identity, config_version=nova.config_version)
+            self._config_pendente = None
+            self._config_motivos = ()
+
+            if diff.veredito is Veredito.IGUAL:
+                # Documento idêntico com rótulo novo. Acontece quando alguém salva a
+                # configuração no dashboard sem mudar nada; não há o que recalibrar, mas
+                # a versão precisa acompanhar para a nuvem parar de ver divergência.
+                log.info("configuração %s: mesmo conteúdo, só o rótulo mudou", nova.config_version)
+                return diff
+
+            self._aplica_a_quente(anterior, nova)
+            self._config_aplicacoes += 1
+            log.info(
+                "configuração %s aplicada a quente: %s",
+                nova.config_version,
+                ", ".join(diff.a_quente),
+            )
+            return diff
+
+    def _aplica_a_quente(self, anterior: AgentConfig, nova: AgentConfig) -> None:
+        """Empurra os limiares novos para os objetos que os leem a cada frame.
+
+        Chamado sob o `self._lock`, e sem tocar em nada que a thread de detecção esteja
+        no meio de usar: cada `reconfigure` só substitui a referência das opções, e as
+        leituras seguintes pegam o objeto novo inteiro. Não existe estado meio trocado —
+        que é o que aconteceria mutando os campos um a um.
+        """
+        self._detector.reconfigure(nova.detection)
+        self._tracking.reconfigure(nova.tracking)
+
+        antigas = {camera.camera_id: camera.rules for camera in anterior.cameras}
+        for camera in nova.cameras:
+            if camera.rules == antigas.get(camera.camera_id):
+                # Só recalibra quem mudou: `reconfigure` zera os tracks em curso daquela
+                # câmera, e pagar essa janela de cegueira nas outras seria perder eventos
+                # em cinco câmeras porque alguém mexeu na sexta.
+                continue
+            self._regras.reconfigure(camera.camera_id, camera.rules)
+
     # --- observação ---------------------------------------------------------
 
     def _monta_supervisor(
@@ -426,7 +538,15 @@ class AgentRuntime:
             falhas = self._enqueue_failures
             inicio = self._iniciado_em
             frames = self._frames
+            config = ConfigHealth(
+                config_version=self._config.config_version,
+                pendente_version=self._config_pendente,
+                pendente_motivos=self._config_motivos,
+                aplicacoes=self._config_aplicacoes,
+                recusas_estruturais=self._config_recusas,
+            )
         return AgentHealth(
+            config=config,
             cameras=tuple(sup.health() for sup in self._supervisores.values()),
             buffers=tuple(buffer.stats() for buffer in self._buffers.values()),
             detector=self._deteccao.stats(),

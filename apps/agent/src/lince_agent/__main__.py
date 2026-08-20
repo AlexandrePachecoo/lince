@@ -50,19 +50,22 @@ from lince_agent.config import (
     RuleOptions,
     TrackingOptions,
 )
-from lince_agent.config_loader import ConfigError, carrega_arquivo
+from lince_agent.config_cache import ConfigCache
+from lince_agent.config_loader import ConfigError, carrega_arquivo, monta_config
+from lince_agent.config_poller import ConfigPoller, ConfigPollerStats
 from lince_agent.detect.state import DetectorStats
 from lince_agent.ffmpeg.capabilities import select_hwaccel
 from lince_agent.ffmpeg.probe import ProbeError, probe_stream
 from lince_agent.ffmpeg.process import IngestCallbacks
 from lince_agent.ingest.state import CameraHealth
 from lince_agent.ingest.supervisor import CameraSupervisor
-from lince_agent.outbox.http import CloudResponse, HttpCloudClient
+from lince_agent.outbox.http import CloudResponse, HttpCloudClient, NetworkError
+from lince_agent.outbox.policy import ConfigOutcome, classify_config_response
 from lince_agent.outbox.state import OutboxStats
 from lince_agent.outbox.store import MemoryOutbox, OutboxStore
 from lince_agent.rules.geometry import LinhaOrientada, Poligono
 from lince_agent.rules.state import RuleStats
-from lince_agent.runtime import AgentHealth, AgentRuntime
+from lince_agent.runtime import AgentHealth, AgentRuntime, ConfigHealth
 from lince_agent.track.draw import Rastros, desenha
 from lince_agent.track.state import TrackerStats, TrackingResult
 
@@ -114,6 +117,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="ARQUIVO",
         help="documento da §5.2 com as câmeras da loja e as zonas de cada uma "
         "(ver config.exemplo.json). É o mesmo formato que a nuvem vai servir",
+    )
+    fonte.add_argument(
+        "--config-nuvem",
+        action="store_true",
+        help="puxa a configuração do GET /v1/agents/config (--api-url) e segue "
+        "consultando a cada 30 s; sem rede, usa o cache local da última válida (§5.4)",
     )
     parser.add_argument("--camera-id", default="cam", help="identificador nos logs")
     parser.add_argument("--fps", type=float, default=3.0, help="taxa entregue à detecção")
@@ -167,6 +176,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="control plane (§5.2)",
     )
     estagio6.add_argument("--api-token", default=os.environ.get("LINCE_AGENT_TOKEN"))
+    estagio6.add_argument(
+        "--config-cache",
+        type=Path,
+        metavar="ARQUIVO",
+        help="onde guardar a última configuração válida (§5.4); default: "
+        "config-cache.json ao lado de --clips-dir. É do box, não da loja",
+    )
     estagio6.add_argument(
         "--dry-run",
         action="store_true",
@@ -294,6 +310,17 @@ class ClienteSeco:
         log.info("[dry-run] PATCH /v1/events/%s clipe=%s", event_id, clipe.get("status"))
         return CloudResponse(status=200)
 
+    def get_config(self, *, etag: str | None = None) -> CloudResponse:
+        """`304` para sempre: nada muda numa nuvem que não existe.
+
+        Este cliente nunca serve ao `--config-nuvem`, que monta o seu próprio
+        `HttpCloudClient` — as duas coisas são independentes de propósito, porque puxar
+        a calibração de verdade enquanto se descarta o envio de eventos é justamente o
+        arranjo de quem está calibrando uma loja. O método existe para o `ClienteSeco`
+        continuar honrando o Protocol inteiro.
+        """
+        return CloudResponse(status=304)
+
 
 def _env_path(nome: str) -> Path | None:
     valor = os.environ.get(nome)
@@ -416,24 +443,97 @@ def _com_hwaccel_verificado(config: AgentConfig) -> AgentConfig:
     return replace(config, cameras=cameras)
 
 
-def _monta_config(parser: argparse.ArgumentParser, args: argparse.Namespace) -> AgentConfig:
-    """A `AgentConfig`, venha ela do documento da §5.2 ou das flags de uma câmera só."""
+def _opcoes_do_box(args: argparse.Namespace) -> dict[str, object]:
+    """O que a máquina traz e o documento nunca traz (§5.2).
+
+    Em um lugar só porque as duas fontes de documento — arquivo e `GET /v1/agents/config`
+    — têm que combinar exatamente o mesmo lado do box. Divergir aqui daria um agente
+    que muda de comportamento conforme de onde a configuração veio, que é justamente o
+    que a fronteira do `config_loader` promete que não acontece.
+    """
+    return {
+        "clips_dir": args.clips_dir,
+        "outbox": OutboxOptions(redis_url=args.redis_url),
+        "cloud": CloudOptions(api_url=args.api_url, token=args.api_token),
+        "model_path": args.model,
+        "providers": tuple(args.providers) if args.providers else None,
+    }
+
+
+def _caminho_do_cache(args: argparse.Namespace) -> Path:
+    """Ao lado dos clipes por default: é o diretório que o box já garante existir e que
+    já sobrevive a restart de container."""
+    return args.config_cache or (args.clips_dir / "config-cache.json")
+
+
+def _config_da_nuvem(
+    args: argparse.Namespace, cliente: object, cache: ConfigCache
+) -> tuple[AgentConfig, str | None]:
+    """A configuração de subida com `--config-nuvem`, e o `ETag` que veio com ela.
+
+    A ordem é nuvem primeiro, cache depois, e é essa ordem que a §5.4 pede: o cache é
+    plano B, não fonte da verdade. O que ele resolve é o cenário que acontece de
+    verdade numa loja — o box reinicia (energia, watchtower, `docker restart`) com o
+    link caído. Sem cache, esse reinício deixa a loja cega até a internet voltar, que
+    não é uma janela que se possa acompanhar de longe.
+
+    Se as duas falharem, o agente **não sobe**. Um agente sem configuração não tem
+    câmera, não tem zona e não tem o que decidir; subir assim seria parecer saudável no
+    heartbeat e nunca alertar — a mesma falha que `_monta_detector` recusa quando o
+    modelo não abre.
+    """
+    guardado = cache.le()
+    try:
+        resposta = cliente.get_config(etag=guardado.etag if guardado else None)
+    except NetworkError as erro:
+        if guardado is None:
+            raise ConfigError(
+                f"sem configuração: a nuvem não respondeu ({erro}) e não há cache em "
+                f"{cache.caminho}. Um agente sem câmeras e sem zonas não tem o que fazer"
+            ) from erro
+        log.warning("nuvem inalcançável na subida (%s); subindo com o cache local", erro)
+        return monta_config(guardado.documento, **_opcoes_do_box(args)), guardado.etag
+
+    desfecho = classify_config_response(resposta.status, tem_corpo=resposta.body is not None)
+    if desfecho is ConfigOutcome.NOVA:
+        documento = dict(resposta.body or {})
+        config = monta_config(documento, **_opcoes_do_box(args))
+        # Só depois de montar: cachear um documento que este agente não consegue ler
+        # transformaria o plano B da próxima subida numa falha garantida.
+        cache.grava(documento, etag=resposta.etag)
+        return config, resposta.etag
+
+    if guardado is None:
+        raise ConfigError(
+            f"sem configuração: a nuvem respondeu {resposta.status} e não há cache em "
+            f"{cache.caminho}"
+        )
+    if desfecho is not ConfigOutcome.SEM_MUDANCA:
+        log.warning("nuvem respondeu %d na subida; subindo com o cache local", resposta.status)
+    return monta_config(guardado.documento, **_opcoes_do_box(args)), guardado.etag
+
+
+def _monta_config(
+    parser: argparse.ArgumentParser, args: argparse.Namespace, cliente: object | None = None
+) -> tuple[AgentConfig, str | None]:
+    """A `AgentConfig`, venha ela da nuvem, do documento da §5.2 ou das flags.
+
+    Devolve o `ETag` junto porque quem monta é quem falou com a nuvem, e sem ele o
+    primeiro poll depois da subida baixaria o documento inteiro de novo em vez de levar
+    um `304`.
+    """
+    if args.config_nuvem:
+        _recusa_flags_do_documento(parser, args)
+        assert cliente is not None  # noqa: S101 - garantido por `main`
+        config, etag = _config_da_nuvem(args, cliente, ConfigCache(_caminho_do_cache(args)))
+        _avisa_deteccao_desligada(config)
+        return _com_hwaccel_verificado(config), etag
+
     if args.config is not None:
         _recusa_flags_do_documento(parser, args)
-        config = carrega_arquivo(
-            args.config,
-            clips_dir=args.clips_dir,
-            outbox=OutboxOptions(redis_url=args.redis_url),
-            cloud=CloudOptions(api_url=args.api_url, token=args.api_token),
-            model_path=args.model,
-            providers=tuple(args.providers) if args.providers else None,
-        )
-        if not config.detection.enabled:
-            log.warning(
-                "detecção desligada no documento: o agente ingere, mantém o buffer e "
-                "responde a gatilho manual, mas não decide nada (§3.2)."
-            )
-        return _com_hwaccel_verificado(config)
+        config = carrega_arquivo(args.config, **_opcoes_do_box(args))
+        _avisa_deteccao_desligada(config)
+        return _com_hwaccel_verificado(config), None
 
     decode = DecodeOptions(
         sample_fps=args.fps,
@@ -458,7 +558,15 @@ def _monta_config(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         cloud=CloudOptions(api_url=args.api_url, token=args.api_token),
         detection=_monta_deteccao(args),
         tracking=_monta_tracking(args),
-    )
+    ), None
+
+
+def _avisa_deteccao_desligada(config: AgentConfig) -> None:
+    if not config.detection.enabled:
+        log.warning(
+            "detecção desligada no documento: o agente ingere, mantém o buffer e "
+            "responde a gatilho manual, mas não decide nada (§3.2)."
+        )
 
 
 def _monta_fila(args: argparse.Namespace, config: AgentConfig) -> OutboxStore:
@@ -479,6 +587,30 @@ def _monta_fila(args: argparse.Namespace, config: AgentConfig) -> OutboxStore:
     from lince_agent.outbox.redis_store import RedisOutbox
 
     return RedisOutbox(config.store_id, config.outbox)
+
+
+def _format_config(saude: ConfigHealth, transporte: ConfigPollerStats) -> str:
+    """A linha `[config]` do `--stats`.
+
+    O que se vigia aqui é a **idade do último sucesso**, não a contagem de `304`: com o
+    link caído o poll falha em silêncio por desenho (§5.4), e a única coisa que denuncia
+    uma loja operando com calibração velha é esse relógio andando. `pendente` diferente
+    de nada é configuração válida esperando reinício — o dashboard mostra uma coisa e o
+    box roda outra até alguém reiniciar.
+    """
+    idade = (
+        "nunca"
+        if transporte.ultimo_sucesso_s is None
+        else f"{time.monotonic() - transporte.ultimo_sucesso_s:.0f}s atrás"
+    )
+    pendente = f" pendente={saude.pendente_version}" if saude.pendente_version else ""
+    return (
+        f"[config]   versão={saude.config_version or '—'}{pendente} "
+        f"último={idade} 304={transporte.sem_mudanca} "
+        f"recebidos={transporte.recebidos} aplicados={saude.aplicacoes} "
+        f"reinício-pendente={saude.recusas_estruturais} "
+        f"inválidos={transporte.invalidos} falhas={transporte.falhas}"
+    )
 
 
 def _format_health(health: CameraHealth, frame_bytes: int) -> str:
@@ -704,8 +836,19 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
 
+    # O cliente da API nasce antes da configuração porque com `--config-nuvem` é ele
+    # quem a traz. Tudo de que precisa vem das flags do box, não do documento — que é
+    # exatamente a divisão da §5.2: uma resposta HTTP não repointa o endereço para onde
+    # o agente vai pedir a próxima.
+    api = HttpCloudClient(
+        args.api_url,
+        token=args.api_token,
+        timeout_s=CloudOptions().timeout_s,
+        upload_timeout_s=CloudOptions().upload_timeout_s,
+    )
+
     try:
-        config = _monta_config(parser, args)
+        config, etag = _monta_config(parser, args, api)
     except (ConfigError, ValueError) as erro:
         # A configuração recusa na subida o que causaria falso positivo em massa: zona
         # fora do quadro, regra sem zona de caixa, resolução que não bate com o modelo.
@@ -742,16 +885,7 @@ def main(argv: list[str] | None = None) -> int:
 
     decode = config.cameras[0].decode
     fila = _monta_fila(args, config)
-    cliente = (
-        ClienteSeco()
-        if args.dry_run
-        else HttpCloudClient(
-            config.cloud.api_url,
-            token=config.cloud.token,
-            timeout_s=config.cloud.timeout_s,
-            upload_timeout_s=config.cloud.upload_timeout_s,
-        )
-    )
+    cliente = ClienteSeco() if args.dry_run else api
 
     frame_bytes = {camera.camera_id: camera.decode.frame_bytes for camera in config.cameras}
     dumper = _FragmentDumper(args.dump_fragments) if args.dump_fragments else None
@@ -778,7 +912,26 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(signal.SIGUSR1, lambda *_: pedido.set())
         log.info("gatilho manual: kill -USR1 %d", os.getpid())
 
+    poller = (
+        ConfigPoller(
+            api,
+            monta=lambda documento: _com_hwaccel_verificado(
+                monta_config(documento, **_opcoes_do_box(args))
+            ),
+            aplica=runtime.aplica_config,
+            cache=ConfigCache(_caminho_do_cache(args)),
+            etag=etag,
+        )
+        if args.config_nuvem
+        else None
+    )
+
     runtime.start()
+    if poller is not None:
+        # Depois do runtime: um documento aplicado antes de os motores de regra
+        # existirem não teria onde pousar, e `reconfigure` devolveria "câmera
+        # desconhecida" para a loja inteira.
+        poller.start()
     deadline = time.monotonic() + args.duration if args.duration else None
     proximo_gatilho = _primeiro_gatilho(args)
     try:
@@ -802,8 +955,14 @@ def main(argv: list[str] | None = None) -> int:
                 print(_format_tracking(saude.tracker), flush=True)  # noqa: T201
                 print(_format_regras(saude.rules), flush=True)  # noqa: T201
                 print(_format_outbox(saude.outbox, saude), flush=True)  # noqa: T201
+                if poller is not None:
+                    print(_format_config(saude.config, poller.stats()), flush=True)  # noqa: T201
             finished.wait(1.0)
     finally:
+        if poller is not None:
+            # Antes do runtime: um documento aplicado no meio do `stop` mexeria em
+            # motores que já estão sendo desmontados.
+            poller.stop()
         runtime.stop()
         fila.close()
         if tracks_dumper is not None:

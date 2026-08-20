@@ -14,7 +14,9 @@ import pytest
 
 from lince_agent.config import RetryOptions
 from lince_agent.outbox.policy import (
+    ConfigOutcome,
     Outcome,
+    classify_config_response,
     classify_response,
     clip_gave_up,
     is_expired,
@@ -149,3 +151,47 @@ def test_opcoes_invalidas_falham_alto():
         RetryOptions(base_s=10.0, cap_s=1.0)
     with pytest.raises(ValueError, match="max_clip_attempts"):
         RetryOptions(max_clip_attempts=0)
+
+
+# --------------------------------------------------------------- §5.2 poll de configuração
+
+
+@pytest.mark.parametrize(
+    ("status", "esperado"),
+    [
+        (200, ConfigOutcome.NOVA),
+        (304, ConfigOutcome.SEM_MUDANCA),
+        (401, ConfigOutcome.RECUSADA),
+        (403, ConfigOutcome.RECUSADA),
+        (404, ConfigOutcome.RECUSADA),
+        (408, ConfigOutcome.TENTAR_DEPOIS),
+        (429, ConfigOutcome.TENTAR_DEPOIS),
+        (500, ConfigOutcome.TENTAR_DEPOIS),
+        (503, ConfigOutcome.TENTAR_DEPOIS),
+    ],
+)
+def test_classificacao_do_poll_de_configuracao(status, esperado):
+    assert classify_config_response(status, tem_corpo=True) is esperado
+
+
+def test_o_poll_de_config_nao_pode_reusar_a_classificacao_do_envio():
+    """As duas tabelas divergem em dois pontos, e os dois doem.
+
+    `304` não existe no envio de evento e cairia em `RETRY`: o agente entraria em
+    backoff exponencial contra uma nuvem que respondeu certo, e a loja pararia de
+    receber calibração sem nenhum erro em lugar nenhum. E `404` no envio significa
+    "evento desconhecido, reposte o evento", enquanto no poll significa "esta nuvem não
+    conhece este agente" — reposta nenhuma resolve isso, e é um problema humano.
+    """
+    assert classify_response(304) is Outcome.RETRY
+    assert classify_config_response(304, tem_corpo=False) is ConfigOutcome.SEM_MUDANCA
+
+    assert classify_response(404) is Outcome.UNKNOWN_EVENT
+    assert classify_config_response(404, tem_corpo=False) is ConfigOutcome.RECUSADA
+
+
+def test_200_sem_corpo_nao_e_configuracao():
+    """Proxy, redirecionamento capturado ou API meio implantada. Passá-lo ao loader
+    contaria erro de contrato num problema que é de rede, e mandaria procurar o bug no
+    documento em vez de no caminho até ele."""
+    assert classify_config_response(200, tem_corpo=False) is ConfigOutcome.TENTAR_DEPOIS
