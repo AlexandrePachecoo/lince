@@ -532,6 +532,17 @@ class AgentRuntime:
     def camera_ids(self) -> tuple[str, ...]:
         return tuple(self._supervisores)
 
+    @property
+    def anchor(self) -> MonotonicAnchor:
+        """A âncora que converte monotônico em instante de parede.
+
+        Pública porque o heartbeat (§5.3) precisa dela: os instantes do `AgentHealth`
+        são monotônicos, e só a âncora sabe traduzi-los sem herdar todo o tempo de
+        subida do processo. `clock_reanchors` já sai no `AgentHealth`, então a âncora
+        já era conceito público do runtime — faltava o objeto.
+        """
+        return self._anchor
+
     def health(self) -> AgentHealth:
         agora_ms = int(self._wall_clock() * 1000)
         with self._lock:

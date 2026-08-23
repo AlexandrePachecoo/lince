@@ -833,3 +833,38 @@ def test_config_cache_explicito_ganha_do_default(tmp_path):
     _, args = args_da_nuvem(tmp_path, "--config-cache", str(escolhido))
 
     assert cli._caminho_do_cache(args) == escolhido
+
+
+def test_linha_do_heartbeat_mostra_a_idade_do_ultimo_sucesso():
+    """O que se vigia no §5.3 é a **idade**, não a contagem de envios.
+
+    A contagem zera no reinício, que é justamente o evento que se quer detectar. O
+    relógio de `último=` andando além de 30 s é o que denuncia uma loja que a nuvem
+    parou de enxergar — e ele anda no box mesmo quando não há nuvem do outro lado para
+    reclamar.
+    """
+    from lince_agent.heartbeat import HeartbeatStats
+
+    assert "último=nunca" in cli._format_heartbeat(HeartbeatStats())
+
+    linha = cli._format_heartbeat(
+        HeartbeatStats(enviados=120, ultimo_sucesso_s=time.monotonic() - 12.0)
+    )
+    assert "12s atrás" in linha
+    assert "enviados=120" in linha
+
+
+def test_linha_do_heartbeat_distingue_skew_zero_de_skew_nao_medido():
+    """`skew=0.0s` e `skew=?` significam coisas opostas.
+
+    Sem a distinção, um agente que nunca conseguiu falar com a nuvem mostraria relógio
+    em dia — e o `clock_skew` do §5.3, que existe justamente para pôr em dúvida os
+    instantes daquele box, endossaria todos eles.
+    """
+    from lince_agent.heartbeat import HeartbeatStats
+
+    assert "skew=?" in cli._format_heartbeat(HeartbeatStats())
+    assert "skew=+0.0s" in cli._format_heartbeat(HeartbeatStats(clock_skew_s=0.0, skew_medido=True))
+    assert "skew=-45.0s" in cli._format_heartbeat(
+        HeartbeatStats(clock_skew_s=-45.0, skew_medido=True)
+    )

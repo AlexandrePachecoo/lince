@@ -56,10 +56,10 @@ cd apps/agent && uv run ruff check src tests && uv run ruff format --check src t
 
 | Componente | Situação |
 |---|---|
-| `apps/agent` | Estágios 1 a 6 (§3.1 a §3.6) ligados por `runtime.py`. N câmeras com zonas próprias, vindas do `GET /v1/agents/config` com `ETag`/`304`, poll de 30 s, cache local e troca a quente |
-| `apps/api` | `GET /v1/agents/config` de verdade (Fastify + Prisma + Postgres), com `ETag`/`304`, autenticação por token semeado e câmera em JSONB. Resto (registro do agente, eventos, heartbeat, modelo, dashboard) ainda não existe |
+| `apps/agent` | Estágios 1 a 6 (§3.1 a §3.6) ligados por `runtime.py`. N câmeras com zonas próprias, vindas do `GET /v1/agents/config` com `ETag`/`304`, poll de 30 s, cache local e troca a quente. Heartbeat da §5.3 sobe a cada 30 s |
+| `apps/api` | `GET /v1/agents/config`, `POST /v1/agents/register` e `POST /v1/agents/heartbeat` de verdade (Fastify + Prisma + Postgres). Resto (eventos, clipe, modelo, dashboard) ainda não existe |
 | `apps/dashboard` | vazio |
-| `packages/shared` | JSON Schema do evento, do PATCH do clipe e da configuração (§5). Heartbeat ainda não |
+| `packages/shared` | JSON Schema do evento, do PATCH do clipe, da configuração, do registro e do heartbeat (§5) |
 
 O caminho **pessoa cruza a linha → clipe → fila local → nuvem → clipe apagado do
 disco** funciona ponta a ponta, sem andaime nenhum: a borda vê, dá identidade e
@@ -116,9 +116,11 @@ que valem registrar porque a próxima rota vai bater nelas de novo:
 - Câmera é **JSONB por câmera** (`decode`/`supervision`/`clip`/`rules`), não tabelas
   `ZONA`/`REGRA_CONFIG` normalizadas do §6 — decisão desta fatia, para quando o
   dashboard existir e precisar editar zona por zona num formulário.
-- Autenticação é por **token semeado direto no banco** (`scripts/seed.ts`), hash SHA-256
-  em `Agente.tokenHash` — nunca o token em claro, nem em seed de dev. Não existe
-  `POST /v1/agents/register` ainda; é a próxima peça óbvia do §5.1.
+- Autenticação é por hash SHA-256 em `Agente.tokenHash` — nunca o token em claro, nem em
+  seed de dev. O `POST /v1/agents/register` já troca um token de bootstrap de uso único
+  (consumo atômico por `UPDATE ... WHERE usado_em IS NULL`, que é o que resiste a duas
+  chamadas concorrentes) por essa credencial; o token semeado do `scripts/seed.ts`
+  continua existindo só para o atalho de desenvolvimento.
 - O documento que a API monta é validado contra
   `packages/shared/schemas/config.v1.json` via Ajv antes de responder — defesa em
   profundidade, o par do lado da API do que `tests/test_contrato_config.py` garante do
@@ -126,13 +128,25 @@ que valem registrar porque a próxima rota vai bater nelas de novo:
 
 Onde encostar em cada coisa:
 
-- **Registro do agente (§5.1)** é a peça que falta para tirar o token semeado do seed e
-  ter `POST /v1/agents/register` de verdade trocando token de bootstrap por credencial.
-- **Heartbeat (§5.3)** já tem os dados reunidos em `AgentHealth`, agora incluindo
-  `inference_fps` e `dropped_frames` por câmera e os contadores de descarte do §3.4;
-  falta o transporte, que depende do registro da §5.1.
+- **`POST /v1/events` e o clipe (§5.2)** é a peça grande que falta, e a que faz o
+  caminho borda→nuvem parar de ser `--dry-run`: tabela `EVENTO`, idempotência por
+  `event_id`, URL pré-assinada do R2 e `PATCH /v1/events/{event_id}`. O lado do agente
+  já está inteiro há tempo — o que falta é a nuvem aceitar.
+- **Registro do agente no lado do agente (§5.1)** é o outro lado do
+  `POST /v1/agents/register`, que já existe na API: trocar um token de bootstrap por
+  credencial na subida, em vez do `--api-token` semeado.
 - **Download de modelo (§5.2)** substitui o caminho local em `DetectionOptions.model_path`.
   O `model_version` já é nome + checksum, no formato que o ADR-006 quer.
+
+O heartbeat (§5.3) é `heartbeat.py`, e o que ele tem de particular não é o envio — é o
+que ele **não** faz. Não há fila: um envio que falhou não deixa nada para trás, porque a
+única fotografia que interessa é a de agora, e uma fila entregaria à nuvem, depois de
+uma noite offline, duzentas fotografias do passado. Também não passa por
+`classify_response` nem por `classify_config_response`: as duas existem para decidir o
+que fazer com um item de fila, e aqui o status só escolhe qual contador sobe. O
+`clock_skew_s` sai do cabeçalho `Date` da resposta **anterior** — é o único relógio
+externo que o box tem, e sem ele um agente com NTP quebrado reportaria deriva zero com
+toda a convicção do mundo.
 
 `packages/shared` é onde o contrato da §5 mora em **um lugar só**. Duplicar essa
 definição entre a API e o agente é o erro mais caro que dá para cometer neste
@@ -209,6 +223,13 @@ Na linha `[config]` o que se vigia é a **idade do último sucesso**, não a con
 `304`: com o link caído o poll falha em silêncio por desenho (§5.4), e é esse relógio
 andando que denuncia uma loja rodando calibração velha. `pendente=` aparecendo é
 configuração válida que exige reinício, e o log diz quais campos a barraram.
+
+Na linha `[heartbeat]` vale a mesma leitura, pelo mesmo motivo: o que denuncia uma loja
+que a nuvem parou de enxergar é `último=` envelhecendo além dos 30 s, não a contagem de
+envios — que zera no reinício, justamente o evento que se quer detectar. `inválidos=`
+diferente de zero é outra coisa e manda depurar noutro lugar: não é rede, é o corpo
+divergindo do `heartbeat.v1.json`. E `skew=?` não é `skew=+0.0s` — o primeiro é "nunca
+houve resposta com `Date`", o segundo é "os relógios batem".
 
 ## Convenções
 

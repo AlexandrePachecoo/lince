@@ -282,3 +282,70 @@ def test_nuvem_inalcancavel_no_get_config_vira_network_error(nuvem):
 
     with pytest.raises(NetworkError):
         cliente.get_config()
+
+
+def test_post_heartbeat_vai_para_a_rota_da_telemetria(nuvem, cliente):
+    """A rota e a credencial são as mesmas do resto da API (§5.3): quem o agente é vem
+    do `Authorization`, e o corpo não carrega identidade nenhuma."""
+    nuvem.roteiro = [Resposta(status=204)]
+
+    resposta = cliente.post_heartbeat({"schema_version": 1, "agent_version": "0.1.0"})
+
+    recebida = nuvem.recebidas[0]
+    assert (recebida.metodo, recebida.caminho) == ("POST", "/v1/agents/heartbeat")
+    assert recebida.cabecalhos["Authorization"] == "Bearer tok-123"
+    assert json.loads(recebida.corpo) == {"schema_version": 1, "agent_version": "0.1.0"}
+    assert resposta.status == 204
+    assert resposta.body is None
+
+
+def test_heartbeat_nao_leva_chave_de_idempotencia(nuvem, cliente):
+    """Ao contrário do `post_event`. Heartbeat não é idempotente por identificador, é
+    último-que-chega-vence: a API faz `update` do último e pronto. Deduplicar dois
+    heartbeats do mesmo agente seria descartar justamente o mais novo — que é o único
+    que interessa."""
+    nuvem.roteiro = [Resposta(status=204)]
+
+    cliente.post_heartbeat({"schema_version": 1})
+
+    assert "Idempotency-Key" not in nuvem.recebidas[0].cabecalhos
+
+
+def test_o_date_da_resposta_chega_ao_chamador(nuvem, cliente):
+    """`Date` é a única fonte do relógio da nuvem que o agente tem, e é dela que sai o
+    `clock_skew_s` do §5.3. Sem um relógio externo, um box com o NTP quebrado
+    reportaria deriva zero com toda a convicção do mundo — e todos os `occurred_at` que
+    ele já mandou continuariam parecendo confiáveis."""
+    nuvem.roteiro = [Resposta(status=204)]
+
+    resposta = cliente.post_heartbeat({"schema_version": 1})
+
+    # O `BaseHTTPRequestHandler` emite `Date` sozinho, como qualquer servidor HTTP.
+    assert resposta.date is not None
+    assert "GMT" in resposta.date
+
+
+@pytest.mark.parametrize("status", [400, 401, 503])
+def test_o_date_sobrevive_ao_erro_http(nuvem, cliente, status):
+    """O `Date` sai pelo ramo do `HTTPError`, que é outro trecho de código.
+
+    Perdê-lo ali congelaria a medição de deriva exatamente durante uma janela de
+    instabilidade — que é quando um relógio errado no box mais atrapalha a
+    reconstituição do que aconteceu.
+    """
+    nuvem.roteiro = [Resposta(status=status)]
+
+    resposta = cliente.post_heartbeat({"schema_version": 1})
+
+    assert resposta.status == status
+    assert resposta.date is not None
+
+
+def test_heartbeat_sem_resposta_vira_falha_de_rede(nuvem):
+    """Sem resposta não dá para distinguir nuvem recusando de link caído, e o
+    `HeartbeatSender` precisa da distinção para escolher o contador certo."""
+    nuvem.encerra()
+    cliente = HttpCloudClient(nuvem.url, timeout_s=PRAZO_S)
+
+    with pytest.raises(NetworkError):
+        cliente.post_heartbeat({"schema_version": 1})

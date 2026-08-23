@@ -38,6 +38,7 @@ from pathlib import Path
 
 import numpy as np
 
+from lince_agent import __version__
 from lince_agent.config import (
     AgentConfig,
     CameraConfig,
@@ -57,6 +58,7 @@ from lince_agent.detect.state import DetectorStats
 from lince_agent.ffmpeg.capabilities import select_hwaccel
 from lince_agent.ffmpeg.probe import ProbeError, probe_stream
 from lince_agent.ffmpeg.process import IngestCallbacks
+from lince_agent.heartbeat import HeartbeatSender, HeartbeatStats
 from lince_agent.ingest.state import CameraHealth
 from lince_agent.ingest.supervisor import CameraSupervisor
 from lince_agent.outbox.http import CloudResponse, HttpCloudClient, NetworkError
@@ -309,6 +311,11 @@ class ClienteSeco:
         clipe = payload.get("clip", {})
         log.info("[dry-run] PATCH /v1/events/%s clipe=%s", event_id, clipe.get("status"))
         return CloudResponse(status=200)
+
+    def post_heartbeat(self, payload: dict) -> CloudResponse:
+        """`204`, como a rota de verdade. Não loga: a cada 30 s, por câmera, viraria
+        ruído em cima da própria linha `[heartbeat]` do `--stats`."""
+        return CloudResponse(status=204)
 
     def get_config(self, *, etag: str | None = None) -> CloudResponse:
         """`304` para sempre: nada muda numa nuvem que não existe.
@@ -610,6 +617,31 @@ def _format_config(saude: ConfigHealth, transporte: ConfigPollerStats) -> str:
         f"recebidos={transporte.recebidos} aplicados={saude.aplicacoes} "
         f"reinício-pendente={saude.recusas_estruturais} "
         f"inválidos={transporte.invalidos} falhas={transporte.falhas}"
+    )
+
+
+def _format_heartbeat(stats: HeartbeatStats) -> str:
+    """A linha do §5.3, e o que se vigia nela é a **idade do último sucesso**.
+
+    A contagem de envios não serve para nada aqui: ela zera no reinício, que é
+    justamente o evento que se quer detectar. É o relógio de `último=` andando além de
+    30 s que diz que a nuvem parou de enxergar esta loja — e, o mais importante, ele
+    anda no box mesmo quando não há nuvem do outro lado para reclamar.
+
+    `skew` é a segunda coisa a olhar: dezenas de segundos explicam um `occurred_at` que
+    a triagem não consegue casar com o clipe. `skew=?` é diferente de `skew=0.0s`: o
+    primeiro é "nunca houve resposta com `Date`", o segundo é "os relógios batem".
+    """
+    idade = (
+        "nunca"
+        if stats.ultimo_sucesso_s is None
+        else f"{time.monotonic() - stats.ultimo_sucesso_s:.0f}s atrás"
+    )
+    skew = f"{stats.clock_skew_s:+.1f}s" if stats.skew_medido else "?"
+    return (
+        f"[heartbeat] último={idade} enviados={stats.enviados} "
+        f"falhas={stats.falhas} inválidos={stats.invalidos} "
+        f"credencial={stats.recusados} skew={skew}"
     )
 
 
@@ -925,6 +957,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.config_nuvem
         else None
     )
+    # Mesma condição do poller, de propósito: se a calibração vem da nuvem, aquela loja
+    # é gerenciada por ela e precisa ser vista; se vem de arquivo, o box está sendo
+    # operado na mão e um heartbeat perdido não abre alerta de nada. Inclusive sob
+    # `--dry-run`, também como o poller — descartar o envio de eventos enquanto se puxa
+    # a calibração de verdade é justamente o arranjo de quem está calibrando uma loja.
+    heartbeat = (
+        HeartbeatSender(
+            api,
+            health=runtime.health,
+            agent_version=__version__,
+            to_iso=runtime.anchor.to_iso,
+            clips_dir=args.clips_dir,
+        )
+        if args.config_nuvem
+        else None
+    )
 
     runtime.start()
     if poller is not None:
@@ -932,6 +980,8 @@ def main(argv: list[str] | None = None) -> int:
         # existirem não teria onde pousar, e `reconfigure` devolveria "câmera
         # desconhecida" para a loja inteira.
         poller.start()
+    if heartbeat is not None:
+        heartbeat.start()
     deadline = time.monotonic() + args.duration if args.duration else None
     proximo_gatilho = _primeiro_gatilho(args)
     try:
@@ -957,8 +1007,14 @@ def main(argv: list[str] | None = None) -> int:
                 print(_format_outbox(saude.outbox, saude), flush=True)  # noqa: T201
                 if poller is not None:
                     print(_format_config(saude.config, poller.stats()), flush=True)  # noqa: T201
+                if heartbeat is not None:
+                    print(_format_heartbeat(heartbeat.stats()), flush=True)  # noqa: T201
             finished.wait(1.0)
     finally:
+        if heartbeat is not None:
+            # Antes do runtime, como o poller: um `health()` no meio do `stop` leria
+            # supervisores sendo desmontados.
+            heartbeat.stop()
         if poller is not None:
             # Antes do runtime: um documento aplicado no meio do `stop` mexeria em
             # motores que já estão sendo desmontados.

@@ -57,9 +57,15 @@ class CloudResponse:
     guardá-lo aqui em vez de num tipo próprio evita um segundo formato de resposta para
     manter em sincronia — o valor é `None` para todo o resto sem custo nenhum."""
 
+    date: str | None = None
+    """Cabeçalho `Date`, sem interpretar — o relógio da nuvem, na mesma disciplina do
+    `Retry-After` acima. É a única fonte de tempo da nuvem que o agente tem, e é dela
+    que sai o `clock_skew_s` do heartbeat (§5.3): sem um relógio externo, um box com
+    NTP quebrado reportaria deriva zero com toda a convicção do mundo."""
+
 
 class CloudClient(Protocol):
-    """As quatro chamadas do agente para a nuvem (§5.2)."""
+    """As cinco chamadas do agente para a nuvem (§5.2)."""
 
     def post_event(self, payload: dict[str, object], *, event_id: str) -> CloudResponse: ...
 
@@ -72,6 +78,10 @@ class CloudClient(Protocol):
     def get_config(self, *, etag: str | None = None) -> CloudResponse:
         """Configuração da loja (§5.2). Com `etag`, manda `If-None-Match` e a nuvem
         responde `304` sem corpo quando nada mudou."""
+        ...
+
+    def post_heartbeat(self, payload: dict[str, object]) -> CloudResponse:
+        """Telemetria periódica (§5.3). Sucesso é `204`, sem corpo."""
         ...
 
 
@@ -111,6 +121,15 @@ class HttpCloudClient:
         return self._json_request(
             "PATCH", urljoin(self._base_url, f"v1/events/{event_id}"), payload
         )
+
+    def post_heartbeat(self, payload: dict[str, object]) -> CloudResponse:
+        """Telemetria periódica (§5.3).
+
+        Sem `Idempotency-Key`, ao contrário do `post_event`: heartbeat não é idempotente
+        por identificador, é último-que-chega-vence. Deduplicar dois heartbeats do mesmo
+        agente seria descartar justamente o mais novo.
+        """
+        return self._json_request("POST", urljoin(self._base_url, "v1/agents/heartbeat"), payload)
 
     def get_config(self, *, etag: str | None = None) -> CloudResponse:
         """Configuração da loja (§5.2), condicionada ao `ETag` que o agente já tem.
@@ -191,6 +210,7 @@ class HttpCloudClient:
                     body=_corpo_json(resposta.read(), resposta.headers.get("Content-Type")),
                     retry_after=resposta.headers.get("Retry-After"),
                     etag=resposta.headers.get("ETag"),
+                    date=resposta.headers.get("Date"),
                 )
         except urllib.error.HTTPError as erro:
             # Não é falha de rede: é a resposta do servidor, com corpo e cabeçalhos.
@@ -203,6 +223,7 @@ class HttpCloudClient:
                     body=_corpo_json(erro.read(), erro.headers.get("Content-Type")),
                     retry_after=erro.headers.get("Retry-After"),
                     etag=erro.headers.get("ETag"),
+                    date=erro.headers.get("Date"),
                 )
         except (urllib.error.URLError, TimeoutError, OSError) as erro:
             raise NetworkError(f"{requisicao.get_method()} {requisicao.full_url}: {erro}") from erro
