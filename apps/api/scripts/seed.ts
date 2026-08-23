@@ -1,5 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import { hashToken } from "../src/auth/agent-token.js";
+import { criaTokenBootstrap } from "../src/auth/bootstrap-token.js";
 
 // Semeia tenant/loja/agente/câmeras de dev, espelhando apps/agent/config.exemplo.json
 // (mesma loja "loja-dev", mesmas câmeras cam1/cam3, mesma regra da cam3). Idempotente
@@ -66,6 +67,11 @@ async function main(): Promise<void> {
     update: { url: "rtsp://localhost:8554/cam1" },
   });
 
+  // Token de bootstrap para exercitar POST /v1/agents/register (§5.1) na mão. Não é
+  // idempotente por id fixo como o resto do seed -- é de uso único por natureza, então
+  // cada `pnpm seed` gera um novo (o(s) anterior(es) seguem no banco, inertes).
+  const bootstrap = await criaTokenBootstrap(prisma, loja.id);
+
   const tokenHash = hashToken(TOKEN_DEV);
   const agenteExistente = await prisma.agente.findUnique({ where: { tokenHash } });
   if (!agenteExistente) {
@@ -79,12 +85,23 @@ async function main(): Promise<void> {
     });
   }
 
+  const porta = process.env.PORT ?? "3000";
+
   console.log("Loja semeada:", loja.id);
   console.log("Token do agente de dev:", TOKEN_DEV);
   console.log("");
   console.log("Teste com o agente real:");
   console.log(
-    `  cd apps/agent && uv run python -m lince_agent --config-nuvem --api-url http://localhost:${process.env.PORT ?? "3000"} --api-token ${TOKEN_DEV} --model models/yolox_s.onnx --dry-run --stats`,
+    `  cd apps/agent && uv run python -m lince_agent --config-nuvem --api-url http://localhost:${porta} --api-token ${TOKEN_DEV} --model models/yolox_s.onnx --dry-run --stats`,
+  );
+  console.log("");
+  console.log(
+    `Token de bootstrap (expira em ${bootstrap.expiraEm.toISOString()}):`,
+    bootstrap.token,
+  );
+  console.log("Teste POST /v1/agents/register:");
+  console.log(
+    `  curl -s -X POST http://localhost:${porta}/v1/agents/register -H 'content-type: application/json' -d '{"schema_version":1,"bootstrap_token":"${bootstrap.token}"}'`,
   );
 
   await prisma.$disconnect();

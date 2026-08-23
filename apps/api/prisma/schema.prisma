@@ -43,9 +43,10 @@ model Loja {
   criadoEm     DateTime @default(now()) @map("criado_em")
   atualizadoEm DateTime @updatedAt @map("atualizado_em")
 
-  tenant  Tenant   @relation(fields: [tenantId], references: [id])
-  cameras Camera[]
-  agentes Agente[]
+  tenant          Tenant           @relation(fields: [tenantId], references: [id])
+  cameras         Camera[]
+  agentes         Agente[]
+  tokensBootstrap TokenBootstrap[]
 
   @@index([tenantId])
   @@map("loja")
@@ -92,4 +93,28 @@ model Agente {
 
   @@index([lojaId])
   @@map("agente")
+}
+
+// Token de bootstrap (§5.1): de uso único, gerado ao cadastrar a loja (hoje, nesta
+// fatia, via scripts/seed.ts -- ainda não há POST /v1/lojas nem dashboard), trocado
+// por uma credencial de Agente em POST /v1/agents/register.
+//
+// usadoEm nullable é o próprio estado de "uso único": null é ainda válido, preenchido
+// é já trocado -- e a troca condicional (UPDATE ... WHERE usado_em IS NULL) é o que
+// impede duas chamadas concorrentes de register com o mesmo token de criarem dois
+// Agente (ver src/routes/agents/register.ts).
+model TokenBootstrap {
+  id          String    @id @default(uuid())
+  lojaId      String    @map("loja_id")
+  // SHA-256 hex, mesma disciplina do Agente.tokenHash: nunca o token em claro no banco.
+  tokenHash   String    @unique @map("token_hash")
+  tokenPrefix String    @map("token_prefix")
+  expiraEm    DateTime  @map("expira_em")
+  usadoEm     DateTime? @map("usado_em")
+  criadoEm    DateTime  @default(now()) @map("criado_em")
+
+  loja Loja @relation(fields: [lojaId], references: [id])
+
+  @@index([lojaId])
+  @@map("token_bootstrap")
 }

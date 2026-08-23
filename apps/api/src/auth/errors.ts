@@ -25,3 +25,31 @@ export class AgenteInativo extends AppError {
     super("agente desativado");
   }
 }
+
+// Erros do POST /v1/agents/register (§5.1). BootstrapTokenJaUsado é 409, não 401: não
+// é credencial errada, é conflito de estado -- vale distinguir de TokenInvalido para
+// quem depura um provisionamento que falhou (token válido, mas já trocado antes).
+export class BootstrapTokenInvalido extends AppError {
+  readonly status = 401;
+  constructor() {
+    super("token de bootstrap não reconhecido");
+  }
+}
+
+export class BootstrapTokenExpirado extends AppError {
+  readonly status = 401;
+  constructor() {
+    super("token de bootstrap expirado");
+  }
+}
+
+export class BootstrapTokenJaUsado extends AppError {
+  readonly status = 409;
+  constructor() {
+    super("token de bootstrap já foi usado");
+  }
+}
+
+export class RequisicaoInvalida extends AppError {
+  readonly status = 400;
+}

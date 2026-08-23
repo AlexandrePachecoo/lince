@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/agent-register/v1.json",
+  "title": "POST /v1/agents/register",
+  "description": "Troca um token de bootstrap de uso único (§5.1), gerado ao cadastrar a loja, por uma credencial de agente de longa duração. bootstrap_token não é um identifier do common.v1.json -- é um segredo opaco, não um id.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "bootstrap_token"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "bootstrap_token": { "type": "string", "minLength": 1, "maxLength": 256 }
+  }
+}

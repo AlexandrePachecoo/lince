@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/agent-register-response/v1.json",
+  "title": "Resposta do POST /v1/agents/register",
+  "description": "A credencial de longa duração do agente aparece em claro só aqui -- a nuvem guarda apenas o hash (SHA-256, mesma disciplina de token_hash), e não há como recuperá-la depois de perdida. Não tem additionalProperties: false na raiz, mesmo precedente de event-accepted.v1.json.",
+  "type": "object",
+  "required": ["schema_version", "agent_id", "tenant_id", "store_id", "token"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "agent_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+    "tenant_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+    "store_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Credencial de longa duração, em claro. Usar em Authorization: Bearer <token> em toda chamada seguinte (GET /v1/agents/config, POST /v1/agents/heartbeat, POST /v1/events)."
+    }
+  }
+}

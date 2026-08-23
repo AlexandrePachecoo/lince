@@ -16,7 +16,10 @@ fonte: o agente valida o payload real contra o schema nos testes
 | Schema | Uso |
 |---|---|
 | `schemas/common.v1.json` | `$defs` compartilhados: identificadores, instantes, bloco de clipe |
+| `schemas/agent-register.v1.json` | Corpo do `POST /v1/agents/register` |
+| `schemas/agent-register-response.v1.json` | Resposta do `POST /v1/agents/register` — a credencial em claro aparece só aqui |
 | `schemas/event.v1.json` | Corpo do `POST /v1/events` |
+| `schemas/event-accepted.v1.json` | Resposta do `POST /v1/events` |
 | `schemas/event-clip.v1.json` | Corpo do `PATCH /v1/events/{event_id}` |
 | `schemas/config.v1.json` | Corpo do `GET /v1/agents/config` — câmeras, zonas, regras e limiares |
 
