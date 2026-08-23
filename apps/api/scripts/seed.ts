@@ -103,6 +103,11 @@ async function main(): Promise<void> {
   console.log(
     `  curl -s -X POST http://localhost:${porta}/v1/agents/register -H 'content-type: application/json' -d '{"schema_version":1,"bootstrap_token":"${bootstrap.token}"}'`,
   );
+  console.log("");
+  console.log("Teste POST /v1/agents/heartbeat (§5.3), com o token do agente de dev:");
+  console.log(
+    `  curl -s -o /dev/null -w '%{http_code}\\n' -X POST http://localhost:${porta}/v1/agents/heartbeat -H 'content-type: application/json' -H 'authorization: Bearer ${TOKEN_DEV}' -d '{"schema_version":1,"agent_version":"0.0.0","model_version":null,"config_version":null,"queue":{"depth":0,"oldest_age_s":0,"bytes":0},"cameras":[],"uptime_s":1,"restarts":0,"clock_skew_s":0}'`,
+  );
 
   await prisma.$disconnect();
 }

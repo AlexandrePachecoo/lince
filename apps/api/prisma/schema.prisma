@@ -89,6 +89,15 @@ model Agente {
   criadoEm    DateTime @default(now()) @map("criado_em")
   ultimoUsoEm DateTime? @map("ultimo_uso_em")
 
+  // Último heartbeat (§5.3), não série histórica: HEARTBEAT no §6 é telemetria de
+  // retenção própria e curta, e não há hoje dashboard nem job de expurgo para
+  // justificar uma tabela insert-only crescendo a cada ~30s por agente sem limite --
+  // mesma decisão já tomada para zona/regra em Camera (JSONB até existir consumidor).
+  // heartbeatEm sozinho (sem parsear o JSON) é o que sustenta o alerta de agente
+  // offline do R-6.
+  heartbeatEm DateTime? @map("heartbeat_em")
+  heartbeat   Json?
+
   loja Loja @relation(fields: [lojaId], references: [id])
 
   @@index([lojaId])

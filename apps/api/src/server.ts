@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { AppError } from "./app-error.js";
 import prismaPlugin from "./plugins/prisma.js";
 import agentsConfigRoutes from "./routes/agents/config.js";
+import agentsHeartbeatRoutes from "./routes/agents/heartbeat.js";
 import agentsRegisterRoutes from "./routes/agents/register.js";
 
 export interface BuildAppOptions {
@@ -28,6 +29,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
 
   await app.register(agentsConfigRoutes);
   await app.register(agentsRegisterRoutes);
+  await app.register(agentsHeartbeatRoutes);
 
   return app;
 }

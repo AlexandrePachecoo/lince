@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/heartbeat/v1.json",
+  "title": "POST /v1/agents/heartbeat",
+  "description": "Telemetria periódica do agente (§5.3). Não carrega identidade -- quem o agente é vem do Authorization: Bearer <token>, igual ao GET /v1/agents/config -- e não carrega vídeo nem dado de pessoa, só contadores e estado de transporte.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "agent_version",
+    "model_version",
+    "config_version",
+    "queue",
+    "cameras",
+    "uptime_s",
+    "restarts",
+    "clock_skew_s"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "agent_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "model_version": {
+      "type": ["string", "null"],
+      "description": "null enquanto o agente sobe com NullDetector (sem modelo no disco)."
+    },
+    "config_version": {
+      "type": ["string", "null"],
+      "description": "A versão que está de fato valendo (ConfigHealth.config_version do agente), não a que a nuvem serviu por último -- distinção que R-1 exige."
+    },
+    "queue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["depth", "oldest_age_s", "bytes"],
+      "properties": {
+        "depth": { "type": "integer", "minimum": 0 },
+        "oldest_age_s": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Idade do item mais velho na fila local. Distingue rajada de represamento -- profundidade sozinha não distingue (§5.4)."
+        },
+        "bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "cameras": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "camera_id",
+          "status",
+          "decode_fps",
+          "inference_fps",
+          "dropped_frames",
+          "last_frame_at"
+        ],
+        "properties": {
+          "camera_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+          "status": {
+            "enum": ["starting", "ok", "reconnecting", "offline", "stopped"],
+            "description": "reconnecting e offline pedem ação diferente do operador: reconnecting é ruído de rede que se resolve sozinho."
+          },
+          "decode_fps": { "type": "number", "minimum": 0 },
+          "inference_fps": { "type": "number", "minimum": 0 },
+          "dropped_frames": { "type": "integer", "minimum": 0 },
+          "last_frame_at": {
+            "anyOf": [{ "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/instant" }, { "type": "null" }]
+          }
+        }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Saúde do hardware da loja. Cada campo é opcional e aceita null -- nem todo box tem GPU, e sensor de temperatura varia por placa.",
+      "properties": {
+        "gpu_util": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "vram_used_mb": { "type": ["number", "null"], "minimum": 0 },
+        "cpu": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "ram_used_mb": { "type": ["number", "null"], "minimum": 0 },
+        "disk_free_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "temp_c": { "type": ["number", "null"] }
+      }
+    },
+    "uptime_s": { "type": "number", "minimum": 0 },
+    "restarts": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Zera no restart do processo -- é o próprio sinal de crash loop (R-6/R-7), então não pode ser o agente reconstruindo a própria contagem histórica."
+    },
+    "clock_skew_s": {
+      "type": "number",
+      "description": "Relógio do box menos relógio da nuvem, no instante do envio. Divergência grande explica um instant de evento que a triagem não bate com o clipe."
+    }
+  }
+}

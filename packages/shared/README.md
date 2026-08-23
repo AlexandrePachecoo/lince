@@ -22,8 +22,7 @@ fonte: o agente valida o payload real contra o schema nos testes
 | `schemas/event-accepted.v1.json` | Resposta do `POST /v1/events` |
 | `schemas/event-clip.v1.json` | Corpo do `PATCH /v1/events/{event_id}` |
 | `schemas/config.v1.json` | Corpo do `GET /v1/agents/config` — câmeras, zonas, regras e limiares |
-
-Reservado, ainda não escrito: `heartbeat.v1.json` (§5.3).
+| `schemas/heartbeat.v1.json` | Corpo do `POST /v1/agents/heartbeat` — telemetria periódica, sem identidade nem vídeo |
 
 `config.v1.json` é o único que circula fora de uma resposta HTTP: o agente lê **o mesmo
 documento** de um arquivo local (`apps/agent/config.exemplo.json`, `--config`), do
