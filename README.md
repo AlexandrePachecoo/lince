@@ -27,7 +27,7 @@ apps/api/          API Fastify + Prisma (control plane)
 apps/dashboard/    Dashboard React PWA (triagem no celular)
 apps/agent/        Agente da borda em Python (YOLO, ByteTrack, ffmpeg)
 packages/shared/   Contrato agente ↔ nuvem em JSON Schema (§5 da arquitetura)
-infra/             docker-compose de desenvolvimento (Postgres + Redis)
+infra/             docker-compose de desenvolvimento (Postgres + Redis + MinIO)
 docs/              Arquitetura e ADRs
 ```
 
@@ -38,7 +38,7 @@ Pré-requisitos: Node 24, pnpm, Python 3.12 e Docker. Já com eles instalados:
 ```bash
 bash scripts/setup.sh              # instala ffmpeg e uv; cria infra/.env
 $EDITOR infra/.env                 # troque POSTGRES_PASSWORD (em dois lugares)
-pnpm infra:up                      # sobe Postgres e Redis
+pnpm infra:up                      # sobe Postgres, Redis e MinIO
 pnpm infra:ps                      # ambos devem aparecer como healthy
 ```
 

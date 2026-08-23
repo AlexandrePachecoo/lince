@@ -59,7 +59,7 @@ fi
 if [ ! -f infra/.env ] && [ -f infra/.env.example ]; then
   info "criando infra/.env a partir do exemplo"
   cp infra/.env.example infra/.env
-  warn "troque POSTGRES_PASSWORD em infra/.env antes de subir a infra"
+  warn "troque POSTGRES_PASSWORD e MINIO_ROOT_PASSWORD em infra/.env antes de subir a infra"
 else
   skip "infra/.env já existe"
 fi

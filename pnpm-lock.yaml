@@ -19,6 +19,9 @@ importers:
       ajv:
         specifier: ^8.17.1
         version: 8.20.0
+      aws4fetch:
+        specifier: ^1.0.20
+        version: 1.0.20
       fastify:
         specifier: ^5.6.1
         version: 5.12.1
@@ -336,6 +339,9 @@ packages:
 
   avvio@9.3.0:
     resolution: {integrity: sha512-g2tQ7LE7oOSqDfwEm3M+ZCMTJc7KiZCdJ4UwyZJb5ckTKyYu50OYmvv0mCFXPuYXoM4zkSt8zM9XQ9KCvxA74A==}
+
+  aws4fetch@1.0.20:
+    resolution: {integrity: sha512-/djoAN709iY65ETD6LKCtyyEI04XIBP5xVvfmNxsEP0uJB5tyaGBztSryRr4HqMStr9R06PisQE7m9zDTXKu6g==}
 
   c12@3.1.0:
     resolution: {integrity: sha512-uWoS8OU1MEIsOv8p/5a82c3H31LsWVR5qiyXVfBNOzfffjUWtPnhAb4BYI2uG2HfGmZmFjCtui5XNWaps+iFuw==}
@@ -796,6 +802,8 @@ snapshots:
     dependencies:
       '@fastify/error': 4.2.0
       fastq: 1.20.1
+
+  aws4fetch@1.0.20: {}
 
   c12@3.1.0:
     dependencies:

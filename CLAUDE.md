@@ -57,13 +57,15 @@ cd apps/agent && uv run ruff check src tests && uv run ruff format --check src t
 | Componente | Situação |
 |---|---|
 | `apps/agent` | Estágios 1 a 6 (§3.1 a §3.6) ligados por `runtime.py`. N câmeras com zonas próprias, vindas do `GET /v1/agents/config` com `ETag`/`304`, poll de 30 s, cache local e troca a quente. Heartbeat da §5.3 sobe a cada 30 s |
-| `apps/api` | `GET /v1/agents/config`, `POST /v1/agents/register` e `POST /v1/agents/heartbeat` de verdade (Fastify + Prisma + Postgres). Resto (eventos, clipe, modelo, dashboard) ainda não existe |
+| `apps/api` | As três rotas de agente (`config`, `register`, `heartbeat`) e o caminho do evento: `POST /v1/events` com URL pré-assinada do clipe e `PATCH /v1/events/{event_id}` (Fastify + Prisma + Postgres + R2, que em desenvolvimento é o MinIO). Falta download de modelo e dashboard |
 | `apps/dashboard` | vazio |
 | `packages/shared` | JSON Schema do evento, do PATCH do clipe, da configuração, do registro e do heartbeat (§5) |
 
 O caminho **pessoa cruza a linha → clipe → fila local → nuvem → clipe apagado do
-disco** funciona ponta a ponta, sem andaime nenhum: a borda vê, dá identidade e
-**decide**. Os eventos sobem com `source: "rule"` e o bloco `rule` preenchido.
+disco** funciona ponta a ponta, sem andaime nenhum e **sem `--dry-run`**: a borda vê,
+dá identidade e **decide**, e a nuvem do outro lado aceita, devolve a URL pré-assinada
+e recebe a confirmação do upload. Os eventos sobem com `source: "rule"` e o bloco
+`rule` preenchido.
 
 O andaime de gatilho (`--trigger-after`, `--trigger-every`, `SIGUSR1`) continua
 existindo para câmera sem zonas desenhadas e para teste de instalação, e o que ele
@@ -103,10 +105,10 @@ da nuvem são **quais** limiares; onde o `.onnx` pousou, qual Redis, qual API e 
 credencial são da máquina e entram por flag. Uma resposta HTTP não pode repointar o
 disco de uma loja.
 
-`apps/api` existe agora, mas só serve `GET /v1/agents/config` — ver
+`apps/api` já serve o §5 inteiro menos o modelo — ver
 [`apps/api/prisma/schema.prisma`](apps/api/prisma/schema.prisma) e
-[`apps/api/src/routes/agents/config.ts`](apps/api/src/routes/agents/config.ts). Decisões
-que valem registrar porque a próxima rota vai bater nelas de novo:
+[`apps/api/src/routes/`](apps/api/src/routes/). Decisões que valem registrar porque a
+próxima rota vai bater nelas de novo:
 
 - `config_version`/`ETag` **não são coluna nenhuma no Postgres** — são hash SHA-256 do
   documento canônico (`apps/api/src/config/canonical-json.ts`), calculado sob demanda a
@@ -126,12 +128,45 @@ que valem registrar porque a próxima rota vai bater nelas de novo:
   profundidade, o par do lado da API do que `tests/test_contrato_config.py` garante do
   lado do agente. Uma falha aí vira `500` (bug interno), nunca um `200` malformado.
 
+O caminho do evento (`POST /v1/events` → `PUT` no bucket → `PATCH /v1/events/{id}`) é
+onde a idempotência do §5.4 deixa de ser conversa e vira código. As decisões que
+sustentam isso, e que são fáceis de desfazer sem perceber:
+
+- **O `event_id` é a chave primária da tabela**, não uma coluna única ao lado de um id
+  gerado na nuvem. A idempotência passa a ser do banco: dois `POST` do mesmo evento não
+  têm como virar duas linhas, e o gerente não vê o mesmo furto duas vezes na fila.
+- **A chave do objeto é determinística** (`storage/object-key.ts`), derivada de
+  `tenant_id`, do dia de `occurred_at` e do `event_id`. Não é economia de coluna: o
+  agente reposta o evento justamente para renovar uma URL vencida, e depois de um `404`
+  no `PATCH` ele repõe o evento **sem** reenviar os bytes — contando com a chave
+  estável. Chave nova a cada emissão órfãria o que já subiu e aponta o evento para um
+  objeto que ninguém escreveu. A data sai de `occurred_at` e nunca do relógio do
+  servidor, senão um evento das 23h59 reenviado às 00h02 ganha duas chaves.
+- **Reenvio não reescreve nada do evento** (`update: {}` no upsert). O bloco `clip` do
+  payload é congelado na borda no corte e continua dizendo `ok` — o desfecho do
+  **corte** — muito depois de o `PATCH` ter registrado o **upload**. Reescrevê-lo
+  rebaixaria para `pendente` um clipe que já está no bucket, e a triagem ficaria
+  esperando para sempre um upload que já aconteceu. Quem manda no desfecho do clipe é o
+  `PATCH`, sozinho.
+- **`clipeEstado` é um terceiro estado, e não o `clip.status` do contrato.** `pendente`
+  é o que o contrato não tem nome para: a nuvem conhece o evento, emitiu a URL, e os
+  bytes ainda não chegaram. Sem ele não dá para distinguir "o vídeo está subindo" de
+  "não vai haver vídeo" — e é a segunda que libera o triador a decidir sem esperar.
+- **Escopo errado é `403` e evento desconhecido é `404`, e os dois números são
+  combinados com `classify_response`.** `400` mandaria o evento para a fila morta: um
+  box provisionado com o tenant errado perderia o dia inteiro da loja enquanto ninguém
+  conserta o cadastro. `404` no `PATCH` não significa "não achei", significa "reponha o
+  evento" — inclusive para evento de outro tenant, que assim não vaza existência e
+  ainda leva o agente a fazer a coisa certa.
+- **`camera_id` é texto sem FK.** Um evento pode subir seis horas depois e chegar com a
+  câmera já removida do cadastro; com FK, a API recusaria e o agente jogaria fora um
+  alerta real por causa de uma edição no dashboard.
+- **A `object_key` do `PATCH` é conciliação, não entrada.** A API emitiu a URL, então
+  já sabe a chave; gravar a do cliente deixaria uma credencial de loja apontar o evento
+  para qualquer objeto do bucket. Divergência vira log.
+
 Onde encostar em cada coisa:
 
-- **`POST /v1/events` e o clipe (§5.2)** é a peça grande que falta, e a que faz o
-  caminho borda→nuvem parar de ser `--dry-run`: tabela `EVENTO`, idempotência por
-  `event_id`, URL pré-assinada do R2 e `PATCH /v1/events/{event_id}`. O lado do agente
-  já está inteiro há tempo — o que falta é a nuvem aceitar.
 - **Registro do agente no lado do agente (§5.1)** é o outro lado do
   `POST /v1/agents/register`, que já existe na API: trocar um token de bootstrap por
   credencial na subida, em vez do `--api-token` semeado.
@@ -156,7 +191,7 @@ projeto. O agente valida o payload real contra o schema em
 ## Comandos
 
 ```bash
-pnpm infra:up                 # Postgres e Redis
+pnpm infra:up                 # Postgres, Redis e MinIO (papel do R2 em desenvolvimento)
 bash scripts/modelo.sh        # modelo .onnx e vídeo com pessoas (fora do git)
 pnpm rtsp:up                  # câmeras RTSP sintéticas (MediaMTX)
 
@@ -205,7 +240,7 @@ cp .env.example .env           # senha já bate com infra/.env por padrão
 pnpm install
 pnpm migrate                   # aplica prisma/migrations contra DATABASE_URL
 DATABASE_URL=$TEST_DATABASE_URL pnpm exec prisma migrate deploy   # só na 1ª vez, schema de teste
-pnpm test                      # Postgres real (TEST_DATABASE_URL), nada mockado
+pnpm test                      # Postgres e MinIO reais (TEST_*), nada mockado
 pnpm lint
 pnpm seed                      # tenant/loja/agente/câmeras de dev, espelha config.exemplo.json
 pnpm dev                       # sobe em :3000
@@ -213,6 +248,22 @@ pnpm dev                       # sobe em :3000
 # a mesma loja semeada, agora puxada pela API de verdade (em vez de --config):
 cd ../agent && uv run python -m lince_agent --config-nuvem --api-url http://localhost:3000 \
   --api-token dev-agent-token-local-only --model models/yolox_s.onnx --dry-run --stats
+
+# e o caminho inteiro, sem --dry-run: o evento sobe, o clipe vai direto para o bucket
+# por URL pré-assinada e o PATCH confirma. `enviados=` e `clipes=` na linha [fila] com
+# `falhas=0` é o sinal de que os três passos fecharam:
+cd ../agent && uv run python -m lince_agent --config-nuvem --api-url http://localhost:3000 \
+  --api-token dev-agent-token-local-only --model models/yolox_s.onnx --stats
+```
+
+O que aterrissou no bucket, para conferir na mão o que a linha `[fila]` afirma — pelo
+console do MinIO em `http://localhost:9001` (credencial em `infra/.env`) ou por `mc`:
+
+```bash
+set -a && . infra/.env && set +a
+docker run --rm --network lince-dev_default \
+  -e MC_HOST_local="http://$MINIO_ROOT_USER:$MINIO_ROOT_PASSWORD@minio:9000" \
+  minio/mc ls --recursive local/"$S3_BUCKET"
 ```
 
 Na linha `[regras]` o que se vigia são os **descartes**, não os eventos: numa loja de
@@ -348,3 +399,15 @@ Não reintroduza nenhuma destas — cada uma custou depuração e tem teste guar
 - **Detecção fraca nunca cria track.** O piso do detector é 0,10 para alimentar a segunda
   passada do ByteTrack, e é a regra "só continua track existente" que impede isso de
   virar falso positivo.
+- **URL pré-assinada não pode assinar `Content-Type` nem `Content-Length`.** Só `host`
+  entra no `X-Amz-SignedHeaders`. Assiná-los obrigaria o agente a mandar exatamente o
+  mesmo valor que a API previu, e qualquer divergência viraria um `403` do bucket — que
+  se parece com credencial errada e manda depurar no lugar errado.
+- **O bloco `clip` do `POST` é o desfecho do corte; o do `PATCH` é o do upload.** São
+  campos com o mesmo nome e significados diferentes. Tratá-los como um só faz o reenvio
+  do evento rebaixar para `pendente` um clipe que já está no bucket, e a triagem passa a
+  esperar para sempre um upload que já aconteceu.
+- **URL assinada contra bucket que não existe funciona.** A assinatura sai perfeita e o
+  erro só aparece no `PUT`, como `404`, parecendo problema de credencial. É por isso que
+  o `pnpm infra:up` cria os buckets num container próprio em vez de contar com a
+  primeira escrita.

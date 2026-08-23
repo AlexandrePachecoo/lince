@@ -1,5 +1,6 @@
-// Schema mínimo para servir GET /v1/agents/config (§5.2). Nenhuma outra rota
-// existe ainda — não há EVENTO, TRIAGEM, etc. do diagrama ER de docs/arquitetura.md §6.
+// Schema do control plane. Cobre as rotas de agente da §5.2 (config, register,
+// heartbeat) e o EVENTO com o desfecho do clipe. TRIAGEM, USUARIO e ENVIO_ALERTA do
+// diagrama ER de docs/arquitetura.md §6 ainda não existem — não há dashboard.
 //
 // Zonas e regras são JSONB por câmera, não tabelas ZONA/REGRA_CONFIG normalizadas:
 // decisão explícita desta fatia, porque não há dashboard ainda para justificar editar
@@ -47,6 +48,7 @@ model Loja {
   cameras         Camera[]
   agentes         Agente[]
   tokensBootstrap TokenBootstrap[]
+  eventos         Evento[]
 
   @@index([tenantId])
   @@map("loja")
@@ -98,7 +100,8 @@ model Agente {
   heartbeatEm DateTime? @map("heartbeat_em")
   heartbeat   Json?
 
-  loja Loja @relation(fields: [lojaId], references: [id])
+  loja    Loja     @relation(fields: [lojaId], references: [id])
+  eventos Evento[]
 
   @@index([lojaId])
   @@map("agente")
@@ -126,4 +129,105 @@ model TokenBootstrap {
 
   @@index([lojaId])
   @@map("token_bootstrap")
+}
+
+// Origem do gatilho (event.v1.json). `manual` é gatilho humano -- teste de câmera na
+// instalação. Existe como enum e não como boolean porque a nuvem PRECISA separar os
+// dois para não contaminar a métrica de falso positivo por câmera (NFR-2, R-1): um
+// instalador testando 40 vezes numa tarde afundaria a estatística da loja.
+enum EventoOrigem {
+  rule
+  manual
+
+  @@map("evento_origem")
+}
+
+// Estado do clipe **no armazenamento**, que não é o `clip.status` do contrato.
+//
+// Os dois são fáceis de confundir e significam coisas diferentes: o `clip.status` do
+// POST é o desfecho do **corte** na borda (o §3.5 conseguiu produzir o arquivo?), e o
+// do PATCH é o desfecho do **upload** (os bytes chegaram ao R2?). Um clipe cortado com
+// sucesso ainda vira `clip_failed` se as tentativas se esgotarem ou o teto de disco o
+// despejar antes de subir (outbox/event.py, build_clip_patch).
+//
+// `pendente` é o estado que o contrato não tem nome para: a nuvem conhece o evento,
+// emitiu a URL, e os bytes ainda não chegaram. Sem ele, a triagem não conseguiria
+// distinguir "o vídeo está subindo" de "não vai haver vídeo" -- e a segunda é a que
+// libera o triador a decidir sem esperar.
+enum ClipeEstado {
+  pendente
+  disponivel
+  indisponivel
+
+  @@map("clipe_estado")
+}
+
+// EVENTO do §6: o alerta que a borda decidiu emitir. Nunca carrega vídeo -- o clipe
+// vai direto da loja para o R2 por URL pré-assinada (§4.4) e o que fica aqui é a
+// chave do objeto.
+model Evento {
+  // O event_id do payload É a identidade da linha, não uma coluna a mais ao lado de um
+  // id gerado aqui. A idempotência do §5.4 vira chave primária: duas chegadas do mesmo
+  // POST não podem produzir duas linhas, e essa garantia passa a ser do banco em vez
+  // de depender de todo caminho de escrita futuro lembrar de um upsert.
+  eventId String @id @map("event_id")
+
+  tenantId String @map("tenant_id")
+  lojaId   String @map("loja_id")
+
+  // Texto, sem FK para Camera de propósito. Um evento que sobe seis horas depois,
+  // porque o link caiu, pode chegar com a câmera já removida da configuração no
+  // dashboard. Com FK, o INSERT falharia, a API responderia erro e o agente mandaria o
+  // evento para a fila morta (outbox/policy.py) -- um alerta real perdido por causa de
+  // uma edição de cadastro feita no meio do caminho. A referência é fraca porque o
+  // evento é o registro histórico e o cadastro é mutável.
+  cameraId String @map("camera_id")
+
+  // Quem mandou. Nulo se aquela credencial já não existe: a rotação da §5.1 cria um
+  // Agente novo, e um evento de dezembro não pode desaparecer porque a loja trocou de
+  // credencial em janeiro.
+  agenteId String? @map("agente_id")
+
+  // ocorridoEm é o gatilho; reportadoEm é o relógio de parede da borda ao enfileirar;
+  // recebidoEm é o relógio da nuvem. Os três existem separados porque a diferença
+  // entre eles é justamente o que denuncia link caído (recebido - reportado) e deriva
+  // de relógio do box (reportado - ocorrido).
+  ocorridoEm  DateTime @map("ocorrido_em")
+  reportadoEm DateTime @map("reportado_em")
+  recebidoEm  DateTime @default(now()) @map("recebido_em")
+
+  source EventoOrigem
+
+  // Regra que disparou, achatada em duas colunas em vez de JSONB: é por
+  // (regra, versão) que se lê taxa de falso positivo, e uma métrica que se vai
+  // agrupar não pode morar dentro de um JSON. Nulas quando source = manual.
+  regraId     String? @map("regra_id")
+  regraVersao Int?    @map("regra_versao")
+
+  // Blocos do documento guardados como vieram (mesma decisão do JSONB por câmera).
+  // `clip` aqui é o bloco do POST -- o desfecho do CORTE, com pré/pós-roll medidos e
+  // fragmentos. O desfecho do upload não mora nele; mora em clipeEstado abaixo.
+  versions Json
+  clip     Json
+
+  clipeEstado      ClipeEstado @default(pendente) @map("clipe_estado")
+  clipeObjectKey   String?     @map("clipe_object_key")
+  // Motivo de o vídeo não existir, vindo do PATCH clip_failed. É o que o triador lê
+  // para saber que não adianta esperar -- "clipe despejado pelo teto de disco" e
+  // "câmera reconectou no meio do corte" pedem ações diferentes do técnico.
+  clipeErro        String?     @map("clipe_erro")
+  clipeResolvidoEm DateTime?   @map("clipe_resolvido_em")
+
+  atualizadoEm DateTime @updatedAt @map("atualizado_em")
+
+  loja   Loja    @relation(fields: [lojaId], references: [id])
+  agente Agente? @relation(fields: [agenteId], references: [id], onDelete: SetNull)
+
+  // Todo índice começa por tenant_id: é assim que a query da fila de triagem fica
+  // fisicamente incapaz de varrer evento de outro tenant (NFR-6).
+  @@index([tenantId, ocorridoEm])
+  @@index([tenantId, lojaId, cameraId, ocorridoEm])
+  // A fila de clipes pendentes: o que a nuvem varre para saber que upload nunca veio.
+  @@index([tenantId, clipeEstado])
+  @@map("evento")
 }

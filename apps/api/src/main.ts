@@ -2,7 +2,11 @@ import { carregaEnv } from "./env.js";
 import { buildApp } from "./server.js";
 
 const env = carregaEnv();
-const app = await buildApp({ databaseUrl: env.databaseUrl });
+const app = await buildApp({
+  databaseUrl: env.databaseUrl,
+  armazenamento: env.armazenamento,
+  uploadExpiraEmS: env.uploadExpiraEmS,
+});
 
 try {
   await app.listen({ port: env.port, host: "0.0.0.0" });

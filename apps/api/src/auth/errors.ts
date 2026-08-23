@@ -50,6 +50,21 @@ export class BootstrapTokenJaUsado extends AppError {
   }
 }
 
+// A credencial do agente é escopada a UMA loja (§5.1), e o POST /v1/events traz
+// tenant_id/store_id no corpo. Divergirem é o caso que o NFR-6 existe para impedir.
+//
+// 403, e não 400, é decisão de qual lado errar: classify_response (outbox/policy.py)
+// manda 400 para a fila morta e 403 para retry lento. Um box provisionado com o
+// tenant errado é erro humano de instalação, e os eventos que ele está mandando são
+// reais -- descartar o dia inteiro da loja enquanto alguém não conserta o cadastro é
+// pior do que uma fila insistindo até o conserto chegar.
+export class EscopoDoAgente extends AppError {
+  readonly status = 403;
+  constructor() {
+    super("evento não pertence à loja desta credencial");
+  }
+}
+
 export class RequisicaoInvalida extends AppError {
   readonly status = 400;
 }

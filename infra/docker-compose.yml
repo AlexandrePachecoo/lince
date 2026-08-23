@@ -10,6 +10,13 @@
 # O Redis daqui também é o alvo dos testes marcados com `redis` do agente
 # (`uv run pytest -m redis`), que usam o banco 15 e prefixo próprio por teste. Não é
 # o Redis do box — é o mesmo software cumprindo dois papéis em desenvolvimento.
+#
+# O MinIO faz o papel do Cloudflare R2 (§4.4) em desenvolvimento: é a mesma API S3,
+# então a URL pré-assinada que a API emite e o `PUT` que o agente faz nela são o
+# mesmo código dos dois lados — o que muda é só o endpoint. Vale a pena rodar um
+# container a mais por isso: o caminho do clipe é onde moram as armadilhas já pagas
+# do agente (`Content-Length` obrigatório, corpo reaberto a cada tentativa), e
+# nenhuma delas aparece se o teste só conferir o formato da URL assinada.
 
 name: lince-dev
 
@@ -49,6 +56,55 @@ services:
       timeout: 3s
       retries: 12
 
+  # Papel do Cloudflare R2 (§4.4) em desenvolvimento. Path-style (`/bucket/chave`) é
+  # o que o MinIO fala e o que o R2 também aceita, então o mesmo assinador serve aos
+  # dois sem um caso especial por ambiente.
+  minio:
+    image: minio/minio:latest
+    container_name: lince-minio
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-lince}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?defina MINIO_ROOT_PASSWORD em infra/.env}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # Cria os buckets e sai. Sem isto, a primeira emissão de URL pré-assinada assina
+  # perfeitamente contra um bucket que não existe e o `PUT` do agente leva 404 — um
+  # erro que se parece com bug de assinatura e não é.
+  #
+  # Dois buckets pelo mesmo motivo do schema `lince_test` do Postgres: a suíte da API
+  # apaga o que cria, e apagar por engano os clipes que o dev estava olhando na mão
+  # seria um jeito bobo de perder uma tarde.
+  minio-buckets:
+    image: minio/mc:latest
+    container_name: lince-minio-buckets
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-lince}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?defina MINIO_ROOT_PASSWORD em infra/.env}
+      S3_BUCKET: ${S3_BUCKET:-lince-clipes}
+      TEST_S3_BUCKET: ${TEST_S3_BUCKET:-lince-clipes-teste}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
+      mc mb --ignore-existing local/$${S3_BUCKET} &&
+      mc mb --ignore-existing local/$${TEST_S3_BUCKET}
+      "
+
 volumes:
   pgdata:
   redisdata:
+  miniodata:
