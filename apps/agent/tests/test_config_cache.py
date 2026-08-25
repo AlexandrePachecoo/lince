@@ -114,13 +114,18 @@ def test_cria_o_diretorio_se_ele_nao_existe(tmp_path):
 
 
 def test_falha_de_escrita_nao_levanta(tmp_path):
-    """Disco cheio ou volume só-leitura. O agente acabou de aplicar uma configuração
-    válida e está detectando; não conseguir guardá-la para a próxima subida é um
-    problema real, mas parar o pipeline por causa dele violaria a §5.4."""
-    diretorio = tmp_path / "somente-leitura"
-    diretorio.mkdir()
-    diretorio.chmod(0o500)
-    try:
-        assert ConfigCache(diretorio / "config-cache.json").grava(DOCUMENTO) is False
-    finally:
-        diretorio.chmod(0o700)
+    """Disco cheio, volume só-leitura, caminho de cache impossível. O agente acabou de
+    aplicar uma configuração válida e está detectando; não conseguir guardá-la para a
+    próxima subida é um problema real, mas parar o pipeline por causa dele violaria a
+    §5.4.
+
+    A falha é provocada por um caminho cujo pai é um arquivo comum, e não por
+    `chmod(0o500)` num diretório: o agente roda como root dentro do container (§3.8), e
+    o uid 0 ignora bit de permissão. Um teste construído sobre permissão passa na
+    máquina do dev e falha em CI e no box — que são justamente os dois lugares onde ele
+    precisa valer. O que se está testando é o contrato de `grava` diante de um `OSError`
+    qualquer: `False` com log, nunca exceção."""
+    ocupado = tmp_path / "isto-e-um-arquivo"
+    ocupado.write_text("não sou diretório", encoding="utf-8")
+
+    assert ConfigCache(ocupado / "config-cache.json").grava(DOCUMENTO) is False

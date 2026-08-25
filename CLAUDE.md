@@ -43,6 +43,11 @@ Regras práticas:
    `uv run pytest` numa máquina limpa.
 6. **Nunca use `sleep` para sincronizar teste.** Use relógio falso, `Event` ou
    polling com prazo. Teste que depende de tempo real fica instável em CI.
+7. **Não construa falha de E/S sobre bit de permissão.** O agente roda como root no
+   container (§3.8) e o CI também: `chmod(0o500)` não impede o uid 0 de escrever, e o
+   teste passa na máquina do dev e falha exatamente nos dois lugares onde precisava
+   valer. Provoque o `OSError` por estrutura — caminho cujo pai é um arquivo, por
+   exemplo —, que falha para qualquer usuário.
 
 Antes de dar qualquer coisa por concluída:
 

@@ -25,6 +25,7 @@ Três decisões deste módulo, e o que cada uma custa:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -128,6 +129,13 @@ class ConfigCache:
             log.warning(
                 "não consegui gravar o cache de configuração em %s: %s", self._caminho, erro
             )
-            temporario.unlink(missing_ok=True)
+            # A limpeza do temporário também pode falhar, e falhar aqui seria pior do
+            # que o problema original: `missing_ok` só engole `FileNotFoundError`, e
+            # um caminho de cache impossível (pai que é arquivo, montagem sumida)
+            # levanta `NotADirectoryError`/`PermissionError` no próprio `unlink`. Essa
+            # exceção sairia de `grava` e derrubaria o agente **por não ter conseguido
+            # salvar o plano B** — exatamente a inversão que a §5.4 proíbe.
+            with contextlib.suppress(OSError):
+                temporario.unlink(missing_ok=True)
             return False
         return True

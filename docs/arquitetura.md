@@ -1,13 +1,20 @@
 # Arquitetura — Sistema de Detecção de Furtos em Varejo
 
-**Status:** rascunho de arquitetura (pré-implementação)
+**Status:** arquitetura pretendida; a borda (§3) e as rotas de agente da §5 já existem
 **Escopo:** MVP / v1
-**Última atualização:** 2026-08-11
+**Última atualização:** 2026-08-25
 
-> Este documento descreve a arquitetura pretendida. Nenhum código foi escrito ainda.
+> Este documento descreve a arquitetura **pretendida**, e continua sendo o alvo, não o
+> retrato. Parte dela já é código — o pipeline da §3, o contrato da §5 e as rotas de
+> agente da §4.1 —, e parte segue sem uma linha escrita: triagem, dashboard, notificação
+> e distribuição de modelo. O estado por componente vive no `CLAUDE.md`, que é atualizado
+> a cada fatia; este documento não é o lugar de acompanhar progresso.
+>
 > Todos os limiares numéricos aqui são **hipóteses de projeto**, não medições. Onde
 > aparece "a validar por benchmark", o número existe para dimensionar decisões e
-> precisa ser confirmado com hardware e vídeo reais antes de virar contrato.
+> precisa ser confirmado com hardware e vídeo reais antes de virar contrato. Nenhum
+> deles foi confirmado ainda: até hoje o sistema nunca viu vídeo de loja real, e é
+> disso que dependem nove das doze pendências da §10.
 
 ---
 

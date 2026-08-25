@@ -82,8 +82,9 @@ model Camera {
 model Agente {
   id          String   @id @default(uuid())
   lojaId      String   @map("loja_id")
-  // SHA-256 hex do token, nunca o token em claro — mesmo sendo seed de dev (§5.1
-  // ainda não tem POST /v1/agents/register; este é o token semeado direto no banco).
+  // SHA-256 hex do token, nunca o token em claro — vale igualmente para a credencial
+  // emitida pelo POST /v1/agents/register (§5.1, src/routes/agents/register.ts) e para
+  // o token de atalho que o scripts/seed.ts semeia em desenvolvimento.
   tokenHash   String   @unique @map("token_hash")
   // Prefixo em claro só para log/debug sem reconstituir o segredo.
   tokenPrefix String   @map("token_prefix")

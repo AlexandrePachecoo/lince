@@ -1,0 +1,118 @@
+# O que o CLAUDE.md exige antes de dar qualquer coisa por concluída, agora exigido
+# também de quem esquecer de rodar. Dois jobs porque são dois ecossistemas com
+# ciclos de vida próprios — a borda em Python não deve esperar o Postgres subir para
+# saber que um teste de tracking quebrou.
+#
+# O que este CI deliberadamente NÃO roda: os testes marcados (`rtsp`, `redis`,
+# `modelo`). O `-m modelo` exige o .onnx que o scripts/modelo.sh baixa e que não vai
+# para o git; o `-m rtsp` exige as câmeras sintéticas. Ambos cabem num job próprio no
+# dia em que houver motivo — o padrão é o que o CLAUDE.md manda rodar numa máquina
+# limpa, e é ele que precisa continuar verdadeiro.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  agente:
+    name: agente (Python)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/agent
+    steps:
+      - uses: actions/checkout@v4
+
+      # ffmpeg não é dependência opcional do agente: o estágio 1 decodifica com ele e
+      # o estágio 5 corta o clipe com ele. O CLAUDE.md proíbe mockar o que roda no
+      # ambiente, então sem ffmpeg instalado ~12 testes de ingestão viram erro.
+      - name: ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
+
+      # Instalador oficial em vez de uma action de terceiro: uma dependência a menos
+      # para manter atualizada, e o mesmo caminho que o scripts/setup.sh usa.
+      - name: uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: dependências
+        run: uv sync --frozen
+
+      - name: ruff check
+        run: uv run ruff check src tests
+
+      - name: ruff format
+        run: uv run ruff format --check src tests
+
+      - name: pytest
+        run: uv run pytest
+
+  api:
+    name: api (Node)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      # `packageManager` no package.json da raiz é quem fixa a versão do pnpm; o
+      # corepack só obedece. Repetir o número aqui criaria duas fontes divergentes.
+      - name: pnpm
+        run: corepack enable
+
+      # A infra de teste é o MESMO docker-compose que o dev sobe com `pnpm infra:up`.
+      # Declarar `services:` no workflow duplicaria a definição do ambiente, e a cópia
+      # do CI é a que ninguém percebe que ficou para trás.
+      - name: infra (Postgres + MinIO)
+        working-directory: .
+        env:
+          SENHA_CI: senha-de-ci-nao-secreta
+        run: |
+          sed "s/troque-esta-senha/$SENHA_CI/g" infra/.env.example > infra/.env
+          docker compose -f infra/docker-compose.yml up -d --wait postgres redis minio
+          # Serviço de uma tacada só: cria os buckets e sai. Em primeiro plano, porque
+          # o que interessa é ele ter terminado antes do primeiro teste — URL assinada
+          # contra bucket inexistente é 404 no PUT, e parece erro de credencial.
+          docker compose -f infra/docker-compose.yml up minio-buckets
+
+      - name: .env da API
+        env:
+          SENHA_CI: senha-de-ci-nao-secreta
+        run: sed "s/troque-esta-senha/$SENHA_CI/g" .env.example > .env
+
+      - name: dependências
+        working-directory: .
+        run: pnpm install --frozen-lockfile
+
+      - name: prisma generate
+        run: pnpm prisma:generate
+
+      - name: migrations
+        run: |
+          set -a && . ./.env && set +a
+          pnpm exec prisma migrate deploy
+          # O schema lince_test é onde a suíte roda (TRUNCATE entre testes). Precisa
+          # das mesmas migrations, e é criado pelo próprio migrate deploy.
+          DATABASE_URL="$TEST_DATABASE_URL" pnpm exec prisma migrate deploy
+
+      - name: biome
+        run: pnpm lint
+
+      - name: testes
+        run: pnpm test
