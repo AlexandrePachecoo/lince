@@ -1,6 +1,8 @@
 // Schema do control plane. Cobre as rotas de agente da §5.2 (config, register,
-// heartbeat) e o EVENTO com o desfecho do clipe. TRIAGEM, USUARIO e ENVIO_ALERTA do
-// diagrama ER de docs/arquitetura.md §6 ainda não existem — não há dashboard.
+// heartbeat), o EVENTO com o desfecho do clipe e o lado humano: USUARIO, TRIAGEM e
+// AUDITORIA do diagrama ER de docs/arquitetura.md §6. ENVIO_ALERTA, MODELO_VERSAO e
+// POLITICA_RETENCAO ainda não existem — não há notificação, download de modelo nem
+// job de expurgo.
 //
 // Zonas e regras são JSONB por câmera, não tabelas ZONA/REGRA_CONFIG normalizadas:
 // decisão explícita desta fatia, porque não há dashboard ainda para justificar editar
@@ -24,15 +26,16 @@ model Tenant {
   nome     String
   criadoEm DateTime @default(now()) @map("criado_em")
 
-  lojas Loja[]
+  lojas    Loja[]
+  usuarios Usuario[]
 
   @@map("tenant")
 }
 
 model Loja {
-  id        String @id
-  tenantId  String @map("tenant_id")
-  nome      String
+  id       String @id
+  tenantId String @map("tenant_id")
+  nome     String
 
   // Blocos de nível-loja do documento config.v1.json (§5.2). JSONB porque o schema
   // de verdade é o JSON Schema em packages/shared/schemas/config.v1.json, validado
@@ -49,15 +52,16 @@ model Loja {
   agentes         Agente[]
   tokensBootstrap TokenBootstrap[]
   eventos         Evento[]
+  usuarios        UsuarioLoja[]
 
   @@index([tenantId])
   @@map("loja")
 }
 
 model Camera {
-  id       String @id @default(uuid())
-  cameraId String @map("camera_id")
-  lojaId   String @map("loja_id")
+  id       String  @id @default(uuid())
+  cameraId String  @map("camera_id")
+  lojaId   String  @map("loja_id")
   url      String
   detect   Boolean @default(true)
 
@@ -80,16 +84,16 @@ model Camera {
 }
 
 model Agente {
-  id          String   @id @default(uuid())
-  lojaId      String   @map("loja_id")
+  id          String    @id @default(uuid())
+  lojaId      String    @map("loja_id")
   // SHA-256 hex do token, nunca o token em claro — vale igualmente para a credencial
   // emitida pelo POST /v1/agents/register (§5.1, src/routes/agents/register.ts) e para
   // o token de atalho que o scripts/seed.ts semeia em desenvolvimento.
-  tokenHash   String   @unique @map("token_hash")
+  tokenHash   String    @unique @map("token_hash")
   // Prefixo em claro só para log/debug sem reconstituir o segredo.
-  tokenPrefix String   @map("token_prefix")
-  ativo       Boolean  @default(true)
-  criadoEm    DateTime @default(now()) @map("criado_em")
+  tokenPrefix String    @map("token_prefix")
+  ativo       Boolean   @default(true)
+  criadoEm    DateTime  @default(now()) @map("criado_em")
   ultimoUsoEm DateTime? @map("ultimo_uso_em")
 
   // Último heartbeat (§5.3), não série histórica: HEARTBEAT no §6 é telemetria de
@@ -221,8 +225,9 @@ model Evento {
 
   atualizadoEm DateTime @updatedAt @map("atualizado_em")
 
-  loja   Loja    @relation(fields: [lojaId], references: [id])
-  agente Agente? @relation(fields: [agenteId], references: [id], onDelete: SetNull)
+  loja     Loja      @relation(fields: [lojaId], references: [id])
+  agente   Agente?   @relation(fields: [agenteId], references: [id], onDelete: SetNull)
+  triagens Triagem[]
 
   // Todo índice começa por tenant_id: é assim que a query da fila de triagem fica
   // fisicamente incapaz de varrer evento de outro tenant (NFR-6).
@@ -231,4 +236,178 @@ model Evento {
   // A fila de clipes pendentes: o que a nuvem varre para saber que upload nunca veio.
   @@index([tenantId, clipeEstado])
   @@map("evento")
+}
+
+// Papel do usuário **na loja**, como o §6 define (USUARIO_LOJA). Não é papel de
+// tenant: uma rede com dez lojas tem gerente que só enxerga a dele, e um papel global
+// obrigaria a escolher entre "vê tudo" e "não vê nada".
+//
+// `admin` é o papel que administra gente -- e administra gente **daquela loja**. Quem
+// cria ou edita usuário precisa ser admin de todas as lojas envolvidas no vínculo
+// (routes/usuarios/*), o que mantém a autorização inteira dentro do mesmo conceito em
+// vez de inventar um segundo eixo de permissão por cima.
+enum PapelUsuario {
+  admin
+  gerente
+  operador
+
+  @@map("papel_usuario")
+}
+
+// Os três desfechos do §4.5, com os mesmos literais do texto da arquitetura. Três, e
+// não dois, porque `inconclusivo` é o que impede o triador de chutar: sem ele, um
+// clipe em que não dá para ver nada vira "falso positivo" e envenena exatamente a
+// métrica que o R-1 existe para medir.
+enum DecisaoTriagem {
+  confirmado
+  falso_positivo
+  inconclusivo
+
+  @@map("decisao_triagem")
+}
+
+// Ação registrada na trilha de auditoria. Enum de um valor só hoje, e enum mesmo
+// assim: a alternativa (texto livre) faz a primeira consulta de auditoria descobrir
+// que existem três grafias da mesma ação escritas em meses diferentes.
+enum AuditoriaAcao {
+  clipe_url_emitida
+
+  @@map("auditoria_acao")
+}
+
+// USUARIO do §6: gente, não box. Fica separado de Agente de propósito -- são duas
+// credenciais com poderes disjuntos, e juntá-las numa tabela só ("principal") faria
+// um token de loja comprometido (que vive num box no estoque de um mercado) partilhar
+// caminho de código com quem pode ler clipe e triar evento.
+model Usuario {
+  id String @id @default(uuid())
+
+  tenantId String @map("tenant_id")
+
+  // Único no sistema inteiro, não por tenant. O login recebe e-mail e senha e mais
+  // nada: o gerente está em pé no corredor, e um seletor de tenant na tela de login é
+  // um campo que ele não sabe preencher. Unicidade por tenant exigiria esse campo,
+  // porque o mesmo e-mail em dois tenants tornaria a credencial ambígua.
+  email String @unique
+
+  nome String
+
+  // scrypt com sal por usuário (auth/senha.ts), nunca o SHA-256 usado nos tokens de
+  // agente: token é 256 bits aleatórios, senha é escolhida por gente e cabe em
+  // dicionário. Hash rápido sobre senha humana é vazamento de banco virando lista de
+  // senhas em claro na mesma tarde.
+  senhaHash String @map("senha_hash")
+
+  ativo Boolean @default(true)
+
+  // Revogação de todos os JWTs já emitidos para este usuário, sem tabela de sessão: o
+  // token carrega a versão que existia quando foi assinado, e a autenticação recusa
+  // quem trouxer versão diferente (auth/usuario-token.ts). É o que faz "trocar a
+  // senha" e "demiti o funcionário hoje" valerem agora, e não quando o token vencer.
+  tokenVersao Int @default(0) @map("token_versao")
+
+  criadoEm     DateTime @default(now()) @map("criado_em")
+  atualizadoEm DateTime @updatedAt @map("atualizado_em")
+
+  tenant   Tenant        @relation(fields: [tenantId], references: [id])
+  lojas    UsuarioLoja[]
+  triagens Triagem[]
+
+  @@index([tenantId])
+  @@map("usuario")
+}
+
+// USUARIO_LOJA do §6. Tabela de ligação com papel, e não uma coluna `lojaId` em
+// Usuario: um gerente de duas lojas é o caso normal numa rede pequena, e o dono
+// costuma ser admin de todas.
+model UsuarioLoja {
+  usuarioId String       @map("usuario_id")
+  lojaId    String       @map("loja_id")
+  papel     PapelUsuario
+  criadoEm  DateTime     @default(now()) @map("criado_em")
+
+  // Cascade só aqui: o vínculo não é histórico, é cadastro. Apagar o vínculo não
+  // apaga triagem nenhuma -- a decisão já tomada continua de pé com o autor dela.
+  usuario Usuario @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  loja    Loja    @relation(fields: [lojaId], references: [id])
+
+  @@id([usuarioId, lojaId])
+  @@index([lojaId])
+  @@map("usuario_loja")
+}
+
+// TRIAGEM do §6: a decisão humana que o §1 exige antes de qualquer consequência.
+//
+// **Append-only.** Mudar de ideia grava uma linha nova; a decisão vigente é a última.
+// Não é zelo de auditoria: é o dedo errado no corredor. O gerente tria em dois toques
+// com o celular numa mão (NFR-9), e uma decisão imutável transformaria um toque errado
+// em falso positivo permanente na estatística da câmera -- justamente o número que o
+// R-1 manda vigiar. Guardar o histórico deixa a correção acontecer sem apagar que
+// houve correção.
+model Triagem {
+  id String @id @default(uuid())
+
+  // O que define "a última". Não dá para ser criadoEm sozinho: duas decisões no mesmo
+  // milissegundo empatariam, e "vigente" viraria cara ou coroa. A sequência não empata
+  // nunca. (Ela também não é ordem de commit -- para duas decisões de gente, com
+  // segundos entre elas, isso não muda nada.)
+  seq Int @unique @default(autoincrement())
+
+  eventId  String @map("event_id")
+  tenantId String @map("tenant_id")
+
+  // Com FK, e sem onDelete: apagar um usuário que já triou passa a ser recusado pelo
+  // banco. É o comportamento certo -- quem saiu da empresa é desativado (ativo=false),
+  // não removido, senão a trilha perde o autor de decisões que continuam valendo.
+  usuarioId String @map("usuario_id")
+
+  decisao DecisaoTriagem
+
+  // O que o triador viu e a caixa de seleção não cobre ("cliente devolveu na gôndola
+  // da frente"). É daqui que sai o caso difícil para o dataset (§4.5).
+  observacao String?
+
+  criadoEm DateTime @default(now()) @map("criado_em")
+
+  evento  Evento  @relation(fields: [eventId], references: [eventId], onDelete: Cascade)
+  usuario Usuario @relation(fields: [usuarioId], references: [id])
+
+  // A consulta quente da fila: "qual a decisão vigente deste evento" é ORDER BY seq
+  // DESC LIMIT 1 dentro do event_id.
+  @@index([eventId, seq])
+  @@index([tenantId, criadoEm])
+  @@map("triagem")
+}
+
+// AUDITORIA do §6, append-only: quem, qual evento, quando e de onde (NFR-7, R-8).
+//
+// Gravada na **emissão** da URL assinada, não no download: é o único instante em que a
+// nuvem sabe quem pediu. O GET que busca os bytes vai direto ao R2 com a assinatura na
+// query e não passa pela API -- é o preço de o vídeo nunca atravessar o control plane
+// (§4.4), e a linha aqui é o que resta para responder "quem teve acesso a este clipe".
+model Auditoria {
+  id String @id @default(uuid())
+
+  tenantId String        @map("tenant_id")
+  acao     AuditoriaAcao
+
+  // Texto e cópia do e-mail, sem FK -- mesma decisão de Evento.cameraId, por um motivo
+  // mais forte: uma trilha que perde o autor quando o cadastro muda não é trilha. Com
+  // FK e SetNull, apagar o usuário apagaria justamente o "quem" das linhas dele.
+  usuarioId    String @map("usuario_id")
+  usuarioEmail String @map("usuario_email")
+
+  eventId   String? @map("event_id")
+  objectKey String? @map("object_key")
+
+  // "De onde". Melhor esforço: atrás de proxy é o que o X-Forwarded-For disser, e por
+  // isso serve para investigar, nunca para autorizar.
+  ip        String?
+  userAgent String? @map("user_agent")
+
+  criadoEm DateTime @default(now()) @map("criado_em")
+
+  @@index([tenantId, criadoEm])
+  @@index([eventId])
+  @@map("auditoria")
 }

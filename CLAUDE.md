@@ -62,9 +62,9 @@ cd apps/agent && uv run ruff check src tests && uv run ruff format --check src t
 | Componente | Situação |
 |---|---|
 | `apps/agent` | Estágios 1 a 6 (§3.1 a §3.6) ligados por `runtime.py`. N câmeras com zonas próprias, vindas do `GET /v1/agents/config` com `ETag`/`304`, poll de 30 s, cache local e troca a quente. Heartbeat da §5.3 sobe a cada 30 s |
-| `apps/api` | As três rotas de agente (`config`, `register`, `heartbeat`) e o caminho do evento: `POST /v1/events` com URL pré-assinada do clipe e `PATCH /v1/events/{event_id}` (Fastify + Prisma + Postgres + R2, que em desenvolvimento é o MinIO). Falta download de modelo e dashboard |
-| `apps/dashboard` | vazio |
-| `packages/shared` | JSON Schema do evento, do PATCH do clipe, da configuração, do registro e do heartbeat (§5) |
+| `apps/api` | As três rotas de agente (`config`, `register`, `heartbeat`), o caminho do evento (`POST /v1/events` com URL pré-assinada e `PATCH /v1/events/{event_id}`) e o lado humano da §4.5: login, fila de triagem, decisão, URL de leitura do clipe com auditoria e cadastro de usuário. Falta download de modelo, notificação e WebSocket |
+| `apps/dashboard` | vazio — a API que ele consome já existe inteira |
+| `packages/shared` | JSON Schema dos dois contratos: agente ↔ nuvem (§5) e dashboard ↔ nuvem (§4.5) |
 
 O caminho **pessoa cruza a linha → clipe → fila local → nuvem → clipe apagado do
 disco** funciona ponta a ponta, sem andaime nenhum e **sem `--dry-run`**: a borda vê,
@@ -170,13 +170,65 @@ sustentam isso, e que são fáceis de desfazer sem perceber:
   já sabe a chave; gravar a do cliente deixaria uma credencial de loja apontar o evento
   para qualquer objeto do bucket. Divergência vira log.
 
+A §4.5 fechou o ciclo do produto: o alerta que a borda decide agora chega a um humano que
+confirma ou descarta, que é o que o §1 exige antes de qualquer consequência. As decisões
+desta fatia, e o que cada uma custa se for desfeita sem perceber:
+
+- **Credencial humana e credencial de agente são caminhos disjuntos.** As duas leem o
+  mesmo `Authorization: Bearer` e não se cruzam em lugar nenhum: `autenticaUsuario`
+  verifica um JWT, `autenticaAgente` procura um hash de token. Nada decide "que tipo de
+  credencial é esta" — a rota já sabe quem ela atende. O token do agente vive num box no
+  estoque de um mercado; se ele abrisse a fila, o clipe de qualquer evento estaria a um
+  arrombamento de distância.
+- **JWT HS256 escrito à mão (`auth/jwt.ts`)**, ao contrário de `clip-storage.ts`, que
+  preferiu `aws4fetch` a reimplementar SigV4. A diferença é a superfície: SigV4 é grande e
+  errar é silencioso; um JWT com um emissor, um segredo e um algoritmo é um HMAC sobre
+  duas strings. O que faz CVE em biblioteca de JWT é a generalidade que este uso não tem —
+  e aqui o cabeçalho do token **não escolhe nada**, porque só é lido depois de o HMAC
+  fechar. Inverter essa ordem é a família inteira de furos de `alg`.
+- **Senha é scrypt com sal, não o SHA-256 dos tokens** (`auth/senha.ts`). Token é 256 bits
+  de `randomBytes`; senha é escolhida por gente e cabe em dicionário. Os parâmetros do KDF
+  viajam dentro do hash, para subir o custo um dia sem trancar todo mundo para fora.
+- **O JWT poupa a tabela de sessão, não o `SELECT`.** Papel e lojas vêm do banco a cada
+  requisição — precisam vir, senão tirar um gerente de uma loja só valeria quando a sessão
+  dele vencesse. Como a leitura acontece de qualquer jeito, `ativo` e `tokenVersao` são
+  conferidos ali: é isso que faz desativar alguém e trocar senha valerem **agora**.
+- **Triagem é append-only e re-triagem é permitida.** Mudar de ideia grava linha nova; a
+  vigente é a última, por `seq` e não por `criadoEm` (empate de milissegundo tornaria
+  "vigente" cara ou coroa). O motivo é o dedo errado: NFR-9 pede dois toques, com o
+  celular numa mão, num corredor. Decisão imutável transformaria um toque errado em falso
+  positivo permanente na estatística da câmera — o número do R-1.
+- **A fila pagina por cursor, nunca por OFFSET.** Ela cresce por cima enquanto alguém a
+  percorre, e com OFFSET cada evento novo empurra um antigo para uma página já lida: some
+  da tela sem ninguém decidir nada. Evento sem triagem é dívida operacional **visível**
+  (§4.5), e uma paginação que esconde eventos é a forma mais fácil de invisibilizá-la.
+- **A auditoria grava a emissão da URL, não o download.** Depois que a URL sai, o GET vai
+  direto ao bucket e não passa pela API — é o preço de o vídeo nunca atravessar o control
+  plane (§4.4). A emissão é o único instante em que a nuvem sabe quem pediu, e por isso a
+  linha é escrita **antes** de assinar: errar para o lado de auditar demais é o único lado
+  aceitável (R-8).
+- **`admin` é papel de loja, não de tenant.** Administrar gente exige admin em **todas** as
+  lojas envolvidas — inclusive nas que o alvo já tem, senão o admin da loja A desativaria
+  alguém que também trabalha na loja B, a partir de uma tela onde a loja B não aparece.
+  Não há papel de tenant: um segundo eixo de permissão é o que se confere errado no
+  primeiro caso de canto.
+- **Dentro do tenant a recusa é `403`; fora dele é `404`.** Quem está autenticado já sabe
+  que as lojas da rede existem, e "peça acesso ao admin" é acionável. Confirmar que um
+  `event_id` ou um e-mail existe em **outra** rede já é vazamento.
+
 Onde encostar em cada coisa:
 
+- **Dashboard (§4.5)** é o `apps/dashboard` vazio. A API que ele consome já existe
+  inteira, e o contrato dela está em `packages/shared/schemas` — a régua é NFR-9: um toque
+  abre o evento com o vídeo rodando, o segundo é a decisão.
 - **Registro do agente no lado do agente (§5.1)** é o outro lado do
   `POST /v1/agents/register`, que já existe na API: trocar um token de bootstrap por
   credencial na subida, em vez do `--api-token` semeado.
 - **Download de modelo (§5.2)** substitui o caminho local em `DetectionOptions.model_path`.
   O `model_version` já é nome + checksum, no formato que o ADR-006 quer.
+- **Métrica de falso positivo por câmera/dia (R-1)** agora tem de onde sair: é a triagem
+  vigente agrupada por câmera e dia, com `source = rule` separado de `manual`. É a leitura
+  que justifica tudo o que veio antes, e ainda não existe.
 
 O heartbeat (§5.3) é `heartbeat.py`, e o que ele tem de particular não é o envio — é o
 que ele **não** faz. Não há fila: um envio que falhou não deixa nada para trás, porque a
@@ -260,6 +312,34 @@ cd ../agent && uv run python -m lince_agent --config-nuvem --api-url http://loca
 cd ../agent && uv run python -m lince_agent --config-nuvem --api-url http://localhost:3000 \
   --api-token dev-agent-token-local-only --model models/yolox_s.onnx --stats
 ```
+
+O outro lado, o do §4.5 — login, fila de triagem, decisão e clipe. O `pnpm seed` imprime
+este bloco já preenchido, com o usuário e a senha de desenvolvimento:
+
+```bash
+cd apps/api
+TOKEN=$(curl -s -X POST http://localhost:3000/v1/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"email":"gerente@loja-dev.local","senha":"senha-de-desenvolvimento"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+
+# a fila: por padrão só o que falta decidir, do mais recente para o mais antigo
+curl -s "http://localhost:3000/v1/events?limite=5" -H "authorization: Bearer $TOKEN"
+
+# a URL assinada do clipe (5 min), que vai direto no <video> — e gera linha de auditoria
+curl -s http://localhost:3000/v1/events/<EVENT_ID>/clip-url -H "authorization: Bearer $TOKEN"
+
+# a decisão. Repetir com outra decisão é correção, não erro: grava linha nova
+curl -s -X POST http://localhost:3000/v1/events/<EVENT_ID>/triagem \
+  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"decisao":"falso_positivo","observacao":"cliente pagou no autoatendimento"}'
+```
+
+Na fila o que se vigia é o que **não** foi decidido: `triagem=pendentes` é o padrão, e uma
+fila que só cresce é a dívida operacional que o §4.5 quer visível. `clip_state=pendente`
+com o evento velho é upload que nunca chegou — outro problema, e o log do agente é onde
+ele aparece. E `clip_state` não é `clip.status`: o primeiro é o desfecho do **upload**, o
+segundo o do **corte** na borda.
 
 O que aterrissou no bucket, para conferir na mão o que a linha `[fila]` afirma — pelo
 console do MinIO em `http://localhost:9001` (credencial em `infra/.env`) ou por `mc`:
@@ -416,3 +496,21 @@ Não reintroduza nenhuma destas — cada uma custou depuração e tem teste guar
   erro só aparece no `PUT`, como `404`, parecendo problema de credencial. É por isso que
   o `pnpm infra:up` cria os buckets num container próprio em vez de contar com a
   primeira escrita.
+- **`format: "email"` estoura o Ajv em `strict`.** Formato desconhecido não é ignorado: a
+  compilação do schema falha, e como os validadores são compilados na importação do
+  módulo, o sintoma é a API inteira não subir. Ou entra `ajv-formats`, ou o schema usa
+  `pattern` — que é o que se fez, porque e-mail válido de verdade só se prova mandando
+  mensagem, e regex severa recusa endereço legítimo de cliente.
+- **`addSchema` e depois `compile` do mesmo arquivo duplica o `$id`.** `compile` já
+  registra. Fazer os dois estoura com "schema with key or id ... already exists" na
+  subida. O que resolve é compilar na ordem das dependências: quem é referenciado
+  primeiro, e `addSchema` só para o que nunca é raiz (`common.v1.json`).
+- **Normalizar o e-mail depois de validar recusa quem digitou certo.** O teclado do
+  celular capitaliza a primeira letra e o autocompletar deixa espaço no fim. Validando
+  antes, `" Ana@Loja.local "` vira `400` "formato inválido" sobre um endereço
+  visivelmente correto. A ordem é normalizar e **então** validar (`auth/email.ts`), e a
+  mesma função tem que servir ao login e ao cadastro — se divergirem, nasce conta que
+  nenhum login alcança.
+- **Ordenar a triagem vigente por `criadoEm` é cara ou coroa.** Duas decisões no mesmo
+  milissegundo empatam, e "a última" passa a depender de como o Postgres devolveu a
+  linha. Por isso existe `Triagem.seq`: a sequência não empata.

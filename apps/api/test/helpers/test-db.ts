@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { PrismaClient } from "@prisma/client";
+import { type PapelUsuario, PrismaClient } from "@prisma/client";
 import { hashToken } from "../../src/auth/agent-token.js";
+import { geraHashSenha } from "../../src/auth/senha.js";
 
 // Isolamento de teste: mesmo Postgres de infra/docker-compose.yml, schema separado
 // (TEST_DATABASE_URL, lince_test) do que o dev usa na mão via `pnpm dev`/`pnpm seed`.
@@ -25,8 +26,8 @@ export const prismaTeste = new PrismaClient({ datasources: { db: { url: database
 
 export async function limpaBanco(): Promise<void> {
   await prismaTeste.$executeRawUnsafe(
-    'TRUNCATE TABLE "evento", "agente", "token_bootstrap", "camera", "loja", "tenant" ' +
-      "RESTART IDENTITY CASCADE",
+    'TRUNCATE TABLE "auditoria", "triagem", "usuario_loja", "usuario", "evento", ' +
+      '"agente", "token_bootstrap", "camera", "loja", "tenant" RESTART IDENTITY CASCADE',
   );
 }
 
@@ -132,4 +133,71 @@ export async function semeiaTokenBootstrap(
   });
 
   return { lojaId, token };
+}
+
+export interface UsuarioSemeado {
+  usuarioId: string;
+  tenantId: string;
+  email: string;
+  senha: string;
+  nome: string;
+}
+
+export interface SemeiaUsuarioOpcoes {
+  tenantId: string;
+  /** lojaId -> papel. Vazio é um caso legítimo: usuário sem vínculo não enxerga fila. */
+  lojas?: Record<string, PapelUsuario>;
+  email?: string;
+  nome?: string;
+  senha?: string;
+  ativo?: boolean;
+}
+
+// Cria um usuário do dashboard e devolve a senha em claro -- só o teste a vê. O hash sai
+// da mesma rotina de produção (auth/senha.ts), nunca de uma versão "de teste": um atalho
+// aqui faria a suíte inteira passar por um caminho que ninguém usa de verdade.
+//
+// scrypt custa ~150 ms por chamada de propósito (é o ponto dele), e a suíte trunca o
+// banco entre casos -- semear um usuário por caso pagaria isso dezenas de vezes. O hash
+// é memorizado por senha dentro do processo: a rotina de produção roda de verdade na
+// primeira vez, e o que se reaproveita depois é o resultado dela, não um atalho.
+const hashesMemorizados = new Map<string, string>();
+
+async function hashMemorizado(senha: string): Promise<string> {
+  const memorizado = hashesMemorizados.get(senha);
+  if (memorizado !== undefined) {
+    return memorizado;
+  }
+  const hash = await geraHashSenha(senha);
+  hashesMemorizados.set(senha, hash);
+  return hash;
+}
+
+export const SENHA_PADRAO_TESTE = "senha-de-teste-do-gerente";
+
+export async function semeiaUsuario(opcoes: SemeiaUsuarioOpcoes): Promise<UsuarioSemeado> {
+  const sufixo = randomUUID().slice(0, 8);
+  const email = (opcoes.email ?? `gerente-${sufixo}@teste.local`).toLowerCase();
+  const senha = opcoes.senha ?? SENHA_PADRAO_TESTE;
+
+  const usuario = await prismaTeste.usuario.create({
+    data: {
+      tenantId: opcoes.tenantId,
+      email,
+      nome: opcoes.nome ?? `Gerente ${sufixo}`,
+      senhaHash: await hashMemorizado(senha),
+      ativo: opcoes.ativo ?? true,
+      lojas: {
+        create: Object.entries(opcoes.lojas ?? {}).map(([lojaId, papel]) => ({ lojaId, papel })),
+      },
+    },
+  });
+
+  return {
+    usuarioId: usuario.id,
+    tenantId: usuario.tenantId,
+    email,
+    senha,
+    nome: usuario.nome,
+  };
 }

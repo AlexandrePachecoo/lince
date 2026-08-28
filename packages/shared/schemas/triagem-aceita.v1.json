@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/triagem-aceita/v1.json",
+  "title": "Resposta do POST /v1/events/{event_id}/triagem",
+  "description": "O evento como ele passa a aparecer na fila, e não um `{ok: true}`. O PWA acabou de tirar a linha da fila e precisa refletir o novo estado sem uma segunda chamada — inclusive quando a decisão foi uma correção, caso em que `triagem.revisada` vem true.",
+  "type": "object",
+  "required": ["schema_version", "evento"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "evento": { "$ref": "https://schemas.lince.dev/fila-triagem/v1.json#/$defs/evento" }
+  }
+}

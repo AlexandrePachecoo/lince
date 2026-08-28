@@ -16,3 +16,13 @@ export class EventoDesconhecido extends AppError {
     super("evento desconhecido");
   }
 }
+
+// 409, e não 404: o evento existe e o triador tem acesso a ele -- o que não existe (ou
+// ainda não) é o vídeo. A distinção importa para o dashboard, que trata os dois casos de
+// forma diferente: em `pendente` mostra "processando" e tenta de novo, em `indisponivel`
+// libera a decisão sem vídeo em vez de deixar o gerente esperando (§4.5).
+// A mensagem vem de quem lança (mesmo padrão de RequisicaoInvalida), porque as duas
+// razões pedem ações diferentes de quem lê.
+export class ClipeNaoDisponivel extends AppError {
+  readonly status = 409;
+}

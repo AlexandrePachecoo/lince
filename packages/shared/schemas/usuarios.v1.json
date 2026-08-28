@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/usuarios/v1.json",
+  "title": "Resposta do GET /v1/usuarios",
+  "description": "Lista os usuários que compartilham ao menos uma loja em que quem pergunta é admin. Não é a lista do tenant: um admin da loja A não tem por que enumerar o quadro da loja B da mesma rede.",
+  "type": "object",
+  "required": ["schema_version", "usuarios"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "usuarios": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "$ref": "https://schemas.lince.dev/usuario/v1.json#/$defs/usuario" }
+    }
+  }
+}

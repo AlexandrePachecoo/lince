@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/usuario-alteracao/v1.json",
+  "title": "PATCH /v1/usuarios/{id}",
+  "description": "Altera o que muda no dia a dia. Todo campo é opcional, e o que não vier fica como está — inclusive `lojas`, que quando vem **substitui** a lista inteira: é o formulário de edição do dashboard, com uma caixa por loja, e um PATCH que só somasse deixaria o admin sem como tirar acesso.",
+  "type": "object",
+  "additionalProperties": false,
+  "minProperties": 1,
+  "properties": {
+    "nome": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "ativo": {
+      "type": "boolean",
+      "description": "false corta o acesso na requisição seguinte, não quando o token vencer (auth/usuario-token.ts). É o que se usa quando alguém sai da empresa."
+    },
+    "senha": {
+      "type": "string",
+      "minLength": 12,
+      "maxLength": 1024,
+      "description": "Trocar a senha derruba todas as sessões abertas daquele usuário (Usuario.tokenVersao). É o comportamento que se espera de uma senha trocada porque vazou: se as sessões antigas sobrevivessem, trocá-la não resolveria nada."
+    },
+    "lojas": {
+      "type": "array",
+      "maxItems": 500,
+      "items": { "$ref": "https://schemas.lince.dev/usuario/v1.json#/$defs/vinculo" }
+    }
+  }
+}

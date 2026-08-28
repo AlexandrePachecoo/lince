@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/fila-triagem/v1.json",
+  "title": "Resposta do GET /v1/events",
+  "description": "A fila de triagem do §4.5: o que o gerente vê ao abrir o app. Ordenada do mais recente para o mais antigo, porque um alerta de agora ainda é acionável e um de ontem já não é. A paginação é por cursor, e não por página: a fila cresce por baixo enquanto se lê, e OFFSET faria eventos novos empurrarem os antigos para uma página que ninguém abre de novo.",
+  "type": "object",
+  "required": ["schema_version", "eventos", "proximo_cursor"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "eventos": {
+      "type": "array",
+      "maxItems": 200,
+      "items": { "$ref": "#/$defs/evento" }
+    },
+    "proximo_cursor": {
+      "type": ["string", "null"],
+      "maxLength": 512,
+      "description": "Opaco. Nulo quando acabou. Devolver ao GET seguinte em `cursor`."
+    }
+  },
+  "$defs": {
+    "decisao": {
+      "enum": ["confirmado", "falso_positivo", "inconclusivo"],
+      "description": "Os três desfechos do §4.5. `inconclusivo` existe para o clipe em que não dá para ver nada: sem ele o triador chuta `falso_positivo` e envenena justamente a métrica que o R-1 manda vigiar."
+    },
+    "clip_state": {
+      "enum": ["pendente", "disponivel", "indisponivel"],
+      "description": "Estado do clipe **no armazenamento**, que não é o `clip.status` do contrato do agente. `pendente` é o que o contrato não nomeia: a nuvem conhece o evento, emitiu a URL e os bytes ainda não chegaram. É a distinção que libera o triador — esperar faz sentido em `pendente` e nenhum em `indisponivel`."
+    },
+    "triagem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decisao", "decidido_em", "decidido_por"],
+      "properties": {
+        "decisao": { "$ref": "#/$defs/decisao" },
+        "decidido_em": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/instant" },
+        "decidido_por": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "nome"],
+          "properties": {
+            "id": { "type": "string", "maxLength": 64 },
+            "nome": { "type": "string", "maxLength": 200 }
+          }
+        },
+        "observacao": { "type": ["string", "null"], "maxLength": 2000 },
+        "revisada": {
+          "type": "boolean",
+          "description": "true quando esta não é a primeira decisão do evento. A triagem é append-only: mudar de ideia grava linha nova e a vigente é a última. O dashboard mostra isso para que uma correção não pareça a decisão original."
+        }
+      }
+    },
+    "evento": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "tenant_id",
+        "store_id",
+        "camera_id",
+        "occurred_at",
+        "reported_at",
+        "received_at",
+        "source",
+        "clip_state",
+        "triagem"
+      ],
+      "properties": {
+        "event_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/event_id" },
+        "tenant_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+        "store_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+        "camera_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+        "occurred_at": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/instant" },
+        "reported_at": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/instant" },
+        "received_at": {
+          "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/instant",
+          "description": "Relógio da nuvem. A distância até reported_at é o que denuncia link caído da loja, e é por isso que os três instantes vão para a tela em vez de um só."
+        },
+        "source": {
+          "enum": ["rule", "manual"],
+          "description": "`manual` é o andaime de gatilho da instalação. Vai para a fila igual, e separado: um instalador testando 40 vezes numa tarde não pode afundar a estatística de falso positivo da câmera (R-1)."
+        },
+        "rule": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["id", "version"],
+          "properties": {
+            "id": { "type": "string", "maxLength": 64 },
+            "version": { "type": "integer", "minimum": 0 }
+          },
+          "description": "Nulo quando source = manual. A versão importa: sem ela, uma taxa histórica de falso positivo não é interpretável, porque não se sabe sob qual calibração o evento nasceu (§6)."
+        },
+        "versions": {
+          "type": ["object", "null"],
+          "description": "Versões de agente, modelo e configuração vigentes no momento do gatilho, como o agente as reportou."
+        },
+        "clip_state": { "$ref": "#/$defs/clip_state" },
+        "clip_error": {
+          "type": ["string", "null"],
+          "maxLength": 500,
+          "description": "Por que não vai haver vídeo. É o que o triador lê para saber que não adianta esperar — `clipe despejado pelo teto de disco` e `câmera reconectou no meio do corte` pedem ações diferentes do técnico."
+        },
+        "clip": {
+          "anyOf": [
+            { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/clip" },
+            { "type": "null" }
+          ],
+          "description": "O bloco do POST do agente: o desfecho do **corte** na borda, com pré/pós-roll medidos. Não é o desfecho do upload — esse é clip_state, e confundir os dois é a armadilha registrada no CLAUDE.md."
+        },
+        "triagem": {
+          "anyOf": [{ "$ref": "#/$defs/triagem" }, { "type": "null" }],
+          "description": "A decisão **vigente**, ou nula se ninguém triou. Evento sem triagem é dívida operacional visível (§4.5), não um estado silencioso."
+        }
+      }
+    }
+  }
+}

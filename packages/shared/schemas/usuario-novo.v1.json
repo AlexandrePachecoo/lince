@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/usuario-novo/v1.json",
+  "title": "POST /v1/usuarios",
+  "description": "Cria um usuário do dashboard. Quem chama precisa ser admin em **todas** as lojas do vínculo pedido, e o usuário nasce no tenant de quem o criou — não há campo de tenant no corpo, de propósito: um id de tenant vindo do cliente é a forma mais direta de furar o NFR-6.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["email", "nome", "senha", "lojas"],
+  "properties": {
+    "email": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 254,
+      "pattern": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+    },
+    "nome": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "senha": {
+      "type": "string",
+      "minLength": 12,
+      "maxLength": 1024,
+      "description": "Mínimo de 12 caracteres, sem exigência de símbolo ou maiúscula. Regra de composição empurra o usuário para `Senha@2026`, que é curta e previsível; comprimento é o único requisito que aumenta trabalho de quem ataca sem aumentar o de quem lembra."
+    },
+    "lojas": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 500,
+      "items": { "$ref": "https://schemas.lince.dev/usuario/v1.json#/$defs/vinculo" },
+      "description": "Pelo menos uma: usuário sem loja não enxerga evento nenhum, e criá-lo assim é sempre engano de formulário, nunca intenção."
+    }
+  }
+}

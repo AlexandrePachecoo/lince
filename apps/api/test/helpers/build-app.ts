@@ -24,11 +24,23 @@ export function configArmazenamentoTeste(): ConfigArmazenamento {
   };
 }
 
+// Segredo fixo de teste: a suíte precisa poder forjar e conferir token, e um segredo
+// aleatório por processo tornaria impossível escrever o teste que prova que um token
+// assinado com OUTRO segredo é recusado. Nunca vale fora daqui -- em produção
+// AUTH_JWT_SECRET é obrigatória e sem padrão (src/env.ts).
+export const SEGREDO_TESTE = "segredo-de-teste-so-para-a-suite-com-32+";
+
 export interface OpcoesTestApp {
   /** Validade das URLs de upload emitidas. Existe para o teste que confere que o
    * número configurado é o mesmo que sai na resposta E na assinatura da URL, em vez
    * de um 900 embutido no código da rota. */
   uploadExpiraEmS?: number;
+  /** Idem para a URL de leitura do clipe emitida ao dashboard. */
+  leituraExpiraEmS?: number;
+  /** Existe para o teste de sessão vencida: emitir um token com validade de 1 s e
+   * conferir que ele é recusado depois, sem sleep (CLAUDE.md) -- quem manipula o
+   * relógio é emiteToken, via agoraMs. */
+  sessaoExpiraEmS?: number;
 }
 
 export async function buildTestApp(opcoes: OpcoesTestApp = {}): Promise<FastifyInstance> {
@@ -40,6 +52,9 @@ export async function buildTestApp(opcoes: OpcoesTestApp = {}): Promise<FastifyI
     databaseUrl,
     armazenamento: configArmazenamentoTeste(),
     uploadExpiraEmS: opcoes.uploadExpiraEmS ?? 900,
+    leituraExpiraEmS: opcoes.leituraExpiraEmS ?? 300,
+    sessaoSegredo: SEGREDO_TESTE,
+    sessaoExpiraEmS: opcoes.sessaoExpiraEmS ?? 43200,
     logger: false,
   });
 }

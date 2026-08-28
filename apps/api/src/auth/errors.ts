@@ -68,3 +68,62 @@ export class EscopoDoAgente extends AppError {
 export class RequisicaoInvalida extends AppError {
   readonly status = 400;
 }
+
+// --- Credencial humana (§4.5, dashboard de triagem) -------------------------------
+//
+// Estes não são consumidos por classify_response nenhum: do outro lado está um
+// navegador, não a fila do agente. O que dirige a escolha aqui é o que o PWA precisa
+// fazer com a resposta -- mandar para a tela de login (401) ou dizer que a conta não
+// alcança aquela loja (403).
+
+// Um só erro para "e-mail não existe" e "senha errada", com a mesma mensagem. Dois
+// erros distintos entregariam a lista de e-mails cadastrados a quem chutar endereços,
+// e o dashboard não tem o que fazer de diferente com a distinção.
+export class CredenciaisInvalidas extends AppError {
+  readonly status = 401;
+  constructor() {
+    super("e-mail ou senha inválidos");
+  }
+}
+
+// 401 e não 403: o PWA precisa mandar para a tela de login, e nada além de entrar de
+// novo resolve. Separado de TokenInvalido para quem depura um usuário reclamando que
+// "caiu sozinho" -- o log distingue token adulterado de sessão que simplesmente venceu.
+export class SessaoExpirada extends AppError {
+  readonly status = 401;
+  constructor() {
+    super("sessão expirada");
+  }
+}
+
+export class UsuarioInativo extends AppError {
+  readonly status = 403;
+  constructor() {
+    super("usuário desativado");
+  }
+}
+
+// A credencial é válida, o usuário existe, e a loja não é dele. 403 dentro do mesmo
+// tenant, e não 404: quem está autenticado no tenant já sabe que a loja existe -- ela
+// aparece no cadastro. O que não pode acontecer é isto para OUTRO tenant, e não
+// acontece: lá a consulta filtra por tenant_id e a linha nem chega a ser lida (NFR-6).
+export class SemAcessoALoja extends AppError {
+  readonly status = 403;
+  constructor() {
+    super("usuário não tem acesso a esta loja");
+  }
+}
+
+export class SemPermissao extends AppError {
+  readonly status = 403;
+  constructor(acao: string) {
+    super(`ação exige papel admin na loja: ${acao}`);
+  }
+}
+
+export class EmailJaCadastrado extends AppError {
+  readonly status = 409;
+  constructor() {
+    super("e-mail já cadastrado");
+  }
+}

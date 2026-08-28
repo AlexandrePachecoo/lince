@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/triagem/v1.json",
+  "title": "POST /v1/events/{event_id}/triagem",
+  "description": "A decisão humana que o §1 exige antes de qualquer consequência: o sistema não decide nada sozinho. Repetir a chamada com outra decisão é permitido e grava uma linha nova — a vigente passa a ser a última, e o histórico fica. O motivo é o dedo errado: o gerente tria em dois toques com o celular numa mão (NFR-9), e uma decisão imutável transformaria um toque errado em falso positivo permanente na estatística da câmera.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decisao"],
+  "properties": {
+    "decisao": { "$ref": "https://schemas.lince.dev/fila-triagem/v1.json#/$defs/decisao" },
+    "observacao": {
+      "type": ["string", "null"],
+      "maxLength": 2000,
+      "description": "O que o triador viu e os três botões não cobrem (\"cliente devolveu na gôndola da frente\"). É daqui que sai o caso difícil para o dataset de melhoria do modelo (§4.5)."
+    }
+  }
+}

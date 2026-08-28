@@ -1,15 +1,27 @@
-# @lince/shared — contrato agente ↔ nuvem
+# @lince/shared — contrato da API
 
-O que trafega entre a borda e o control plane (§5 da arquitetura) é definido **aqui, em
-um lugar só**. Duplicar essa definição entre a API e o agente é o erro mais caro que dá
-para cometer neste projeto: os dois lados atualizam em ritmos diferentes — o box da loja
-se atualiza sozinho por watchtower (§3.8), a API sobe quando alguém faz deploy — e um
-campo que diverge só aparece como evento recusado numa loja, três semanas depois.
+O que trafega para dentro e para fora do control plane é definido **aqui, em um lugar
+só**. Duplicar essa definição entre a API e quem a consome é o erro mais caro que dá para
+cometer neste projeto: os lados atualizam em ritmos diferentes — o box da loja se atualiza
+sozinho por watchtower (§3.8), a API sobe quando alguém faz deploy, o PWA fica no cache do
+celular de quem não recarregou — e um campo que diverge só aparece como evento recusado
+numa loja, três semanas depois.
 
-Os schemas são **JSON Schema draft 2020-12**, e não tipos TypeScript, porque o agente é
-Python e a API é Node. Um formato neutro é a única forma de os dois consumirem a mesma
-fonte: o agente valida o payload real contra o schema nos testes
-(`apps/agent/tests/test_contrato_evento.py`), e a API gera tipos a partir dele.
+São dois contratos, com plateias diferentes:
+
+- **Agente ↔ nuvem (§5).** O caminho crítico: registro, configuração, heartbeat, evento e
+  clipe. Uma divergência aqui derruba a detecção de uma loja.
+- **Dashboard ↔ nuvem (§4.5).** Sessão, fila de triagem, decisão humana e URL de leitura
+  do clipe. Uma divergência aqui trava a triagem — e evento sem triagem não vira
+  consequência nenhuma, porque o sistema não decide nada sozinho (§1).
+
+Os schemas são **JSON Schema draft 2020-12**, e não tipos TypeScript. Para o agente isso
+é obrigatório: ele é Python. Para o dashboard, que é TypeScript e poderia importar um
+tipo, continua valendo o mesmo formato — o custo que se quer evitar não é escrever o tipo
+duas vezes, é os dois lados discordarem do contrato sem ninguém perceber, e isso não
+depende de falarem a mesma linguagem. O agente valida o payload real contra o schema nos
+testes (`apps/agent/tests/test_contrato_evento.py`); a API valida requisição **e**
+resposta contra ele em toda rota (`apps/api/src/schemas/dashboard.ts`).
 
 ## Arquivos
 
@@ -24,6 +36,25 @@ fonte: o agente valida o payload real contra o schema nos testes
 | `schemas/config.v1.json` | Corpo do `GET /v1/agents/config` — câmeras, zonas, regras e limiares |
 | `schemas/heartbeat.v1.json` | Corpo do `POST /v1/agents/heartbeat` — telemetria periódica, sem identidade nem vídeo |
 
+Do dashboard (§4.5):
+
+| Schema | Uso |
+|---|---|
+| `schemas/auth-login.v1.json` | Corpo do `POST /v1/auth/login` |
+| `schemas/auth-sessao.v1.json` | Resposta do `POST /v1/auth/login` — token e o usuário que ele representa |
+| `schemas/usuario.v1.json` | Resposta com um usuário, e os `$defs` de papel e vínculo |
+| `schemas/usuarios.v1.json` | Resposta do `GET /v1/usuarios` |
+| `schemas/usuario-novo.v1.json` | Corpo do `POST /v1/usuarios` |
+| `schemas/usuario-alteracao.v1.json` | Corpo do `PATCH /v1/usuarios/{id}` |
+| `schemas/fila-triagem.v1.json` | Resposta do `GET /v1/events` — a fila, e os `$defs` de evento e decisão |
+| `schemas/triagem.v1.json` | Corpo do `POST /v1/events/{event_id}/triagem` |
+| `schemas/triagem-aceita.v1.json` | Resposta da triagem — o evento como ele passa a aparecer na fila |
+| `schemas/clipe-url.v1.json` | Resposta do `GET /v1/events/{event_id}/clip-url` |
+
+Nenhum documento de usuário carrega senha ou hash de senha, em nenhuma direção. O hash
+não é público: vazado, vira alvo de força bruta offline — sem rede, sem limite de
+tentativa e sem ninguém percebendo.
+
 `config.v1.json` é o único que circula fora de uma resposta HTTP: o agente lê **o mesmo
 documento** de um arquivo local (`apps/agent/config.exemplo.json`, `--config`), do
 `GET /v1/agents/config` (`--config-nuvem`) e do cache em disco da última configuração
@@ -32,10 +63,10 @@ existir em dois lugares e divergir. O que é do box e não da loja (URL do Redis
 dos clipes, caminho do `.onnx`, credencial) fica **fora** do documento: repointar o disco
 de uma loja não pode ser efeito de uma resposta HTTP.
 
-O endpoint ainda não existe do lado da API. Quando existir, três coisas precisam ser
-verdade e nenhuma delas está no schema: o `ETag` tem que ser **estável** para o mesmo
-conteúdo (senão todo poll baixa o documento inteiro), tem que **mudar** quando o
-conteúdo muda, e o `If-None-Match` do agente tem que ser honrado com `304` sem corpo.
+Três coisas precisam ser verdade nesse endpoint e nenhuma delas está no schema: o `ETag`
+tem que ser **estável** para o mesmo conteúdo (senão todo poll baixa o documento
+inteiro), tem que **mudar** quando o conteúdo muda, e o `If-None-Match` do agente tem que
+ser honrado com `304` sem corpo. É o que `apps/api/src/config/etag.ts` garante.
 
 ## Versionamento
 
@@ -45,9 +76,11 @@ conteúdo muda, e o `If-None-Match` do agente tem que ser honrado com `304` sem 
 - **`schema_version` no payload**, para o servidor rotear sem adivinhar pelo formato.
 - **Campo opcional novo não bumpa** a major. Campo obrigatório novo, campo removido ou
   tipo alterado, sim.
-- **`additionalProperties: false` na raiz**, de propósito: obriga a extensão a ser
-  explícita e faz a incompatibilidade estourar alto, no primeiro evento, em vez de
-  silenciosamente descartar um campo que alguém achou que estava salvando.
+- **`additionalProperties: false` na raiz das requisições**, de propósito: obriga a
+  extensão a ser explícita e faz a incompatibilidade estourar alto, no primeiro evento,
+  em vez de silenciosamente descartar um campo que alguém achou que estava salvando. Nas
+  **respostas** ele fica de fora: o servidor pode passar a mandar um campo novo antes de
+  o cliente conhecê-lo, e um cliente antigo não pode quebrar por causa disso.
 
 ## Regra de instantes
 

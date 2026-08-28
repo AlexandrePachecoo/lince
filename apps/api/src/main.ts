@@ -6,6 +6,9 @@ const app = await buildApp({
   databaseUrl: env.databaseUrl,
   armazenamento: env.armazenamento,
   uploadExpiraEmS: env.uploadExpiraEmS,
+  leituraExpiraEmS: env.leituraExpiraEmS,
+  sessaoSegredo: env.sessaoSegredo,
+  sessaoExpiraEmS: env.sessaoExpiraEmS,
 });
 
 try {

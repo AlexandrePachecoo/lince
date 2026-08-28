@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/auth-login/v1.json",
+  "title": "POST /v1/auth/login",
+  "description": "Troca e-mail e senha por um token de sessão. O e-mail é único no sistema inteiro, e não por tenant, de propósito: o gerente entra em pé no corredor e não teria como preencher um seletor de tenant (schema.prisma, Usuario.email).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["email", "senha"],
+  "properties": {
+    "email": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 254,
+      "pattern": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$",
+      "description": "Verificação deliberadamente frouxa: e-mail válido de verdade só se prova mandando mensagem, e uma regex severa recusa endereço legítimo de cliente. Normalizado para minúsculas pela API antes da busca."
+    },
+    "senha": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "description": "Teto alto e explícito: a senha vira entrada de um KDF de memória dura, e sem limite um corpo de megabytes viraria negação de serviço de graça."
+    }
+  }
+}

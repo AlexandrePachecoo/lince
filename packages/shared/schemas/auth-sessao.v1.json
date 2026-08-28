@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/auth-sessao/v1.json",
+  "title": "Resposta do POST /v1/auth/login",
+  "description": "Token de sessão e o usuário que ele representa. O usuário vem junto para o PWA montar a fila sem uma segunda chamada — o gerente abre o app no corredor e a primeira tela já tem que ser a fila de triagem, não um spinner.",
+  "type": "object",
+  "required": ["schema_version", "token", "expires_in_s", "usuario"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "Vai em `Authorization: Bearer` nas demais rotas. O formato é assunto da API: o cliente trata como opaco, e por isso a validade vem no campo abaixo em vez de o PWA precisar abrir o token para saber quando ela acaba."
+    },
+    "expires_in_s": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Não há refresh nesta versão: vencido, é login de novo. Desativar o usuário ou trocar a senha invalida antes disso, na requisição seguinte."
+    },
+    "usuario": { "$ref": "https://schemas.lince.dev/usuario/v1.json#/$defs/usuario" }
+  }
+}

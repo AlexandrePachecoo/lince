@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/clipe-url/v1.json",
+  "title": "Resposta do GET /v1/events/{event_id}/clip-url",
+  "description": "URL assinada de expiração curta para o dashboard ler o clipe direto do R2 (NFR-7). O vídeo não passa pela API em momento nenhum, nem na leitura — é a mesma decisão do upload (§4.4). Toda emissão vira uma linha de auditoria: quem, qual evento, quando e de onde, porque depois que a URL sai o download acontece fora do alcance do control plane e não haveria mais o que registrar.",
+  "type": "object",
+  "required": ["schema_version", "event_id", "url", "expires_in_s"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "event_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/event_id" },
+    "url": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "description": "Serve direto no `src` de um <video>. Contém a credencial na query: tratá-la como segredo é obrigação do cliente, e é por isso que a validade é curta."
+    },
+    "expires_in_s": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Bem menor que a do upload. Quem faz o PUT é um box com link ruim e precisa de folga; quem faz o GET é um player já aberto na tela. Vencida, o dashboard pede outra — e essa segunda emissão fica na auditoria, que é justamente o que se quer."
+    },
+    "object_key": {
+      "type": ["string", "null"],
+      "maxLength": 512,
+      "description": "Informativo, para conciliar com o que o agente reportou no PATCH. Não é endereço público: sem assinatura o bucket recusa."
+    }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/usuario/v1.json",
+  "title": "Resposta com um usuário",
+  "description": "Representação de um usuário do dashboard. Nunca carrega senha nem hash de senha, em nenhuma forma: o que não sai daqui não vaza em log de proxy, em cache de navegador nem em captura de tela de suporte.",
+  "type": "object",
+  "required": ["schema_version", "usuario"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "usuario": { "$ref": "#/$defs/usuario" }
+  },
+  "$defs": {
+    "papel": {
+      "enum": ["admin", "gerente", "operador"],
+      "description": "Papel **na loja** (§6, USUARIO_LOJA), não no tenant. Numa rede, o gerente de uma loja não enxerga a outra; `admin` é quem administra gente daquela loja."
+    },
+    "vinculo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store_id", "papel"],
+      "properties": {
+        "store_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+        "papel": { "$ref": "#/$defs/papel" }
+      }
+    },
+    "usuario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "tenant_id", "email", "nome", "ativo", "lojas"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "tenant_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+        "email": { "type": "string", "maxLength": 254 },
+        "nome": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "ativo": {
+          "type": "boolean",
+          "description": "Desativar é o que se faz com quem saiu; apagar não é, porque a triagem que a pessoa fez continua valendo e precisa de autor (schema.prisma, Triagem.usuarioId)."
+        },
+        "lojas": {
+          "type": "array",
+          "maxItems": 500,
+          "items": { "$ref": "#/$defs/vinculo" },
+          "description": "Lojas que este usuário alcança, com o papel em cada uma. É esta lista, e não o tenant, que decide o que ele enxerga na fila de triagem."
+        }
+      }
+    }
+  }
+}

@@ -1,6 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import { hashToken } from "../src/auth/agent-token.js";
 import { criaTokenBootstrap } from "../src/auth/bootstrap-token.js";
+import { geraHashSenha } from "../src/auth/senha.js";
 
 // Semeia tenant/loja/agente/câmeras de dev, espelhando apps/agent/config.exemplo.json
 // (mesma loja "loja-dev", mesmas câmeras cam1/cam3, mesma regra da cam3). Idempotente
@@ -10,6 +11,17 @@ import { criaTokenBootstrap } from "../src/auth/bootstrap-token.js";
 // e permite repetir `--config-nuvem` contra a API sem copiar um token novo toda vez --
 // mesmo padrão que infra/.env.example já usa para a senha de exemplo do Postgres.
 const TOKEN_DEV = "dev-agent-token-local-only";
+
+// Usuário do dashboard (§4.5). Fixo pelo mesmo motivo do token do agente: é ambiente
+// local e o valor precisa caber num comando repetível. A senha vai para o banco pela
+// rotina de produção (auth/senha.ts) -- em claro ela não existe em lugar nenhum, nem
+// aqui: o que está escrito abaixo é o que se digita, não o que se guarda.
+//
+// Este é o primeiro usuário do tenant, e não existe rota que o crie: POST /v1/usuarios
+// exige um admin já autenticado. Provisionar o primeiro é papel do provisionamento da
+// rede, que hoje é este script.
+const EMAIL_DEV = "gerente@loja-dev.local";
+const SENHA_DEV = "senha-de-desenvolvimento";
 
 const RULES_CAM3 = {
   enabled: true,
@@ -85,6 +97,19 @@ async function main(): Promise<void> {
     });
   }
 
+  const usuarioExistente = await prisma.usuario.findUnique({ where: { email: EMAIL_DEV } });
+  if (!usuarioExistente) {
+    await prisma.usuario.create({
+      data: {
+        tenantId: tenant.id,
+        email: EMAIL_DEV,
+        nome: "Gerente de desenvolvimento",
+        senhaHash: await geraHashSenha(SENHA_DEV),
+        lojas: { create: [{ lojaId: loja.id, papel: "admin" }] },
+      },
+    });
+  }
+
   const porta = process.env.PORT ?? "3000";
 
   console.log("Loja semeada:", loja.id);
@@ -107,6 +132,22 @@ async function main(): Promise<void> {
   console.log("Teste POST /v1/agents/heartbeat (§5.3), com o token do agente de dev:");
   console.log(
     `  curl -s -o /dev/null -w '%{http_code}\\n' -X POST http://localhost:${porta}/v1/agents/heartbeat -H 'content-type: application/json' -H 'authorization: Bearer ${TOKEN_DEV}' -d '{"schema_version":1,"agent_version":"0.0.0","model_version":null,"config_version":null,"queue":{"depth":0,"oldest_age_s":0,"bytes":0},"cameras":[],"uptime_s":1,"restarts":0,"clock_skew_s":0}'`,
+  );
+
+  console.log("");
+  console.log(`Usuário do dashboard: ${EMAIL_DEV} / ${SENHA_DEV} (admin em ${loja.id})`);
+  console.log("Login, fila de triagem e decisão -- o caminho inteiro do §4.5:");
+  console.log(
+    `  TOKEN=$(curl -s -X POST http://localhost:${porta}/v1/auth/login -H 'content-type: application/json' -d '{"email":"${EMAIL_DEV}","senha":"${SENHA_DEV}"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')`,
+  );
+  console.log(
+    `  curl -s "http://localhost:${porta}/v1/events?limite=5" -H "authorization: Bearer $TOKEN"`,
+  );
+  console.log(
+    `  curl -s -X POST http://localhost:${porta}/v1/events/<EVENT_ID>/triagem -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d '{"decisao":"falso_positivo"}'`,
+  );
+  console.log(
+    `  curl -s http://localhost:${porta}/v1/events/<EVENT_ID>/clip-url -H "authorization: Bearer $TOKEN"`,
   );
 
   await prisma.$disconnect();
