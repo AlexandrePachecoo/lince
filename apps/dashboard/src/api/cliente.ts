@@ -1,4 +1,12 @@
-import type { ClipeUrl, Decisao, Evento, EventoDetalhe, Fila, Sessao } from "./tipos.js";
+import type {
+  ClipeUrl,
+  Decisao,
+  Evento,
+  EventoDetalhe,
+  Fila,
+  MetricaFalsoPositivo,
+  Sessao,
+} from "./tipos.js";
 
 // O acesso à API, num lugar só. Caminho relativo sempre: em desenvolvimento o Vite faz o
 // proxy de /v1 (vite.config.ts) e em produção o dashboard é servido ao lado da API. Uma
@@ -104,6 +112,10 @@ export function buscaEvento(token: string, eventId: string): Promise<EventoDetal
 
 export function buscaClipeUrl(token: string, eventId: string): Promise<ClipeUrl> {
   return pede<ClipeUrl>(`/events/${encodeURIComponent(eventId)}/clip-url`, { token });
+}
+
+export function buscaMetrica(token: string, dias: number): Promise<MetricaFalsoPositivo> {
+  return pede<MetricaFalsoPositivo>(`/metricas/falso-positivo?dias=${dias}`, { token });
 }
 
 export function decide(

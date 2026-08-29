@@ -15,14 +15,15 @@ passa por triagem humana.
 > de triagem, evento avulso, decisão e URL de leitura do clipe com auditoria.
 >
 > O `apps/dashboard` fecha o ciclo do §1: a fila de triagem abre no celular, um toque
-> abre o evento com o clipe rodando e o segundo é a decisão (NFR-9).
+> abre o evento com o clipe rodando e o segundo é a decisão (NFR-9). E a triagem já
+> alimenta a métrica que justifica tudo isto — falso positivo por câmera e por dia (R-1),
+> contra o teto de 3/dia da NFR-2, no dia civil da loja.
 >
 > **O que ainda não existe:** notificação e WebSocket — o gerente ainda precisa lembrar de
-> abrir o app, e a fila só muda quando ele recarrega. E a métrica que justifica tudo isto,
-> falso positivo por câmera e por dia (R-1), ainda não é lida em lugar nenhum, embora a
-> triagem já produza o dado. Também não há Dockerfile nem o compose do box da §3.8, então
-> o agente ainda não é instalável numa loja. Ver `CLAUDE.md` para o estado detalhado por
-> componente.
+> abrir o app, e a fila só muda quando ele recarrega. Falta também a supressão de
+> duplicados da §4.6, que é o que impede uma câmera mal calibrada de virar trinta alertas.
+> Não há Dockerfile nem o compose do box da §3.8, então o agente ainda não é instalável
+> numa loja. Ver `CLAUDE.md` para o estado detalhado por componente.
 >
 > Leia [`docs/arquitetura.md`](docs/arquitetura.md) antes de escrever código, e
 > [`CLAUDE.md`](CLAUDE.md) para as convenções — em especial a regra de que toda

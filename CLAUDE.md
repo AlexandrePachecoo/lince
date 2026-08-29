@@ -62,8 +62,8 @@ cd apps/agent && uv run ruff check src tests && uv run ruff format --check src t
 | Componente | Situação |
 |---|---|
 | `apps/agent` | Estágios 1 a 6 (§3.1 a §3.6) ligados por `runtime.py`. N câmeras com zonas próprias, vindas do `GET /v1/agents/config` com `ETag`/`304`, poll de 30 s, cache local e troca a quente. Heartbeat da §5.3 sobe a cada 30 s |
-| `apps/api` | As três rotas de agente (`config`, `register`, `heartbeat`), o caminho do evento (`POST /v1/events` com URL pré-assinada e `PATCH /v1/events/{event_id}`) e o lado humano da §4.5: login, fila de triagem, evento avulso por `GET /v1/events/{event_id}`, decisão, URL de leitura do clipe com auditoria e cadastro de usuário. Falta download de modelo, notificação e WebSocket |
-| `apps/dashboard` | O ciclo de triagem da §4.5 em Vite + React: login, fila por cursor, evento com o clipe rodando e a decisão em três botões — os dois toques da NFR-9. Falta WebSocket, service worker e as telas de usuário |
+| `apps/api` | As três rotas de agente (`config`, `register`, `heartbeat`), o caminho do evento (`POST /v1/events` com URL pré-assinada e `PATCH /v1/events/{event_id}`) e o lado humano da §4.5: login, fila de triagem, evento avulso por `GET /v1/events/{event_id}`, decisão, URL de leitura do clipe com auditoria e cadastro de usuário. Mais a métrica de falso positivo por câmera/dia do R-1 (`GET /v1/metricas/falso-positivo`). Falta download de modelo, notificação e WebSocket |
+| `apps/dashboard` | O ciclo de triagem da §4.5 em Vite + React: login, fila por cursor, evento com o clipe rodando e a decisão em três botões — os dois toques da NFR-9 —, mais a tela de falso positivo por câmera (R-1). Falta WebSocket, service worker e as telas de usuário |
 | `packages/shared` | JSON Schema dos dois contratos: agente ↔ nuvem (§5) e dashboard ↔ nuvem (§4.5) |
 
 O caminho **pessoa cruza a linha → clipe → fila local → nuvem → clipe apagado do
@@ -252,6 +252,32 @@ desenvolvedor solo (R-11). O que decide se ele presta:
   decisão e a página seguinte vem com um cursor de antes; a mesma ocorrência duas vezes na
   tela faz o gerente achar que houve dois furtos.
 
+A métrica do R-1 (`GET /v1/metricas/falso-positivo` e a tela `/metrica`) é a leitura que
+justifica tudo o que veio antes: sem ela, "a taxa de falso positivo está aceitável" é
+opinião. A unidade é a **câmera**, porque a ação é por câmera — recalibra-se zona e limiar
+de uma de cada vez (§3.4), e uma média da loja esconde justamente a única que está errada.
+O que sustenta o número:
+
+- **O dia é o da loja, não o de Greenwich.** `Loja.fusoHorario` é coluna com default
+  `America/Sao_Paulo`. Em UTC o corte cai às 21h no horário de Brasília, no meio do
+  movimento: a noite de segunda seria contada metade em cada dia, e uma câmera acima do
+  limite apareceria dentro dele nos dois — o erro para o lado que **esconde** o problema.
+  Coluna e não constante, senão a primeira loja em outro fuso erra em silêncio.
+- **Quem julga a NFR-2 é o pior dia, não a média.** O requisito é um teto diário. Nove
+  alertas falsos numa noite e zero no resto da semana dá média 1,3 e parece saudável — mas
+  quem recebeu os nove já desligou a notificação, que é como o R-1 mata o produto.
+- **O denominador são os dias corridos**, não os dias com evento. Dividir por
+  dias-com-evento faria uma câmera com uma única noite ruim parecer que alerta assim todo
+  dia, e mandaria recalibrar a câmera errada.
+- **Pendentes vão na resposta e na tela.** Sem eles o zero mente: uma câmera que ninguém
+  triou não é a melhor da loja, é a desconhecida — e a diferença decide entre mexer nela e
+  triar a fila primeiro.
+- **`inconclusivo` não soma ao falso positivo.** "Não dá para ver nada" não é "o alerta
+  estava errado", e a ação é outra: ângulo, luz e posicionamento (R-3), não limiar.
+- **Lojas em fusos diferentes recusam a leitura com `400`** em vez de misturar os dias. "O
+  dia" passaria a significar duas coisas na mesma resposta, e o número não teria como ser
+  auditado depois. Com uma loja por fuso o caso nunca aparece.
+
 Onde encostar em cada coisa:
 
 - **WebSocket (§4.5)** é o que falta para a fila parar de depender de recarga: hoje ela
@@ -266,9 +292,9 @@ Onde encostar em cada coisa:
   credencial na subida, em vez do `--api-token` semeado.
 - **Download de modelo (§5.2)** substitui o caminho local em `DetectionOptions.model_path`.
   O `model_version` já é nome + checksum, no formato que o ADR-006 quer.
-- **Métrica de falso positivo por câmera/dia (R-1)** agora tem de onde sair: é a triagem
-  vigente agrupada por câmera e dia, com `source = rule` separado de `manual`. É a leitura
-  que justifica tudo o que veio antes, e ainda não existe.
+- **Supressão de duplicados (§4.6)** é o que falta para uma câmera mal calibrada produzir
+  um alerta agrupado em vez de trinta. A métrica do R-1 agora diz **quais** câmeras
+  precisam disso, que era a informação que faltava para escolher a janela por câmera.
 
 O heartbeat (§5.3) é `heartbeat.py`, e o que ele tem de particular não é o envio — é o
 que ele **não** faz. Não há fila: um envio que falhou não deixa nada para trás, porque a
@@ -378,6 +404,19 @@ curl -s -X POST http://localhost:3000/v1/events/<EVENT_ID>/triagem \
   -d '{"decisao":"falso_positivo","observacao":"cliente pagou no autoatendimento"}'
 ```
 
+E a leitura que justifica a triagem (R-1): falso positivo por câmera, do pior para o
+melhor, com o teto de 3/dia da NFR-2 junto:
+
+```bash
+curl -s "http://localhost:3000/v1/metricas/falso-positivo?dias=7" \
+  -H "authorization: Bearer $TOKEN"
+```
+
+O que se vigia aqui é `acima_do_limite`, e ele sai do **pior dia**, não da média: o
+requisito é um teto diário, e a média dilui a rajada que faz o gerente desligar a
+notificação. `pendentes` alto ao lado de `falso_positivo: 0` não é câmera boa — é câmera
+que ninguém triou, e a diferença decide entre recalibrar e triar a fila primeiro.
+
 E o dashboard, que é como isso tudo se parece para quem decide:
 
 ```bash
@@ -389,7 +428,8 @@ pnpm build                    # `tsc -b` mora aqui: o vitest transpila sem checa
 pnpm dev                      # :5173, com /v1 por proxy para a API em :3000
 ```
 
-Com `pnpm seed` rodado, entra-se com o mesmo usuário do bloco acima. A régua é a NFR-9, e
+Com `pnpm seed` rodado, entra-se com o mesmo usuário do bloco acima. Há duas telas: a fila
+de triagem em `/fila` e o falso positivo por câmera em `/metrica`. A régua é a NFR-9, e
 ela se confere no DevTools em viewport de celular: **um** toque abre o evento com o vídeo
 já rodando, o segundo é a decisão. Um toque a mais por evento é o que faz a fila não ser
 triada — e fila não triada é o R-1 sem número.
@@ -570,6 +610,28 @@ Não reintroduza nenhuma destas — cada uma custou depuração e tem teste guar
   visivelmente correto. A ordem é normalizar e **então** validar (`auth/email.ts`), e a
   mesma função tem que servir ao login e ao cadastro — se divergirem, nasce conta que
   nenhum login alcança.
+- **`update: {}` no upsert do Prisma desliga o `ON CONFLICT` do Postgres.** O client só
+  compila o upsert para o `INSERT ... ON CONFLICT DO UPDATE` nativo quando há o que
+  atualizar; com update vazio ele cai num consultar-e-então-inserir que não é atômico, e
+  dois POST simultâneos do mesmo evento fazem um dos dois estourar `P2002` e virar 500. Não
+  nasce linha duplicada — a chave primária impede —, mas a idempotência do §5.4 deixa de
+  valer no único caso em que ela importa. O conserto é gravar a PK sobre ela mesma:
+  semanticamente nada muda, e o upsert volta a ser atômico.
+- **Um par de requisições em `Promise.all` não garante concorrência.** Dois `app.inject`
+  às vezes serializam sozinhos, e o teste passa por sorte. Foi assim que o `P2002` acima
+  sobreviveu: o teste que existia para pegá-lo acertava a moeda com frequência suficiente
+  para ninguém investigar. Teste de corrida precisa de várias tentativas.
+- **Um `timestamp without time zone` precisa de DOIS `AT TIME ZONE`.** O primeiro
+  (`AT TIME ZONE 'UTC'`) **rotula** a coluna naive como UTC; o segundo **converte** para o
+  fuso da loja. Sem o primeiro, o Postgres interpreta o instante no fuso do servidor — que
+  muda de máquina para máquina — e o dia sai deslocado sem erro nenhum.
+- **Andar em múltiplos de 24 h erra no dia de mudança de horário de verão.** O dia local
+  tem 23 ou 25 h, e somar 86 400 000 ms a partir da meia-noite cai no dia vizinho: o
+  período sai com um dia a mais ou a menos, e continua parecendo uma semana. Ancore no
+  meio-dia local e ande pelo calendário.
+- **Backtick dentro de template literal encerra a string.** Comentário de SQL com
+  `` `nome` `` num `$queryRaw` quebra o arquivo inteiro com erros de sintaxe apontando
+  para o meio da consulta, não para o comentário.
 - **Ordenar a triagem vigente por `criadoEm` é cara ou coroa.** Duas decisões no mesmo
   milissegundo empatam, e "a última" passa a depender de como o Postgres devolveu a
   linha. Por isso existe `Triagem.seq`: a sequência não empata.

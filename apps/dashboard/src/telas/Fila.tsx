@@ -78,9 +78,16 @@ export function Fila({ token, nome, aoSair, versao = 0 }: Props) {
           <h1 className="cabecalho__titulo">Fila de triagem</h1>
           <p className="cabecalho__legenda">{nome}</p>
         </div>
-        <button className="botao botao--discreto" type="button" onClick={aoSair}>
-          Sair
-        </button>
+        <div className="cabecalho__acoes">
+          {/* A métrica fica a um toque da fila, e não num menu: é a leitura que diz se a
+              fila que ele acabou de triar significa uma câmera para recalibrar (R-1). */}
+          <Link className="botao botao--discreto" to="/metrica">
+            Falsos
+          </Link>
+          <button className="botao botao--discreto" type="button" onClick={aoSair}>
+            Sair
+          </button>
+        </div>
       </header>
 
       {erro !== null && (

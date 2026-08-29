@@ -30,6 +30,7 @@ const validaUsuario = ajv.compile(carrega("@lince/shared/schemas/usuario.v1.json
 const validaFila = ajv.compile(carrega("@lince/shared/schemas/fila-triagem.v1.json"));
 const validaSessao = ajv.compile(carrega("@lince/shared/schemas/auth-sessao.v1.json"));
 const validaDetalhe = ajv.compile(carrega("@lince/shared/schemas/evento-detalhe.v1.json"));
+const validaMetrica = ajv.compile(carrega("@lince/shared/schemas/metricas-falso-positivo.v1.json"));
 
 // Um evento de cada forma que a tela precisa distinguir. `clip_state` e `clip.status`
 // respondem a perguntas diferentes (upload x corte), e a combinação "cortou bem, ainda
@@ -77,6 +78,30 @@ describe("as fixturas da suíte batem com packages/shared", () => {
     // estado mais comum.
     const documento = fixturas.fila([], null);
     expect(validaFila(documento), JSON.stringify(validaFila.errors)).toBe(true);
+  });
+
+  test("a métrica bate com metricas-falso-positivo.v1.json", () => {
+    // Os mesmos casos que a tela precisa distinguir: a câmera fora do requisito, a que
+    // ninguém triou (pior_dia nulo) e o período sem alerta nenhum.
+    const casos = [
+      fixturas.metrica(),
+      fixturas.metrica([fixturas.cameraMetrica({ pior_dia: null, acima_do_limite: false })]),
+      fixturas.metrica([]),
+    ];
+
+    for (const documento of casos) {
+      expect(validaMetrica(documento), JSON.stringify(validaMetrica.errors)).toBe(true);
+    }
+  });
+
+  test("o schema recusa um pior_dia sem falso positivo nenhum", () => {
+    // `{dia, 0}` inventaria um dia que não significa nada, e a tela teria que decidir
+    // sozinha se aquilo é um dia ruim. Ausência de falso positivo é `null`.
+    const invalido = fixturas.metrica([
+      fixturas.cameraMetrica({ pior_dia: { dia: "2026-08-27", falso_positivo: 0 } }),
+    ]);
+
+    expect(validaMetrica(invalido)).toBe(false);
   });
 
   test("a sessão do login bate com auth-sessao.v1.json", () => {

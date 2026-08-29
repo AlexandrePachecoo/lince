@@ -4,6 +4,7 @@ import { type SessaoGuardada, leSessao, limpaSessao } from "./auth/sessao.js";
 import { Evento } from "./telas/Evento.js";
 import { Fila } from "./telas/Fila.js";
 import { Login } from "./telas/Login.js";
+import { Metrica } from "./telas/Metrica.js";
 
 // O esqueleto: sessão, rotas e a queda para o login.
 //
@@ -75,6 +76,7 @@ export function App() {
         path="/eventos/:eventId"
         element={<Evento token={sessao.token} aoDecidir={() => setVersaoDaFila((v) => v + 1)} />}
       />
+      <Route path="/metrica" element={<Metrica token={sessao.token} />} />
       <Route path="*" element={<Navigate to="/fila" replace />} />
     </Routes>
   );

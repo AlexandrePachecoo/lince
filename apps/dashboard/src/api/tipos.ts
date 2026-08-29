@@ -64,6 +64,30 @@ export interface ClipeUrl {
   object_key: string | null;
 }
 
+export interface CameraMetrica {
+  store_id: string;
+  camera_id: string;
+  eventos: number;
+  confirmado: number;
+  falso_positivo: number;
+  /** Não soma ao falso positivo: é outro problema, com outra ação (R-3). */
+  inconclusivo: number;
+  /** Sem isto o zero mente: câmera não triada parece a melhor da loja. */
+  pendentes: number;
+  falso_positivo_por_dia: number;
+  pior_dia: { dia: string; falso_positivo: number } | null;
+  /** Se algum **dia** passou do teto. A NFR-2 é teto diário, não média. */
+  acima_do_limite: boolean;
+}
+
+export interface MetricaFalsoPositivo {
+  schema_version: 1;
+  periodo: { desde: string; ate: string; dias: number; fuso: string };
+  limite_diario: number;
+  /** Da pior para a melhor: o topo é onde mexer. */
+  cameras: CameraMetrica[];
+}
+
 export type Papel = "admin" | "gerente" | "operador";
 
 export interface Usuario {

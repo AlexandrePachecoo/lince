@@ -300,3 +300,71 @@ body {
 .botao--inconclusivo {
   background: var(--inconclusivo);
 }
+
+/* --- Métrica de falso positivo (R-1) ------------------------------------- */
+
+.cabecalho__acoes {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.periodo {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.botao--ativo {
+  border-color: var(--texto);
+  color: var(--texto);
+}
+
+/* A câmera fora do requisito é a razão de a tela existir: ela se distingue por borda e
+   por texto, nunca só por cor. Corredor de mercado tem luz ruim, a tela é vista de
+   relance, e daltonismo é comum -- um vermelho sozinho não comunica nada disso. */
+.cartao--alerta {
+  border-color: var(--confirmar);
+}
+
+.cartao__linha--numeros {
+  margin-top: 0.6rem;
+  gap: 1.25rem;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.numero {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.numero strong {
+  font-size: 1.35rem;
+}
+
+.numero small {
+  color: var(--texto-fraco);
+  font-size: 0.75rem;
+}
+
+.numero--destaque strong {
+  color: var(--erro);
+}
+
+.cartao__alerta {
+  margin: 0.6rem 0 0;
+  color: var(--erro);
+  font-size: 0.85rem;
+}
+
+.cartao__ressalva {
+  margin: 0.4rem 0 0;
+  color: var(--espera);
+  font-size: 0.8rem;
+}
+
+.aviso--alerta {
+  border: 1px solid var(--confirmar);
+  background: transparent;
+}

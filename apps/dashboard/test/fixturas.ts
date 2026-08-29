@@ -1,4 +1,10 @@
-import type { Evento, Fila, Sessao } from "../src/api/tipos.js";
+import type {
+  CameraMetrica,
+  Evento,
+  Fila,
+  MetricaFalsoPositivo,
+  Sessao,
+} from "../src/api/tipos.js";
 
 // Os documentos que a suíte usa no lugar da API. Ficam num arquivo só porque
 // contrato.test.ts valida **estes mesmos objetos** contra os JSON Schemas de
@@ -43,5 +49,33 @@ export function sessao(sobrescreve: Partial<Sessao> = {}): Sessao {
       lojas: [{ store_id: "loja-centro", papel: "gerente" }],
     },
     ...sobrescreve,
+  };
+}
+
+export function cameraMetrica(sobrescreve: Partial<CameraMetrica> = {}): CameraMetrica {
+  return {
+    store_id: "loja-centro",
+    camera_id: "cam3",
+    eventos: 10,
+    confirmado: 2,
+    falso_positivo: 5,
+    inconclusivo: 1,
+    pendentes: 2,
+    falso_positivo_por_dia: 0.71,
+    pior_dia: { dia: "2026-08-27", falso_positivo: 4 },
+    acima_do_limite: true,
+    ...sobrescreve,
+  };
+}
+
+export function metrica(
+  cameras: CameraMetrica[] = [cameraMetrica()],
+  dias = 7,
+): MetricaFalsoPositivo {
+  return {
+    schema_version: 1,
+    periodo: { desde: "2026-08-23", ate: "2026-08-29", dias, fuso: "America/Sao_Paulo" },
+    limite_diario: 3,
+    cameras,
   };
 }
