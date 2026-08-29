@@ -101,7 +101,15 @@ export default async function eventsCreateRoutes(app: FastifyInstance) {
       // PATCH ter registrado o upload. Reescrevê-lo rebaixaria um clipe já disponível
       // para pendente, e a triagem passaria a esperar para sempre um upload que já
       // aconteceu. Quem manda no desfecho do clipe é o PATCH, sozinho.
-      update: {},
+      // Grava a chave primária sobre ela mesma: nada do evento muda, e é justamente esse
+      // o ponto. Um `update: {}` seria a forma óbvia de dizer "não reescreva nada", mas o
+      // Prisma só compila o upsert para o `INSERT ... ON CONFLICT DO UPDATE` nativo do
+      // Postgres quando há o que atualizar -- com update vazio ele cai num caminho de
+      // consultar-e-então-inserir, que não é atômico. Dois POST simultâneos do mesmo
+      // evento (a borda reenviando sob link ruim, §5.4) faziam um dos dois estourar P2002
+      // e virar 500. Não nascia evento duplicado, mas a idempotência que o §5.4 promete
+      // deixava de valer no único caso em que ela importa.
+      update: { eventId: evento.event_id },
     });
 
     // URL nova a cada POST, inclusive no reenvio: é assim que o agente renova uma URL

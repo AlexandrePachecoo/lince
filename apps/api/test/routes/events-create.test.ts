@@ -173,18 +173,29 @@ test("dois POST simultâneos do mesmo evento não criam duas linhas", async () =
   // ruim as duas chamadas podem estar em voo ao mesmo tempo. Se a idempotência
   // dependesse de checar-e-então-inserir, aqui nasceriam dois eventos -- e o gerente
   // veria o mesmo furto duas vezes na fila de triagem.
+  //
+  // Vários pares, e não um só: dois `inject` em Promise.all às vezes serializam sozinhos,
+  // e com um par o teste passava por sorte. Foi assim que um P2002 sob concorrência real
+  // sobreviveu na rota -- o teste que existia para pegá-lo acertava a moeda com frequência
+  // suficiente para não incomodar ninguém.
   const loja = await semeiaLoja();
-  const corpo = corpoEvento(loja);
 
-  const respostas = await Promise.all([
-    postaEvento(loja.token, corpo),
-    postaEvento(loja.token, corpo),
-  ]);
+  for (let tentativa = 0; tentativa < 8; tentativa++) {
+    const corpo = corpoEvento(loja);
 
-  for (const resposta of respostas) {
-    assert.ok(resposta.statusCode < 300, `status inesperado: ${resposta.statusCode}`);
+    const respostas = await Promise.all([
+      postaEvento(loja.token, corpo),
+      postaEvento(loja.token, corpo),
+    ]);
+
+    for (const resposta of respostas) {
+      assert.ok(
+        resposta.statusCode < 300,
+        `status inesperado na tentativa ${tentativa}: ${resposta.statusCode} ${resposta.body}`,
+      );
+    }
+    assert.equal(await prismaTeste.evento.count({ where: { eventId: corpo.event_id } }), 1);
   }
-  assert.equal(await prismaTeste.evento.count({ where: { eventId: corpo.event_id } }), 1);
 });
 
 test("reenvio depois do PATCH não rebaixa o clipe já confirmado", async () => {
