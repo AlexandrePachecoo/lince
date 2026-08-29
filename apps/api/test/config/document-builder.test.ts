@@ -16,6 +16,9 @@ function fakeLoja(overrides: Partial<Loja> = {}): Loja {
     nome: "Loja de teste",
     detection: null,
     tracking: null,
+    // Não entra no documento da §5.2: o fuso é de quem **lê** a métrica na nuvem, não um
+    // limiar que a borda usa. O agente carimba instante UTC e pronto.
+    fusoHorario: "America/Sao_Paulo",
     criadoEm: AGORA,
     atualizadoEm: AGORA,
   };

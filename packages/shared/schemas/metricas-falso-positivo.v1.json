@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/metricas-falso-positivo/v1.json",
+  "title": "Resposta do GET /v1/metricas/falso-positivo",
+  "description": "Falso positivo por câmera e por dia — a métrica número 1 do produto (R-1), e a leitura que justifica a triagem obrigatória. A pergunta que ela responde é operacional e única: em qual câmera mexer. Por isso a unidade é a câmera, não a loja: recalibra-se zona e limiar de uma câmera de cada vez (§3.4), e uma média da loja esconde a única que está errada.",
+  "type": "object",
+  "required": ["schema_version", "periodo", "limite_diario", "cameras"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "periodo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["desde", "ate", "dias", "fuso"],
+      "properties": {
+        "desde": { "$ref": "#/$defs/dia" },
+        "ate": {
+          "$ref": "#/$defs/dia",
+          "description": "Inclusivo: o dia de hoje conta, ainda que incompleto."
+        },
+        "dias": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Quantos dias o período tem. É o denominador de `falso_positivo_por_dia`, e são os dias **corridos** — não os dias em que houve evento. Dividir por dias-com-evento faria uma câmera com uma única noite ruim parecer que alerta assim todo dia."
+        },
+        "fuso": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "O fuso da loja (`Loja.fusoHorario`), porque é ele que decide a que dia um alerta pertence. Em UTC o corte cairia às 21h no horário de Brasília, no meio do movimento: a noite de segunda seria contada metade em cada dia, e uma câmera acima do limite apareceria dentro dele nos dois."
+        }
+      }
+    },
+    "limite_diario": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "O teto da NFR-2: 3 alertas falsos por câmera por dia. Vem na resposta em vez de ficar embutido na tela para que a régua e o número sejam lidos da mesma fonte."
+    },
+    "cameras": {
+      "type": "array",
+      "maxItems": 500,
+      "items": { "$ref": "#/$defs/camera" },
+      "description": "Ordenada da pior para a melhor: o pior dia primeiro, e o total de falso positivo como desempate. Quem abre esta tela quer saber onde mexer, e o topo da lista é a resposta."
+    }
+  },
+  "$defs": {
+    "dia": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "Data civil no fuso da loja, sem hora. Um instante ISO aqui convidaria o cliente a reconverter para o fuso do celular e a discordar do servidor sobre a que dia o alerta pertence."
+    },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "store_id",
+        "camera_id",
+        "eventos",
+        "confirmado",
+        "falso_positivo",
+        "inconclusivo",
+        "pendentes",
+        "falso_positivo_por_dia",
+        "pior_dia",
+        "acima_do_limite"
+      ],
+      "properties": {
+        "store_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+        "camera_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+        "eventos": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Eventos de regra no período. `source: manual` fica fora de tudo aqui: um instalador testando 40 vezes numa tarde afundaria a estatística da câmera que ele estava justamente calibrando."
+        },
+        "confirmado": { "type": "integer", "minimum": 0 },
+        "falso_positivo": { "type": "integer", "minimum": 0 },
+        "inconclusivo": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Não entra na conta da NFR-2: `inconclusivo` é o clipe em que não dá para ver nada, e isso não é o mesmo que um alerta errado. Vem ao lado porque é outro problema com outra ação — inconclusivo alto é ângulo, luz ou posicionamento (R-3), não limiar."
+        },
+        "pendentes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Eventos sem triagem. Está aqui porque sem ele o número mente: uma câmera que ninguém triou mostra zero falso positivo e parece a melhor da loja. Fila não triada é dívida operacional (§4.5), e aqui ela vira incerteza explícita sobre a própria métrica."
+        },
+        "falso_positivo_por_dia": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Média sobre os dias corridos do período. Serve para tendência — a calibração de ontem ajudou? —, não para julgar a NFR-2: a média dilui a rajada, e é a rajada que faz o gerente desligar a notificação."
+        },
+        "pior_dia": {
+          "anyOf": [{ "$ref": "#/$defs/pior_dia" }, { "type": "null" }],
+          "description": "O dia de maior falso positivo no período, ou nulo se não houve nenhum. É ele que decide `acima_do_limite`, porque a NFR-2 é um teto diário e não uma média: uma câmera com 9 numa noite e zero no resto da semana violou o requisito, e a média de 1,3 diria que está tudo bem."
+        },
+        "acima_do_limite": {
+          "type": "boolean",
+          "description": "Se algum dia do período passou de `limite_diario`. É o sinal que a tela destaca."
+        }
+      }
+    },
+    "pior_dia": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dia", "falso_positivo"],
+      "properties": {
+        "dia": { "$ref": "#/$defs/dia" },
+        "falso_positivo": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

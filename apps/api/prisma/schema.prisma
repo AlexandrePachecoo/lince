@@ -44,6 +44,16 @@ model Loja {
   detection Json?
   tracking  Json?
 
+  // Em que fuso cai o "dia" da NFR-2 (<= 3 alertas falsos por camera por dia). Nao e
+  // detalhe de apresentacao: o corte do dia decide a que dia um alerta pertence, e o dia
+  // UTC parte a noite de uma loja brasileira em duas -- as 21h de segunda viram terca.
+  // Uma camera que estourou o limite numa noite apareceria dentro dele nos dois dias, e a
+  // metrica erraria justamente para o lado que esconde o problema (R-1).
+  //
+  // Coluna, e nao constante no codigo: o dia em que houver loja em outro fuso, uma
+  // constante erraria em silencio -- a metrica so ficaria deslocada, sem erro nenhum.
+  fusoHorario String @default("America/Sao_Paulo") @map("fuso_horario")
+
   criadoEm     DateTime @default(now()) @map("criado_em")
   atualizadoEm DateTime @updatedAt @map("atualizado_em")
 
