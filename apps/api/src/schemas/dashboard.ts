@@ -58,6 +58,9 @@ const validaTriagemAceita = ajv.compile(
   carregaSchema("@lince/shared/schemas/triagem-aceita.v1.json"),
 );
 const validaClipeUrl = ajv.compile(carregaSchema("@lince/shared/schemas/clipe-url.v1.json"));
+const validaEventoDetalhe = ajv.compile(
+  carregaSchema("@lince/shared/schemas/evento-detalhe.v1.json"),
+);
 
 export type ResultadoValidacao = { valido: true } | { valido: false; erros: ErrorObject[] };
 
@@ -104,6 +107,11 @@ export function validaRespostaUsuarios(documento: unknown): ResultadoValidacao {
 /** Resposta do `GET /v1/events`. */
 export function validaRespostaFila(documento: unknown): ResultadoValidacao {
   return resultado(validaFila, documento);
+}
+
+/** Resposta do `GET /v1/events/{event_id}`. */
+export function validaRespostaEventoDetalhe(documento: unknown): ResultadoValidacao {
+  return resultado(validaEventoDetalhe, documento);
 }
 
 /** Corpo do `POST /v1/events/{event_id}/triagem`. */

@@ -10,6 +10,7 @@ import authLoginRoutes from "./routes/auth/login.js";
 import eventsClipRoutes from "./routes/events/clip.js";
 import eventsClipeUrlRoutes from "./routes/events/clipe-url.js";
 import eventsCreateRoutes from "./routes/events/create.js";
+import eventsDetalheRoutes from "./routes/events/detalhe.js";
 import eventsListarRoutes from "./routes/events/listar.js";
 import eventsTriagemRoutes from "./routes/events/triagem.js";
 import usuariosAlterarRoutes from "./routes/usuarios/alterar.js";
@@ -63,6 +64,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   // mesmo cabeçalho Bearer e não se cruzam em lugar nenhum -- ver auth/usuario-token.ts.
   await app.register(authLoginRoutes);
   await app.register(eventsListarRoutes);
+  await app.register(eventsDetalheRoutes);
   await app.register(eventsTriagemRoutes);
   await app.register(eventsClipeUrlRoutes);
   await app.register(usuariosCriarRoutes);

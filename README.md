@@ -10,16 +10,18 @@ passa por triagem humana.
 > **Status:** o caminho *pessoa cruza a linha → clipe → fila local → nuvem → clipe no
 > bucket* fecha ponta a ponta, sem andaime de gatilho. A borda tem os seis estágios da
 > §3.1 à §3.6 ligados por `runtime.py`; a nuvem tem as três rotas de agente (`config`
-> com `ETag`/`304`, `register`, `heartbeat`) e o caminho do evento (`POST /v1/events`
-> com URL pré-assinada e `PATCH /v1/events/{id}`).
+> com `ETag`/`304`, `register`, `heartbeat`), o caminho do evento (`POST /v1/events`
+> com URL pré-assinada e `PATCH /v1/events/{id}`) e o lado humano da §4.5 — login, fila
+> de triagem, evento avulso, decisão e URL de leitura do clipe com auditoria.
 >
-> **O que ainda não existe é a outra metade do produto:** não há dashboard, não há
-> triagem, não há notificação — nenhum humano vê um alerta hoje. Isso importa mais do
-> que parece: a §7 diz que o maior risco do projeto é a taxa de falso positivo, e medir
-> falso positivo exige alguém dizendo que o alerta estava errado. Enquanto esse caminho
-> não existir, a regra principal do MVP segue sendo uma hipótese não testada. Também
-> não há Dockerfile nem o compose do box da §3.8, então o agente ainda não é
-> instalável numa loja. Ver `CLAUDE.md` para o estado detalhado por componente.
+> **O que ainda não existe é a tela:** a triagem é uma API completa que só se alcança
+> por `curl`, então nenhum gerente vê um alerta hoje. Isso importa mais do que parece: a
+> §7 diz que o maior risco do projeto é a taxa de falso positivo, e medir falso positivo
+> exige alguém dizendo que o alerta estava errado — em pé, no corredor, no celular.
+> Enquanto o `apps/dashboard` estiver vazio, a regra principal do MVP segue sendo uma
+> hipótese não testada. Também não há notificação, nem WebSocket, nem Dockerfile ou o
+> compose do box da §3.8, então o agente ainda não é instalável numa loja. Ver
+> `CLAUDE.md` para o estado detalhado por componente.
 >
 > Leia [`docs/arquitetura.md`](docs/arquitetura.md) antes de escrever código, e
 > [`CLAUDE.md`](CLAUDE.md) para as convenções — em especial a regra de que toda

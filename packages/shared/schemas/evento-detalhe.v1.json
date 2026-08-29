@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/evento-detalhe/v1.json",
+  "title": "Resposta do GET /v1/events/{event_id}",
+  "description": "Um evento só, para quem chegou nele sem passar pela fila: recarregar a tela do evento, abrir o link que alguém mandou ao técnico e, mais adiante, tocar na notificação (§4.5). O documento é exatamente o item da fila, e de propósito — a montagem é a mesma função, então um campo novo aparece nos dois lugares ou em nenhum. A URL do clipe não vem aqui: ela continua saindo do GET /clip-url, porque cada emissão vira linha de auditoria (R-8) e abrir um evento não é assistir a ele.",
+  "type": "object",
+  "required": ["schema_version", "evento"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "evento": { "$ref": "https://schemas.lince.dev/fila-triagem/v1.json#/$defs/evento" }
+  }
+}

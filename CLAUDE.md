@@ -62,7 +62,7 @@ cd apps/agent && uv run ruff check src tests && uv run ruff format --check src t
 | Componente | Situação |
 |---|---|
 | `apps/agent` | Estágios 1 a 6 (§3.1 a §3.6) ligados por `runtime.py`. N câmeras com zonas próprias, vindas do `GET /v1/agents/config` com `ETag`/`304`, poll de 30 s, cache local e troca a quente. Heartbeat da §5.3 sobe a cada 30 s |
-| `apps/api` | As três rotas de agente (`config`, `register`, `heartbeat`), o caminho do evento (`POST /v1/events` com URL pré-assinada e `PATCH /v1/events/{event_id}`) e o lado humano da §4.5: login, fila de triagem, decisão, URL de leitura do clipe com auditoria e cadastro de usuário. Falta download de modelo, notificação e WebSocket |
+| `apps/api` | As três rotas de agente (`config`, `register`, `heartbeat`), o caminho do evento (`POST /v1/events` com URL pré-assinada e `PATCH /v1/events/{event_id}`) e o lado humano da §4.5: login, fila de triagem, evento avulso por `GET /v1/events/{event_id}`, decisão, URL de leitura do clipe com auditoria e cadastro de usuário. Falta download de modelo, notificação e WebSocket |
 | `apps/dashboard` | vazio — a API que ele consome já existe inteira |
 | `packages/shared` | JSON Schema dos dois contratos: agente ↔ nuvem (§5) e dashboard ↔ nuvem (§4.5) |
 
@@ -202,11 +202,20 @@ desta fatia, e o que cada uma custa se for desfeita sem perceber:
   percorre, e com OFFSET cada evento novo empurra um antigo para uma página já lida: some
   da tela sem ninguém decidir nada. Evento sem triagem é dívida operacional **visível**
   (§4.5), e uma paginação que esconde eventos é a forma mais fácil de invisibilizá-la.
+- **A fila e o evento avulso são a mesma montagem.** `GET /v1/events/{event_id}` existe
+  para quem tem o id e não tem a lista — um F5 na tela do evento, o link mandado ao
+  técnico, a notificação quando existir — e devolve exatamente o item da fila, por
+  `documentoDoEvento` (`routes/events/apresentacao.ts`). Uma segunda montagem divergiria
+  no primeiro campo novo, e o sintoma não seria erro nenhum: seria um campo presente numa
+  tela e ausente na outra, com alguém decidindo com menos do que achava que tinha. Ele
+  **não** embute a URL do clipe de propósito — ver a decisão seguinte.
 - **A auditoria grava a emissão da URL, não o download.** Depois que a URL sai, o GET vai
   direto ao bucket e não passa pela API — é o preço de o vídeo nunca atravessar o control
   plane (§4.4). A emissão é o único instante em que a nuvem sabe quem pediu, e por isso a
   linha é escrita **antes** de assinar: errar para o lado de auditar demais é o único lado
-  aceitável (R-8).
+  aceitável (R-8). É também o que decide a forma do evento avulso: embutir a URL nele
+  gravaria uma emissão por abertura, inclusive as que ninguém assiste, e uma auditoria
+  cheia de acessos que não aconteceram não responde mais a pergunta para a qual foi feita.
 - **`admin` é papel de loja, não de tenant.** Administrar gente exige admin em **todas** as
   lojas envolvidas — inclusive nas que o alvo já tem, senão o admin da loja A desativaria
   alguém que também trabalha na loja B, a partir de uma tela onde a loja B não aparece.
@@ -219,8 +228,9 @@ desta fatia, e o que cada uma custa se for desfeita sem perceber:
 Onde encostar em cada coisa:
 
 - **Dashboard (§4.5)** é o `apps/dashboard` vazio. A API que ele consome já existe
-  inteira, e o contrato dela está em `packages/shared/schemas` — a régua é NFR-9: um toque
-  abre o evento com o vídeo rodando, o segundo é a decisão.
+  inteira — inclusive o `GET /v1/events/{event_id}`, que é o que faz um link direto e um
+  F5 funcionarem —, e o contrato dela está em `packages/shared/schemas`. A régua é NFR-9:
+  um toque abre o evento com o vídeo rodando, o segundo é a decisão.
 - **Registro do agente no lado do agente (§5.1)** é o outro lado do
   `POST /v1/agents/register`, que já existe na API: trocar um token de bootstrap por
   credencial na subida, em vez do `--api-token` semeado.
@@ -325,6 +335,9 @@ TOKEN=$(curl -s -X POST http://localhost:3000/v1/auth/login \
 
 # a fila: por padrão só o que falta decidir, do mais recente para o mais antigo
 curl -s "http://localhost:3000/v1/events?limite=5" -H "authorization: Bearer $TOKEN"
+
+# um evento só, que é como o dashboard sobrevive a um F5 e a um link colado
+curl -s http://localhost:3000/v1/events/<EVENT_ID> -H "authorization: Bearer $TOKEN"
 
 # a URL assinada do clipe (5 min), que vai direto no <video> — e gera linha de auditoria
 curl -s http://localhost:3000/v1/events/<EVENT_ID>/clip-url -H "authorization: Bearer $TOKEN"
