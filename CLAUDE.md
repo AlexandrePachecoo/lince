@@ -63,7 +63,7 @@ cd apps/agent && uv run ruff check src tests && uv run ruff format --check src t
 |---|---|
 | `apps/agent` | Estágios 1 a 6 (§3.1 a §3.6) ligados por `runtime.py`. N câmeras com zonas próprias, vindas do `GET /v1/agents/config` com `ETag`/`304`, poll de 30 s, cache local e troca a quente. Heartbeat da §5.3 sobe a cada 30 s |
 | `apps/api` | As três rotas de agente (`config`, `register`, `heartbeat`), o caminho do evento (`POST /v1/events` com URL pré-assinada e `PATCH /v1/events/{event_id}`) e o lado humano da §4.5: login, fila de triagem, evento avulso por `GET /v1/events/{event_id}`, decisão, URL de leitura do clipe com auditoria e cadastro de usuário. Falta download de modelo, notificação e WebSocket |
-| `apps/dashboard` | vazio — a API que ele consome já existe inteira |
+| `apps/dashboard` | O ciclo de triagem da §4.5 em Vite + React: login, fila por cursor, evento com o clipe rodando e a decisão em três botões — os dois toques da NFR-9. Falta WebSocket, service worker e as telas de usuário |
 | `packages/shared` | JSON Schema dos dois contratos: agente ↔ nuvem (§5) e dashboard ↔ nuvem (§4.5) |
 
 O caminho **pessoa cruza a linha → clipe → fila local → nuvem → clipe apagado do
@@ -225,12 +225,42 @@ desta fatia, e o que cada uma custa se for desfeita sem perceber:
   que as lojas da rede existem, e "peça acesso ao admin" é acionável. Confirmar que um
   `event_id` ou um e-mail existe em **outra** rede já é vazamento.
 
+O `apps/dashboard` é a fatia que faltava para o §1 valer na prática: até ele, a triagem era
+uma API que só se alcançava por `curl`. É Vite + React estático — sem runtime Node próprio
+para operar, porque a API já é o control plane e cada peça a mais é cobrada do mesmo
+desenvolvedor solo (R-11). O que decide se ele presta:
+
+- **`muted` no `<video>` não é escolha estética.** Sem ele o navegador de celular recusa o
+  autoplay: o vídeo fica parado, o gerente toca no play, e o primeiro toque virou dois — a
+  NFR-9 inteira perdida num atributo. `test/dois-toques.test.tsx` falha se ele sumir, e
+  confere a **propriedade**, não o atributo: o React define `muted` no elemento e o HTML
+  não a reflete.
+- **Nenhum estado do clipe trava a decisão.** `estado-clipe.ts` separa `pendente` ("vale
+  esperar") de `indisponivel` ("não adianta"), e nenhum dos dois desabilita os botões.
+  Vídeo ajuda a decidir; não é pré-requisito para decidir — travar em `pendente` deixaria
+  o evento sem triagem para sempre quando o upload não vem.
+- **`inconclusivo` tem o mesmo tamanho e o mesmo peso dos outros dois botões.** Escondido
+  num menu, o triador chuta `falso_positivo` no clipe em que não dá para ver nada, e
+  envenena exatamente a métrica que o R-1 manda vigiar.
+- **Os tipos de `src/api/tipos.ts` são escritos à mão, e é `test/contrato.test.ts` que os
+  segura.** Ele valida as fixturas da suíte contra os schemas de `packages/shared` com
+  Ajv — o análogo do `test_contrato_evento.py` no agente. Sem ele, um campo renomeado no
+  contrato viraria `undefined` na tela do gerente, sem erro em lugar nenhum.
+- **A sessão guarda a validade absoluta, nunca o `expires_in_s`.** Salvo como veio, "faltam
+  12 h" vira sessão eterna: nada desconta o tempo que o app passou fechado.
+- **Acumular páginas deduplica por `event_id`.** A fila recarrega do topo depois de uma
+  decisão e a página seguinte vem com um cursor de antes; a mesma ocorrência duas vezes na
+  tela faz o gerente achar que houve dois furtos.
+
 Onde encostar em cada coisa:
 
-- **Dashboard (§4.5)** é o `apps/dashboard` vazio. A API que ele consome já existe
-  inteira — inclusive o `GET /v1/events/{event_id}`, que é o que faz um link direto e um
-  F5 funcionarem —, e o contrato dela está em `packages/shared/schemas`. A régua é NFR-9:
-  um toque abre o evento com o vídeo rodando, o segundo é a decisão.
+- **WebSocket (§4.5)** é o que falta para a fila parar de depender de recarga: hoje ela
+  puxa, e um evento novo só aparece quando alguém volta à lista. Canal por loja, com a
+  autorização conferida na conexão **e** na inscrição — o token do dashboard alcança as
+  lojas do vínculo, não as do tenant.
+- **Notificação (§4.5)** é o que tira o produto de "o gerente lembra de abrir o app". O
+  endereço já existe: `/eventos/:id` no dashboard e o `GET /v1/events/{event_id}` por trás
+  dele. R-12 manda agrupar e pôr teto diário por loja antes de mandar a primeira.
 - **Registro do agente no lado do agente (§5.1)** é o outro lado do
   `POST /v1/agents/register`, que já existe na API: trocar um token de bootstrap por
   credencial na subida, em vez do `--api-token` semeado.
@@ -347,6 +377,22 @@ curl -s -X POST http://localhost:3000/v1/events/<EVENT_ID>/triagem \
   -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"decisao":"falso_positivo","observacao":"cliente pagou no autoatendimento"}'
 ```
+
+E o dashboard, que é como isso tudo se parece para quem decide:
+
+```bash
+cd apps/dashboard
+pnpm install
+pnpm test                     # vitest + jsdom; sem rede, sem infra, sem API de pé
+pnpm lint
+pnpm build                    # `tsc -b` mora aqui: o vitest transpila sem checar tipo
+pnpm dev                      # :5173, com /v1 por proxy para a API em :3000
+```
+
+Com `pnpm seed` rodado, entra-se com o mesmo usuário do bloco acima. A régua é a NFR-9, e
+ela se confere no DevTools em viewport de celular: **um** toque abre o evento com o vídeo
+já rodando, o segundo é a decisão. Um toque a mais por evento é o que faz a fila não ser
+triada — e fila não triada é o R-1 sem número.
 
 Na fila o que se vigia é o que **não** foi decidido: `triagem=pendentes` é o padrão, e uma
 fila que só cresce é a dívida operacional que o §4.5 quer visível. `clip_state=pendente`

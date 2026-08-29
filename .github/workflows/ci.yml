@@ -1,7 +1,7 @@
 # O que o CLAUDE.md exige antes de dar qualquer coisa por concluída, agora exigido
-# também de quem esquecer de rodar. Dois jobs porque são dois ecossistemas com
-# ciclos de vida próprios — a borda em Python não deve esperar o Postgres subir para
-# saber que um teste de tracking quebrou.
+# também de quem esquecer de rodar. Um job por ecossistema, com ciclos de vida
+# próprios — a borda em Python não deve esperar o Postgres subir para saber que um
+# teste de tracking quebrou, e o dashboard não espera infra nenhuma.
 #
 # O que este CI deliberadamente NÃO roda: os testes marcados (`rtsp`, `redis`,
 # `modelo`). O `-m modelo` exige o .onnx que o scripts/modelo.sh baixa e que não vai
@@ -116,3 +116,38 @@ jobs:
 
       - name: testes
         run: pnpm test
+
+  dashboard:
+    name: dashboard (Node)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: pnpm
+        run: corepack enable
+
+      - name: dependências
+        working-directory: .
+        run: pnpm install --frozen-lockfile
+
+      - name: biome
+        run: pnpm lint
+
+      # Sem Postgres nem MinIO: a rede é fingida na suíte do front, então este job não
+      # espera infra nenhuma subir. O que ele guarda de verdade é o teste de contrato,
+      # que valida as fixturas contra os schemas de packages/shared -- é ele que impede
+      # os tipos escritos à mão em src/api/tipos.ts de divergirem da API em silêncio.
+      - name: testes
+        run: pnpm test
+
+      # O build entra no CI porque `tsc -b` roda aqui e não no `pnpm test`: o Vitest
+      # transpila sem checar tipos, então sem esta etapa um erro de tipo passaria verde.
+      - name: build
+        run: pnpm build

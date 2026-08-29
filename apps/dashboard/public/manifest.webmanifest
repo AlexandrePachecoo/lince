@@ -1,0 +1,10 @@
+{
+  "name": "lince — triagem",
+  "short_name": "lince",
+  "description": "Fila de triagem de possíveis ocorrências",
+  "start_url": "/fila",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#101418",
+  "theme_color": "#101418"
+}
