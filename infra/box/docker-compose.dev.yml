@@ -1,0 +1,40 @@
+# O box rodando na máquina de desenvolvimento com GPU, contra a API (`pnpm dev`, :3000)
+# e as câmeras sintéticas (`pnpm rtsp:up`, :8554) que rodam no host:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#
+# É o box de verdade — a mesma imagem, o mesmo compose, a GPU de verdade — com duas
+# diferenças, e só duas:
+#
+# 1. A imagem é construída do código local em vez de puxada do registry.
+# 2. O agente usa a rede do host. A configuração semeada pelo `pnpm seed` aponta as
+#    câmeras para `rtsp://localhost:8554`, e o agente também chega à API por
+#    `localhost:3000`. Numa rede de container, `localhost` é o próprio container e as
+#    duas coisas falhariam — o poll com erro de conexão, as câmeras em `reconnecting`.
+#    Na loja nada disso acontece: câmera e API têm endereço de verdade.
+#
+# Com o agente fora da rede do compose, o nome `redis` deixa de resolver. O Redis do box
+# passa a escutar em 127.0.0.1:6380 — só loopback, e não 6379, onde mora o Redis de
+# desenvolvimento do control plane (infra/docker-compose.yml). Misturar as duas filas
+# faria os testes `-m redis` do agente apagarem a fila do box.
+#
+# O `.env` de desenvolvimento precisa de, no mínimo:
+#   LINCE_VERSAO=dev
+#   LINCE_API_URL=http://localhost:3000
+#   LINCE_AGENT_TOKEN=dev-agent-token-local-only
+#   LINCE_MODELOS_DIR=../../apps/agent/models      # o que o scripts/modelo.sh baixa
+
+services:
+  agente:
+    image: lince-agent:${LINCE_VERSAO:-dev}
+    build:
+      context: ../..
+      dockerfile: apps/agent/Dockerfile
+      target: agente
+    network_mode: host
+    environment:
+      LINCE_REDIS_URL: redis://127.0.0.1:6380/0
+
+  redis:
+    ports:
+      - "127.0.0.1:6380:6379"

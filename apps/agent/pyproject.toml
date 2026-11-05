@@ -8,10 +8,8 @@ dependencies = [
     # Fila local durável do §3.6 (ADR-004). Em Python 3.12 não puxa dependência
     # transitiva nenhuma, o que mantém a imagem do box enxuta.
     "redis>=5.0",
-    # Inferência do §3.2 (ADR-009). MIT, e o modelo é um arquivo `.onnx` avulso — que
-    # é exatamente o que o `GET /v1/models/current` do §5.2 distribui com checksum.
-    # Um framework de treino traria gigabytes que só servem para treinar.
-    "onnxruntime>=1.20",
+    # O ONNX Runtime (ADR-009) NÃO está aqui: ele mora nos grupos `cpu` e `gpu` abaixo,
+    # porque `onnxruntime` e `onnxruntime-gpu` instalam o mesmo módulo e não convivem.
     # Só por `linear_sum_assignment`, a atribuição ótima do §3.3. Parece exagero para
     # uma função, e não é: um solver de atribuição escrito à mão é código crítico a mais
     # para uma pessoa só manter (R-11), e um erro sutil nele **é** o R-2.
@@ -22,14 +20,39 @@ dependencies = [
 lince-agent = "lince_agent.__main__:main"
 
 [dependency-groups]
+# Inferência do §3.2 (ADR-009). MIT, e o modelo é um arquivo `.onnx` avulso — que é
+# exatamente o que o `GET /v1/models/current` do §5.2 distribui com checksum. Um
+# framework de treino traria gigabytes que só servem para treinar.
+#
+# Dois grupos, um de cada vez (`conflicts` abaixo). `cpu` é o padrão: Codespace, CI e
+# qualquer máquina sem placa. `gpu` é o do box da loja (apps/agent/Dockerfile) e o da
+# máquina de desenvolvimento com placa:
+#
+#   uv sync --no-group cpu --group gpu
+#
+# Com os dois no mesmo ambiente, o segundo a instalar sobrescreve os arquivos do
+# primeiro, e o que sobra é um pacote meio CPU, meio GPU que importa sem erro.
+cpu = ["onnxruntime>=1.20"]
+# O piso não é enfeite: a partir da 1.27 o `onnxruntime-gpu` do PyPI é compilado contra
+# CUDA 13 e cuDNN 9, que é o que a imagem base do Dockerfile traz. Subir este pacote
+# para uma versão compilada contra outro CUDA não dá erro na instalação — o provider de
+# CUDA falha ao carregar e a sessão roda em CPU (§10.10). É o job `imagem` do CI que
+# pega isso, conferindo com `ldd` que as bibliotecas do provider resolvem na imagem.
+gpu = ["onnxruntime-gpu>=1.27"]
 dev = [
     # Só de desenvolvimento: o agente monta dicionários puros e o schema do §5 é
     # verificado no teste. Validar em runtime custaria dependência no box para
     # conferir um formato que o próprio agente acabou de produzir.
     "jsonschema>=4.23",
     "pytest>=8.3",
+    # Só para tests/test_box.py ler o compose do box (§3.8) como dado, e não por regex.
+    "pyyaml>=6.0",
     "ruff>=0.8",
 ]
+
+[tool.uv]
+default-groups = ["dev", "cpu"]
+conflicts = [[{ group = "cpu" }, { group = "gpu" }]]
 
 [build-system]
 requires = ["hatchling"]

@@ -333,9 +333,10 @@ aberto, o ffmpeg não reclama, e nenhum frame sai.
 | `uv: command not found` logo após o setup | PATH da sessão atual | abra um terminal novo, ou `export PATH="$HOME/.local/bin:$PATH"` |
 | Postgres preso em `starting` | volume corrompido de uma tentativa anterior | `pnpm infra:reset` e suba de novo (**apaga os dados**) |
 | Prisma não conecta, mas o container está `healthy` | senha diferente entre `POSTGRES_PASSWORD` e `DATABASE_URL` | acerte as duas e rode `pnpm infra:reset` — a senha do Postgres só é aplicada na criação do volume |
-| `ffmpeg` instalado mas sem NVDEC | build sem suporte a CUDA | irrelevante sem GPU; no box de referência use um build com `--enable-cuda-nvcc` |
+| `ffmpeg` instalado mas sem NVDEC | build sem suporte a CUDA | irrelevante sem GPU; com GPU, o ffmpeg da imagem do agente já tem (`docs/box.md`, e o CI confere `-hwaccels`) |
 | `uv run pytest -m rtsp` pula tudo | câmeras sintéticas não estão de pé | `pnpm rtsp:up` e espere uns 5 s |
 | `uv run pytest -m redis` pula tudo | Redis fora do ar ou em outra porta | `pnpm infra:up`, ou aponte `LINCE_REDIS_URL` |
+| provider `CPUExecutionProvider` numa máquina com GPU | o ambiente tem o `onnxruntime` de CPU, que é o padrão | `uv sync --no-group cpu --group gpu`; driver NVIDIA >= 580 e placa série 16 ou mais nova (docs/box.md) |
 | `uv run pytest -m modelo` pula tudo | o `.onnx` não está em `apps/agent/models/` | `bash scripts/modelo.sh`, ou aponte `LINCE_MODEL_PATH` |
 | `lince-cam3` reiniciando em loop | `infra/videos/pessoas.mp4` não existe | `bash scripts/modelo.sh` e depois `pnpm rtsp:up` |
 | Agente sobe com "não detecta nada" no log | faltou `--model` | é o comportamento pretendido sem modelo (§3.9); passe `--model models/yolox_s.onnx` |

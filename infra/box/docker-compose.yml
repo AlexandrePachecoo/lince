@@ -1,0 +1,121 @@
+# O box da loja (§3.8): o agente da borda e a fila local dele. É ESTE arquivo que vai
+# para o desktop com GPU no estoque do mercado — junto com um `.env` e a pasta do
+# modelo, e mais nada do repositório. Instalação passo a passo em docs/box.md.
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose up -d
+#   docker compose logs -f agente
+#
+# Não confundir com infra/docker-compose.yml, que é a infraestrutura de
+# DESENVOLVIMENTO do control plane (Postgres, MinIO). Os dois têm um Redis, e são
+# Redis diferentes: aquele é do BullMQ da nuvem; este é a fila do ADR-004, e nunca sai
+# da loja.
+#
+# O que NÃO está aqui, e por quê (§3.8):
+# - Tailscale vai instalado no host, não em container. Ele é a porta de entrada para
+#   consertar o box à distância (R-6); se morasse neste compose, um Docker quebrado
+#   levaria junto justamente o acesso que serviria para consertá-lo.
+# - Watchtower saiu de manutenção (repositório arquivado em dez/2025), e de qualquer
+#   forma não faz o que o R-7 pede: atualiza, mas não confere a saúde nem volta atrás.
+#   Por ora a atualização é manual e por versão fixa (`LINCE_VERSAO`, docs/box.md).
+
+name: lince-box
+
+x-logging: &logging
+  # Rotação explícita: o padrão do Docker é json-file SEM limite, e um box que ninguém
+  # olha por meses enche o disco com log — e disco cheio é o que derruba o corte do
+  # clipe (§3.5) e o AOF do Redis ao mesmo tempo.
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  agente:
+    # Versão fixa, nunca `latest`. Cada loja roda o que o `.env` dela diz, e é isso que
+    # permite o rollout gradual do R-7: a loja piloto sobe primeiro, as outras depois.
+    image: ${LINCE_IMAGEM:-ghcr.io/alexandrepachecoo/lince-agent}:${LINCE_VERSAO:?defina LINCE_VERSAO em .env}
+    restart: unless-stopped
+    # O agente abre um ffmpeg por câmera. Como PID 1, um processo que não espera os
+    # filhos deixa zumbi a cada reconexão de câmera (§3.1), e uma câmera instável
+    # reconecta centenas de vezes por dia. O `init` do Docker (tini) recolhe os órfãos
+    # e repassa o SIGTERM do `docker compose stop`.
+    init: true
+    # O agente para as câmeras UMA DE CADA VEZ, esperando cada ffmpeg até
+    # `SupervisionOptions.stop_grace_s` (3 s) antes do SIGKILL, e depois espera o
+    # pós-roll do clipe em corte (`ClipOptions`, 10 s + 5 s de tolerância). No pior caso
+    # de uma loja de 20 câmeras são 75 s. Os 10 s padrão do Docker matariam o agente no
+    # meio, e o clipe do evento que acabou de acontecer se perde (§3.5).
+    stop_grace_period: 90s
+    depends_on:
+      redis:
+        condition: service_healthy
+    # Sempre `--config-nuvem` e sempre `--outbox redis`:
+    # - A loja é configurada pela nuvem (§5.2), e o cache local cobre a subida sem
+    #   internet (§5.4). Câmera e zona digitadas aqui seriam uma segunda fonte da
+    #   verdade que o dashboard não enxerga.
+    # - `memory` é o padrão do agente e é andaime: um reinício — inclusive o de uma
+    #   atualização — jogaria fora todo evento que esperava a internet voltar (NFR-8).
+    # O cache da configuração fica ao lado dos clipes por padrão, no mesmo volume.
+    command:
+      - --config-nuvem
+      - --outbox
+      - redis
+      - --clips-dir
+      - /var/lib/lince/clipes
+    environment:
+      # O que é do box entra por ambiente (§5.2): onde está a nuvem, qual credencial,
+      # qual Redis, onde pousou o modelo. Nada disso desce no documento de configuração.
+      LINCE_API_URL: ${LINCE_API_URL:?defina LINCE_API_URL em .env}
+      LINCE_AGENT_TOKEN: ${LINCE_AGENT_TOKEN:?defina LINCE_AGENT_TOKEN em .env}
+      LINCE_REDIS_URL: ${LINCE_REDIS_URL:-redis://redis:6379/0}
+      LINCE_MODEL_PATH: /modelos/${LINCE_MODELO:-yolox_s.onnx}
+    volumes:
+      # Clipes à espera de upload e o cache de configuração. Volume, não diretório do
+      # container: a fila do Redis sobrevive a uma atualização da imagem, e se os
+      # clipes não sobrevivessem junto ela apontaria para arquivos que não existem.
+      - estado:/var/lib/lince
+      # Só leitura: o agente nunca escreve no modelo, e um bug que escrevesse
+      # corromperia o único arquivo que a loja não consegue refazer sem internet.
+      - ${LINCE_MODELOS_DIR:-./modelos}:/modelos:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            # `video` é o NVDEC. Só `gpu` deixaria o driver decidir pelas capacidades
+            # da imagem; declarar aqui é a segunda trava da armadilha descrita no
+            # Dockerfile — sem `video`, o decode cai para CPU em silêncio (R-4).
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility, video]
+    logging: *logging
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    # ADR-004: AOF com fsync a cada segundo. Uma queda de energia leva até ~1 s de
+    # fila, e um apagão na loja já derruba as câmeras junto. O RDB fica desligado: com
+    # AOF ele é uma segunda cópia em disco que ninguém lê.
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - ""
+    # Sem `ports`, de propósito. A fila guarda o payload dos eventos, e a rede da loja é
+    # a do Wi-Fi dos clientes e do DVR com senha padrão. O agente a alcança pela rede
+    # interna do compose; ninguém mais precisa.
+    volumes:
+      - fila:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging: *logging
+
+volumes:
+  estado:
+  fila:
