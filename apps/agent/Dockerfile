@@ -94,7 +94,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY packages/shared/schemas /src/packages/shared/schemas
 COPY infra/box/docker-compose.yml infra/box/docker-compose.dev.yml /src/infra/box/
-COPY apps/agent/Dockerfile ./Dockerfile
+COPY apps/agent/Dockerfile apps/agent/config.exemplo.json ./
 COPY apps/agent/tests ./tests
 
 # Pelo binário do venv e não por `uv run`: o `uv run` sincroniza com os grupos padrão
