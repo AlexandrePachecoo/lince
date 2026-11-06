@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import traceback
 
 import pytest
 
@@ -118,6 +119,50 @@ def test_timeout_vira_erro_com_o_prazo(monkeypatch):
     monkeypatch.setattr(probe_mod.subprocess, "run", estoura)
     with pytest.raises(ProbeError, match="não respondeu"):
         probe_stream(URL, DecodeOptions(), timeout_s=20.0)
+
+
+def test_erro_nao_vaza_a_credencial_da_url(monkeypatch):
+    """O ffprobe devolve a URL no stderr (`rtsp://user:pass@host/cam: Connection
+    refused`) e a ProbeError a repetia na mensagem. As duas iam parar no log da
+    subida. O argv que o processo recebe continua com a senha — sem ela a câmera
+    não autentica."""
+    senha = "s3nha-super-secreta"
+    url = f"rtsp://operador:{senha}@cam.loja:554/substream"
+    vistos: list[list[str]] = []
+
+    def executa(argv, **kwargs):  # noqa: ANN001 - a mesma assinatura do subprocess.run
+        vistos.append(argv)
+        return Saida(returncode=1, stderr=f"{url}: Server returned 401 Unauthorized\n")
+
+    monkeypatch.setattr(probe_mod.subprocess, "run", executa)
+    with pytest.raises(ProbeError) as erro:
+        probe_stream(url, DecodeOptions())
+
+    assert vistos and url in vistos[0]
+    mensagem = str(erro.value)
+    assert senha not in mensagem
+    assert "operador" not in mensagem
+    assert "cam.loja:554/substream" in mensagem
+
+
+def test_timeout_nao_vaza_a_credencial_no_traceback(monkeypatch):
+    """`TimeoutExpired` carrega o argv no `str()`. Encadear essa causa na ProbeError
+    republicaria a senha no primeiro traceback, mesmo com a mensagem já redigida."""
+    senha = "s3nha-super-secreta"
+    url = f"rtsp://operador:{senha}@cam.loja:554/substream"
+
+    def estoura(*args, **kwargs):  # noqa: ANN002 - a mesma assinatura do subprocess.run
+        raise subprocess.TimeoutExpired(cmd=["ffprobe", "-i", url], timeout=20)
+
+    monkeypatch.setattr(probe_mod.subprocess, "run", estoura)
+    with pytest.raises(ProbeError) as erro:
+        probe_stream(url, DecodeOptions(), timeout_s=20.0)
+
+    texto = "".join(traceback.format_exception(erro.value))
+    assert senha not in texto
+    assert "operador:" not in texto
+    assert "cam.loja" in str(erro.value)
+    assert erro.value.__cause__ is None
 
 
 def test_ffprobe_ausente(monkeypatch):
