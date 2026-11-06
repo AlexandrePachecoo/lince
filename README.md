@@ -22,8 +22,11 @@ passa por triagem humana.
 > **O que ainda não existe:** notificação e WebSocket — o gerente ainda precisa lembrar de
 > abrir o app, e a fila só muda quando ele recarrega. Falta também a supressão de
 > duplicados da §4.6, que é o que impede uma câmera mal calibrada de virar trinta alertas.
-> Não há Dockerfile nem o compose do box da §3.8, então o agente ainda não é instalável
-> numa loja. Ver `CLAUDE.md` para o estado detalhado por componente.
+> Ver `CLAUDE.md` para o estado detalhado por componente.
+>
+> O agente já é instalável numa loja: imagem em `apps/agent/Dockerfile`, compose do box em
+> `infra/box/` e o passo a passo em [`docs/box.md`](docs/box.md). Falta a atualização
+> automática com rollback (R-7) e o registro do agente pelo lado do agente (§5.1).
 >
 > Leia [`docs/arquitetura.md`](docs/arquitetura.md) antes de escrever código, e
 > [`CLAUDE.md`](CLAUDE.md) para as convenções — em especial a regra de que toda
@@ -39,6 +42,7 @@ apps/dashboard/    Dashboard React PWA (triagem no celular)
 apps/agent/        Agente da borda em Python (YOLO, ByteTrack, ffmpeg)
 packages/shared/   Contrato agente ↔ nuvem em JSON Schema (§5 da arquitetura)
 infra/             docker-compose de desenvolvimento (Postgres + Redis + MinIO)
+infra/box/         docker-compose do box da loja (agente + Redis local, §3.8)
 docs/              Arquitetura e ADRs
 ```
 
@@ -168,3 +172,14 @@ máquina de estados, contrato com a nuvem), mas **nenhum dos números da §10 da
 arquitetura pode ser medido aqui** — taxa de decode, custo de inferência por frame,
 latência ponta a ponta e consumo de RAM do buffer circular exigem o box de
 referência com vídeo real.
+
+Numa máquina **com** GPU, o ONNX Runtime de GPU é outro grupo de dependências — o padrão
+é o de CPU, e os dois não convivem no mesmo ambiente:
+
+```bash
+cd apps/agent && uv sync --no-group cpu --group gpu
+```
+
+Ou o box inteiro em Docker, construído do código local:
+`docker compose -f infra/box/docker-compose.yml -f infra/box/docker-compose.dev.yml up --build`
+(o `.env` de desenvolvimento está em [`docs/box.md`](docs/box.md)).

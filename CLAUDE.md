@@ -65,6 +65,7 @@ cd apps/agent && uv run ruff check src tests && uv run ruff format --check src t
 | `apps/api` | As três rotas de agente (`config`, `register`, `heartbeat`), o caminho do evento (`POST /v1/events` com URL pré-assinada e `PATCH /v1/events/{event_id}`) e o lado humano da §4.5: login, fila de triagem, evento avulso por `GET /v1/events/{event_id}`, decisão, URL de leitura do clipe com auditoria e cadastro de usuário. Mais a métrica de falso positivo por câmera/dia do R-1 (`GET /v1/metricas/falso-positivo`). Falta download de modelo, notificação e WebSocket |
 | `apps/dashboard` | O ciclo de triagem da §4.5 em Vite + React: login, fila por cursor, evento com o clipe rodando e a decisão em três botões — os dois toques da NFR-9 —, mais a tela de falso positivo por câmera (R-1). Falta WebSocket, service worker e as telas de usuário |
 | `packages/shared` | JSON Schema dos dois contratos: agente ↔ nuvem (§5) e dashboard ↔ nuvem (§4.5) |
+| `infra/box` | O box da loja (§3.8): imagem do agente em `apps/agent/Dockerfile` (CUDA 13 + cuDNN 9 + ffmpeg com NVDEC + `onnxruntime-gpu`), compose com agente e Redis local, override de desenvolvimento, e o passo a passo em `docs/box.md`. O CI constrói a imagem, roda a suíte dentro dela e publica no GHCR a cada tag `agente-vX.Y.Z`. Falta atualização automática com rollback (R-7) |
 
 O caminho **pessoa cruza a linha → clipe → fila local → nuvem → clipe apagado do
 disco** funciona ponta a ponta, sem andaime nenhum e **sem `--dry-run`**: a borda vê,
@@ -306,6 +307,27 @@ que fazer com um item de fila, e aqui o status só escolhe qual contador sobe. O
 externo que o box tem, e sem ele um agente com NTP quebrado reportaria deriva zero com
 toda a convicção do mundo.
 
+O box (§3.8) é onde o agente encontra o hardware, e o que se decidiu ali existe porque
+**nada do que dá errado com GPU dá erro**: o §3.1 e o §3.2 caem para CPU exatamente como
+foram desenhados para cair, e a loja opera a uma fração da taxa com o heartbeat verde.
+
+- **`onnxruntime` e `onnxruntime-gpu` são grupos do uv, não dependências.** Os dois
+  instalam o mesmo módulo; juntos, o segundo sobrescreve o primeiro e o que sobra importa
+  sem erro. `cpu` é o grupo padrão (Codespace, CI); `gpu` é o da imagem e o da máquina
+  com placa (`uv sync --no-group cpu --group gpu`), declarados como `conflicts` no
+  `pyproject.toml`.
+- **A suíte roda dentro da imagem** (estágio `teste` do Dockerfile), e não só no runner.
+  Lá o ffmpeg é o da imagem e o ONNX Runtime é o de GPU — o par que vai para a loja, não o
+  do ambiente de desenvolvimento.
+- **O CI confere o provider de CUDA sem GPU, por `ldd`.** O runner não tem placa e não
+  precisa: uma biblioteca do CUDA que não resolve na imagem é o mesmo fallback para CPU
+  que aconteceria na loja. A exceção é a `libcuda.so.1`, que é do driver e vem do host.
+- **Clipes e cache em volume, versão fixa por loja, Redis sem porta, `init` e 90 s de
+  folga no encerramento** — cada um com o porquê no próprio compose e um teste em
+  `tests/test_box.py`, que lê o compose e o Dockerfile como dado.
+- **Tailscale no host, não no compose.** É o acesso para consertar o box à distância; se
+  dependesse do Docker, um Docker quebrado levaria junto o acesso que o consertaria.
+
 `packages/shared` é onde o contrato da §5 mora em **um lugar só**. Duplicar essa
 definição entre a API e o agente é o erro mais caro que dá para cometer neste
 projeto. O agente valida o payload real contra o schema em
@@ -377,6 +399,17 @@ cd ../agent && uv run python -m lince_agent --config-nuvem --api-url http://loca
 # `falhas=0` é o sinal de que os três passos fecharam:
 cd ../agent && uv run python -m lince_agent --config-nuvem --api-url http://localhost:3000 \
   --api-token dev-agent-token-local-only --model models/yolox_s.onnx --stats
+```
+
+O box da loja (§3.8), em Docker — passo a passo de instalação em `docs/box.md`:
+
+```bash
+docker build -f apps/agent/Dockerfile --target teste .     # a suíte dentro da imagem
+docker build -f apps/agent/Dockerfile -t lince-agent .     # a imagem que vai para a loja
+
+# o box inteiro na máquina de desenvolvimento com GPU, contra `pnpm dev` e `pnpm rtsp:up`
+# (o .env de desenvolvimento está em docs/box.md):
+cd infra/box && docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
 O outro lado, o do §4.5 — login, fila de triagem, decisão e clipe. O `pnpm seed` imprime
@@ -632,6 +665,22 @@ Não reintroduza nenhuma destas — cada uma custou depuração e tem teste guar
 - **Backtick dentro de template literal encerra a string.** Comentário de SQL com
   `` `nome` `` num `$queryRaw` quebra o arquivo inteiro com erros de sintaxe apontando
   para o meio da consulta, não para o comentário.
+- **A imagem base do CUDA não declara `video`.** Ela traz
+  `NVIDIA_DRIVER_CAPABILITIES=compute,utility`, e com isso o NVIDIA Container Toolkit
+  monta o CUDA mas não a `libnvcuvid.so` — o NVDEC. A inferência vai para a GPU, o
+  `-hwaccel cuda` falha, e o decode cai para CPU sem erro. Fica declarado na imagem **e**
+  no compose (`capabilities: [gpu, compute, utility, video]`).
+- **`onnxruntime-gpu` >= 1.27 é compilado contra CUDA 13** (`libcublas.so.13`). Imagem de
+  CUDA 12 instala sem erro e roda em CPU. CUDA 13 também exige driver >= 580 no host e
+  placa com *compute capability* >= 7.5: GTX 10xx não serve para box.
+- **O cuDNN não aparece no `ldd` do provider de CUDA.** O ONNX Runtime o abre por
+  `dlopen` em tempo de execução. Conferir só o `ldd` aprova uma imagem sem cuDNN; o CI
+  confere `libcudnn.so.9` no `ldconfig` à parte.
+- **`uv run` dentro da imagem troca o pacote de GPU pelo de CPU.** Ele sincroniza com os
+  grupos padrão antes de rodar, e o padrão é `cpu`. Na imagem, chama-se o binário do venv.
+- **`${VAR:-padrão}` no compose tem `:` dentro.** Um `split(":")` numa montagem
+  `${LINCE_MODELOS_DIR:-./modelos}:/modelos:ro` lê a origem errada e o teste passa a
+  conferir outra coisa. `tests/test_box.py` remove a interpolação antes de quebrar.
 - **Ordenar a triagem vigente por `criadoEm` é cara ou coroa.** Duas decisões no mesmo
   milissegundo empatam, e "a última" passa a depender de como o Postgres devolveu a
   linha. Por isso existe `Triagem.seq`: a sequência não empata.

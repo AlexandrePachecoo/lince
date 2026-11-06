@@ -14,6 +14,9 @@ name: CI
 on:
   push:
     branches: ["**"]
+    # A tag `agente-vX.Y.Z` é o que publica a imagem `X.Y.Z` do agente (job `publica`).
+    # Ela passa pelo CI inteiro antes: imagem de loja não sai de commit vermelho.
+    tags: ["agente-v*"]
   pull_request:
 
 concurrency:
@@ -151,3 +154,118 @@ jobs:
       # transpila sem checar tipos, então sem esta etapa um erro de tipo passaria verde.
       - name: build
         run: pnpm build
+
+  # A imagem do box (§3.8). O que só se verifica com ela construída — e que, errado, não
+  # dá erro na loja: degrada para CPU em silêncio (R-4, §10.10).
+  #
+  # O runner não tem GPU, e nada aqui precisa de uma. Conferir que o provider de CUDA
+  # CARREGARIA é um `ldd`: se uma biblioteca do CUDA não resolve na imagem, o
+  # `onnxruntime-gpu` cai para CPU na loja exatamente do mesmo jeito.
+  imagem:
+    name: imagem do agente (Docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # O compose do box com o .env de exemplo, e com o override de desenvolvimento. É o
+      # que pega variável obrigatória sem valor, chave com erro de digitação e o
+      # override deixando de casar com o arquivo base.
+      - name: compose do box
+        working-directory: infra/box
+        run: |
+          cp .env.example .env
+          docker compose -f docker-compose.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config -q
+
+      # A suíte do agente DENTRO da imagem: o ffmpeg do Ubuntu da imagem e o
+      # `onnxruntime-gpu`, que é o pacote que vai para a loja — não o `onnxruntime` de
+      # CPU que o job `agente` testa. O build falha se um teste falhar.
+      - name: testes na imagem
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/agent/Dockerfile
+          target: teste
+          cache-from: type=gha,scope=agente
+          cache-to: type=gha,scope=agente,mode=max
+
+      - name: imagem do box
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/agent/Dockerfile
+          target: agente
+          load: true
+          tags: lince-agent:ci
+          cache-from: type=gha,scope=agente
+
+      # As quatro coisas que fazem o box usar a placa, uma por linha para o log dizer
+      # qual quebrou:
+      # - o ffmpeg da imagem tem NVDEC (`cuda` em `-hwaccels`);
+      # - o ONNX Runtime instalado é o de GPU (o de CPU não lista o provider);
+      # - toda biblioteca de que o provider de CUDA depende resolve na imagem — menos a
+      #   `libcuda.so.1`, que é do driver e vem do host pelo NVIDIA Container Toolkit;
+      # - o cuDNN 9, que o provider abre por `dlopen` e por isso não aparece no `ldd`.
+      - name: a imagem tem o que a GPU precisa
+        run: |
+          docker run --rm --entrypoint sh lince-agent:ci -euc '
+            lince-agent --help > /dev/null
+            ffmpeg -hide_banner -hwaccels | grep -qx cuda
+            python -c "import onnxruntime as o; p = o.get_available_providers(); assert \"CUDAExecutionProvider\" in p, p"
+            so=$(python -c "import onnxruntime, pathlib; print(pathlib.Path(onnxruntime.__file__).parent / \"capi\" / \"libonnxruntime_providers_cuda.so\")")
+            faltando=$(ldd "$so" | grep "not found" | grep -v "libcuda.so.1" || true)
+            if [ -n "$faltando" ]; then echo "provider de CUDA não carregaria:"; echo "$faltando"; exit 1; fi
+            ldconfig -p | grep -q "libcudnn.so.9"
+            echo "$NVIDIA_DRIVER_CAPABILITIES" | tr , "\n" | grep -qx video
+          '
+
+  # Publica a imagem que os boxes puxam (infra/box/docker-compose.yml). Só depois dos
+  # testes do agente e da imagem, e só em dois casos:
+  # - push na main → `main` e `sha-<commit>`, para a máquina de desenvolvimento e para
+  #   uma loja piloto que alguém queira apontar para um commit exato;
+  # - tag `agente-vX.Y.Z` → `X.Y.Z`, que é o que o `LINCE_VERSAO` de uma loja usa.
+  # Nunca `latest` (R-7): cada loja diz no `.env` a versão que roda.
+  publica:
+    name: publica a imagem do agente
+    needs: [agente, imagem]
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/agente-v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # O nome da imagem em minúsculas e escrito aqui, igual ao padrão do compose do
+      # box: o registry recusa maiúsculas, e o dono do repositório tem.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/alexandrepachecoo/lince-agent
+          flavor: latest=false
+          tags: |
+            type=match,pattern=agente-v(\d+\.\d+\.\d+),group=1
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,format=short,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/agent/Dockerfile
+          target: agente
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=agente

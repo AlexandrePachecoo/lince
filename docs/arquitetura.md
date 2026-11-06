@@ -427,7 +427,7 @@ assumido: com `appendonly yes` e o `appendfsync everysec` padrão, uma queda de
 energia leva junto até ~1 s de fila. Na prática é o último evento antes do apagão —
 e um apagão na loja já derruba as câmeras junto. Em troca, o compose do box não
 ganha mais um mecanismo de persistência e o estado sobrevive a restart do agente,
-que é o caso comum (atualização por watchtower, §3.8).
+que é o caso comum (atualização da imagem, §3.8).
 
 Estruturas, e o porquê de cada uma:
 
@@ -472,12 +472,25 @@ imediato no gatilho + clipe depois).
 
 ### 3.8 Composição do agente
 
-Junto no `docker-compose` do box da loja:
+Implementado em `apps/agent/Dockerfile` e `infra/box/docker-compose.yml`; instalação e
+operação em [`docs/box.md`](box.md).
 
-- **redis** — fila local e coordenação entre estágios.
+No `docker-compose` do box da loja:
+
+- **agente** — imagem CUDA 13 + cuDNN 9 + ffmpeg do Ubuntu (com NVDEC) + o agente com
+  `onnxruntime-gpu`. Versão fixa por loja no `.env`, nunca `latest` (R-7).
+- **redis** — fila local (ADR-004), com AOF e sem porta publicada na rede da loja.
+
+Fora do compose, por decisão:
+
 - **tailscale** — acesso remoto para suporte sem mexer no roteador da loja. Mercado
-  de bairro não tem IP fixo nem alguém para abrir porta no NAT.
-- **watchtower ou script próprio** — atualização da imagem do agente.
+  de bairro não tem IP fixo nem alguém para abrir porta no NAT. Instalado **no host**,
+  não em container: é a porta de entrada para consertar o box, e não pode depender do
+  Docker que talvez seja o que quebrou (R-6).
+- **atualização da imagem** — a previsão era watchtower ou script próprio. O watchtower
+  saiu de manutenção (repositório arquivado em dez/2025) e não confere saúde nem volta
+  atrás, que é o que o R-7 pede. Por ora a atualização é manual, por versão; o script
+  próprio depende de o agente expor um sinal de saúde local.
 
 ### 3.9 Portabilidade nuvem / on-premise (NFR-5)
 
@@ -785,5 +798,6 @@ Lista viva do que só se resolve com hardware e vídeo da loja piloto:
     agente inteiro e a subida falha se as câmeras divergirem. Uma câmera de saída com
     GOP longo pode precisar de outra tolerância que a do corredor (§3.4) — resolver
     exige passar as opções por câmera no `attach`.
-12. Compose do box da loja (§3.8): agente, redis local, tailscale e watchtower. Hoje
-    os testes da fila usam o Redis de desenvolvimento do control plane.
+12. ~~Compose do box da loja (§3.8).~~ **Fechada:** agente + redis em
+    `infra/box/`, tailscale no host (docs/box.md). Fica aberta a atualização automática
+    com rollback (R-7), que depende de um sinal de saúde local do agente.

@@ -1,0 +1,20 @@
+# O contexto do build é a raiz do repositório (ver o cabeçalho do Dockerfile). Lista de
+# permissão, não de exclusão: sem isto o contexto levaria node_modules, os .venv, vídeos
+# de teste e os .env — e um .env no contexto é a um `COPY . .` descuidado de ir parar
+# numa imagem pública.
+*
+!apps/agent/pyproject.toml
+!apps/agent/uv.lock
+!apps/agent/src
+!apps/agent/tests
+!packages/shared/schemas
+# Só o estágio `teste` lê estes, cada um no mesmo lugar relativo em que está no repo:
+# o exemplo de configuração (tests/test_config_loader.py e test_contrato_config.py
+# conferem que ele carrega e valida), o compose do box e o próprio Dockerfile
+# (tests/test_box.py).
+!apps/agent/config.exemplo.json
+!apps/agent/Dockerfile
+!infra/box/docker-compose.yml
+!infra/box/docker-compose.dev.yml
+**/__pycache__
+**/*.pyc
