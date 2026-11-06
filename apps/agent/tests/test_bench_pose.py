@@ -123,13 +123,19 @@ def test_tabela_marca_warp_pulado():
     assert relatorio["pose"]["lote_dinamico"] is True
 
 
-def test_opencv_so_entra_se_ja_estiver_no_ambiente():
-    """Sem o pacote, a coluna some. Com ele, o warp tem que devolver o tensor
-    do recorte — senão a curva compara outra coisa."""
-    if bench.opencv_disponivel():
-        imagem = np.zeros((80, 80, 3), dtype=np.uint8)
-        tensor = bench.recorte_warp_affine(imagem, (10.0, 10.0, 40.0, 70.0))
-        assert tensor.shape == (1, 3, 256, 192)
-        assert tensor.dtype == np.float32
-    else:
-        assert bench.opencv_disponivel() is False
+def test_warp_affine_amostra_o_mesmo_recorte_que_o_numpy():
+    """A matriz leva o pixel do recorte ao pixel do frame, que é o mapa do
+    `_warp_bilinear`. Sem `WARP_INVERSE_MAP` o OpenCV inverte de novo e amostra
+    outro retângulo: o tensor normalizado diverge em unidades, e o benchmark
+    passa a cronometrar um recorte que não é o da pose."""
+    pytest.importorskip("cv2")
+    from lince_agent.pose.preprocess import crop_bbox
+
+    imagem = np.random.default_rng(0).integers(0, 256, size=(120, 160, 3), dtype=np.uint8)
+    caixa = (20.0, 10.0, 80.0, 100.0)
+    esperado, _ = crop_bbox(imagem, caixa)
+    obtido = bench.recorte_warp_affine(imagem, caixa)
+
+    assert obtido.shape == esperado.shape
+    assert obtido.dtype == esperado.dtype
+    assert np.max(np.abs(obtido - esperado)) < 0.15

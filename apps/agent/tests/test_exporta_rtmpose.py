@@ -33,6 +33,14 @@ def test_variantes_oficiais_sao_coco17_e_nao_halpe():
         assert "whole" not in texto
         assert "ultralytics" not in texto
         assert "256x192" in variante.config_relativa
+        assert len(variante.sha256) == 64
+    # O token do nome tem que ser o arquivo certo. No body8 ele é sha256[:8];
+    # no coco de 2023-01-27 o nome traz 8edcf0d7 e o sha256 medido do URL
+    # oficial começa em 29dcacbb.
+    assert exporta.token_do_checkpoint(exporta.VARIANTES["coco"].checkpoint_url) == "8edcf0d7"
+    assert exporta.VARIANTES["coco"].sha256.startswith("29dcacbb")
+    assert exporta.token_do_checkpoint(exporta.VARIANTES["body8"].checkpoint_url) == "acd4a1ef"
+    assert exporta.VARIANTES["body8"].sha256.startswith("acd4a1ef")
 
 
 def test_destino_dentro_do_repositorio_e_recusado(tmp_path: Path):
@@ -97,6 +105,26 @@ def test_destino_existente_nao_e_reescrito(tmp_path: Path, capsys):
     assert codigo == 0
     assert destino.read_bytes() == b"ja exportei"
     assert "já existe" in capsys.readouterr().out
+
+
+def test_download_falso_com_hash_errado_apaga_o_pth(tmp_path: Path):
+    """O .pth é pickle. Um download que não bate com o sha256 oficial não
+    pode ficar no disco para o mmdeploy abrir em seguida."""
+    destino = tmp_path / "rtmpose-s.pth"
+
+    def falso(_url: str, caminho: Path) -> None:
+        Path(caminho).write_bytes(b"pickle-forjado")
+
+    with pytest.raises(exporta.ExportaError, match="sha256"):
+        exporta.baixa_checkpoint(
+            exporta.VARIANTES["coco"].checkpoint_url,
+            destino,
+            exporta.VARIANTES["coco"].sha256,
+            baixar=falso,
+        )
+    assert not destino.exists()
+    assert not destino.with_suffix(".pth.parcial").exists()
+    assert list(tmp_path.glob("*.pth*")) == []
 
 
 def test_bmp_de_amostra_comeca_com_bm(tmp_path: Path):

@@ -20,7 +20,7 @@ import pytest
 from onnx import TensorProto, helper, numpy_helper
 
 from lince_agent.config import PixelFormat
-from lince_agent.detect.onnx import _abre_sessao
+from lince_agent.detect.onnx import abre_sessao
 from lince_agent.detect.onnx import model_version as versao_do_detector
 from lince_agent.detect.state import Detection
 from lince_agent.ffmpeg.rawframe import Frame
@@ -135,7 +135,7 @@ def abre(caminho: Path, **kwargs) -> tuple[OnnxPose, _Conta]:
     caixa: dict[str, _Conta] = {}
 
     def factory(model_path: Path, providers: tuple[str, ...]) -> _Conta:
-        caixa["conta"] = _Conta(_abre_sessao(model_path, providers))
+        caixa["conta"] = _Conta(abre_sessao(model_path, providers))
         return caixa["conta"]
 
     pose = OnnxPose(
@@ -234,6 +234,35 @@ def test_frame_e_deteccao_usam_o_mesmo_espaco(tmp_path: Path):
     assert (do_frame.juntas[9].x, do_frame.juntas[9].y) == pytest.approx(
         (do_array.juntas[9].x, do_array.juntas[9].y)
     )
+
+
+def test_lista_ou_tupla_de_quatro_numeros_e_uma_caixa(tmp_path: Path):
+    """Uma caixa solta não é quatro caixas. Tratar cada número como caixa
+    estoura no recorte, ou pior, produz um tensor sem pessoa."""
+    caminho = grava_modelo(
+        tmp_path / "rtmpose-s.onnx",
+        entrada=[1, 3, INPUT_ALTURA, INPUT_LARGURA],
+    )
+    pose, conta = abre(caminho)
+    da_lista = pose.estimar(imagem(), [20.0, 10.0, 80.0, 100.0])
+    da_tupla = pose.estimar(imagem(), (20, 10, 80, 100))
+    assert conta.lotes == [1, 1]
+    assert len(da_lista) == len(da_tupla) == 1
+    _pulso(da_lista[0], CENTRO_A)
+    _pulso(da_tupla[0], CENTRO_A)
+
+
+def test_inferir_recusa_canal_ou_tamanho_errado(tmp_path: Path):
+    caminho = grava_modelo(
+        tmp_path / "rtmpose-s.onnx",
+        entrada=[1, 3, INPUT_ALTURA, INPUT_LARGURA],
+    )
+    pose, conta = abre(caminho)
+    with pytest.raises(ModelError, match=r"recebi \(1, 3, 64, 48\)"):
+        pose.inferir(np.zeros((1, 3, 64, 48), np.float32))
+    with pytest.raises(ModelError, match=r"recebi \(1, 1, 256, 192\)"):
+        pose.inferir(np.zeros((1, 1, INPUT_ALTURA, INPUT_LARGURA), np.float32))
+    assert conta.lotes == []
 
 
 def test_sem_caixa_nao_chama_a_sessao(tmp_path: Path):

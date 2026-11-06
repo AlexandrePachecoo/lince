@@ -45,7 +45,7 @@ from typing import Any
 import numpy as np
 
 from lince_agent.detect.onnx import ModelError as DetectorModelError
-from lince_agent.detect.onnx import _abre_sessao, recusa_pesos_agpl
+from lince_agent.detect.onnx import abre_sessao, recusa_pesos_agpl
 from lince_agent.detect.onnx import model_version as _model_version_detector
 from lince_agent.ffmpeg.rawframe import Frame
 from lince_agent.pose.preprocess import (
@@ -375,10 +375,12 @@ class OnnxPose:
         if self._session is None:
             raise ModelError("a sessão da pose já foi fechada")
         array = np.ascontiguousarray(tensor, dtype=np.float32)
-        if array.ndim != 4:
+        esperado = (3, self._spec.input_height, self._spec.input_width)
+        if array.ndim != 4 or tuple(int(valor) for valor in array.shape[1:]) != esperado:
             raise ModelError(
-                f"a sessão espera NCHW (lote, 3, {INPUT_ALTURA}, {INPUT_LARGURA}), "
-                f"recebi {array.shape}"
+                f"a sessão espera NCHW (lote, 3, {esperado[1]}, {esperado[2]}), "
+                f"recebi {tuple(int(valor) for valor in array.shape)}. "
+                "Outro recorte não estoura na sessão: a junta sai plausível e no lugar errado"
             )
         if not self._lote_dinamico and int(array.shape[0]) != 1:
             raise ModelError(
@@ -433,12 +435,12 @@ class OnnxPose:
 def _abre(model_path: Path, providers: tuple[str, ...]) -> Any:
     """A mesma abertura do detector, com o erro no tipo da pose.
 
-    `_abre_sessao` filtra o provider que esta instalação realmente tem e recusa
+    `abre_sessao` filtra o provider que esta instalação realmente tem e recusa
     a lista vazia. Reimplementar isso aqui é a maneira de a pose cair para CPU
     num box em que o detector continua na GPU, ou o contrário (§10.10).
     """
     try:
-        return _abre_sessao(model_path, providers)
+        return abre_sessao(model_path, providers)
     except DetectorModelError as erro:
         raise ModelError(str(erro)) from erro
 
@@ -636,11 +638,24 @@ def _exige_tipo_float(tipo: str, contexto: str) -> None:
 
 
 def _como_caixas(caixas: Sequence[Any] | np.ndarray) -> list[Any]:
-    # Uma caixa solta (4,) não é uma lista de quatro números. Sem isto, cada
-    # coordenada vira uma "caixa" e o recorte estoura com uma mensagem de forma.
-    if isinstance(caixas, np.ndarray) and caixas.shape == (4,):
+    # Uma caixa solta — ndarray (4,), ou list/tuple de quatro números — não é
+    # uma lista de quatro caixas. Sem isto, cada coordenada vira uma "caixa" e
+    # o recorte estoura com uma mensagem de forma.
+    if _e_uma_caixa(caixas):
         return [caixas]
     return [_xyxy(caixa) for caixa in caixas]
+
+
+def _e_uma_caixa(caixas: Any) -> bool:
+    if isinstance(caixas, np.ndarray):
+        return caixas.shape == (4,)
+    if isinstance(caixas, (list, tuple)) and len(caixas) == 4:
+        return all(_e_numero(valor) for valor in caixas)
+    return False
+
+
+def _e_numero(valor: Any) -> bool:
+    return isinstance(valor, (int, float, np.integer, np.floating)) and not isinstance(valor, bool)
 
 
 def _xyxy(caixa: Any) -> Any:

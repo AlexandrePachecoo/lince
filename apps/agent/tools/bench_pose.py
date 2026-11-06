@@ -126,11 +126,15 @@ def recorte_warp_affine(imagem: np.ndarray, caixa: tuple[float, float, float, fl
         ],
         dtype=np.float64,
     )
+    # A matriz leva o pixel do recorte ao pixel do frame — o mesmo mapa do
+    # `_warp_bilinear`. Sem WARP_INVERSE_MAP o OpenCV inverte de novo e amostra
+    # outro retângulo; o tensor normalizado diverge em unidades e o benchmark
+    # cronometra um recorte que não é o da pose.
     recortado = cv2.warpAffine(
         imagem,
         matriz,
         (largura, altura),
-        flags=cv2.INTER_LINEAR,
+        flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(0, 0, 0),
     )

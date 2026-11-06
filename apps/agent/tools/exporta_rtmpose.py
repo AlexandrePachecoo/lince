@@ -27,12 +27,14 @@ ONNX Runtime, não neste venv.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import shutil
 import subprocess
 import sys
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -63,12 +65,24 @@ MMCV_INDEX = "https://download.openmmlab.com/mmcv/dist/cpu/torch2.2/index.html"
 
 @dataclass(frozen=True, slots=True)
 class Variante:
-    """Um checkpoint oficial de 17 juntas. A URL é pública; não há credencial."""
+    """Um checkpoint oficial de 17 juntas. A URL é pública; não há credencial.
+
+    `sha256` é do arquivo `.pth` inteiro. O mmdeploy abre isso com torch, e
+    torch abre pickle: um arquivo trocado no meio do caminho executa código
+    antes de qualquer checagem de forma. O hash é conferido depois do
+    download e antes desse load.
+    """
 
     config_relativa: str
     checkpoint_url: str
+    sha256: str
 
 
+# Medidos no arquivo publicado em download.openmmlab.com. O body8 segue a
+# convenção do OpenMMLab: o token do nome é sha256[:8] (acd4a1ef). O coco de
+# 2023-01-27 traz 8edcf0d7 no nome e o sha256 do arquivo nesse URL é outro
+# (29dcacbb…); os dois tokens continuam no nome para não baixar o arquivo
+# vizinho, e o que vale na conferência é o hash completo.
 VARIANTES: dict[str, Variante] = {
     "coco": Variante(
         config_relativa=(
@@ -78,6 +92,7 @@ VARIANTES: dict[str, Variante] = {
             "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/"
             "rtmpose-s_simcc-coco_pt-aic-coco_420e-256x192-8edcf0d7_20230127.pth"
         ),
+        sha256="29dcacbb5c5f3ab2f03a67fedcb58cf7287f93b9a8a9d893f42416b63fc304ba",
     ),
     "body8": Variante(
         config_relativa=(
@@ -87,6 +102,7 @@ VARIANTES: dict[str, Variante] = {
             "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/"
             "rtmpose-s_simcc-body7_pt-body7_420e-256x192-acd4a1ef_20230504.pth"
         ),
+        sha256="acd4a1efd8f01669cadd699ce0cceeebfc0f57a008074858e0d3063110c73c94",
     ),
 }
 
@@ -107,6 +123,7 @@ class Plano:
     variante: str
     config_relativa: str
     checkpoint_url: str
+    sha256: str
     forcar: bool
 
     def texto(self) -> str:
@@ -116,6 +133,7 @@ class Plano:
                 f"variante: {self.variante} (Apache-2.0, 17 juntas COCO, 256×192)",
                 f"config: {self.config_relativa}",
                 f"checkpoint: {self.checkpoint_url}",
+                f"sha256: {self.sha256}",
                 f"destino: {self.destino}",
                 f"cache: {self.cache}",
                 f"venv: {self.venv}",
@@ -265,6 +283,7 @@ def montar_plano(
         variante=variante,
         config_relativa=escolhida.config_relativa,
         checkpoint_url=escolhida.checkpoint_url,
+        sha256=escolhida.sha256,
         forcar=forcar,
     )
 
@@ -276,18 +295,70 @@ def _roda(argv: list[str], *, cwd: Path | None, o_que: str) -> None:
         raise ExportaError(f"{o_que} falhou (código {resultado.returncode})")
 
 
-def _baixa(url: str, destino: Path) -> None:
-    if destino.is_file() and destino.stat().st_size > 0:
-        print(f"==> checkpoint já está em {destino}", flush=True)
-        return
+def sha256_arquivo(caminho: Path) -> str:
+    digest = hashlib.sha256()
+    with caminho.open("rb") as arquivo:
+        for bloco in iter(lambda: arquivo.read(1 << 20), b""):
+            digest.update(bloco)
+    return digest.hexdigest()
+
+
+def token_do_checkpoint(url: str) -> str:
+    """Os 8 hex do nome oficial, antes da data (`…-8edcf0d7_20230127.pth`)."""
+    nome = nome_do_url(url).removesuffix(".pth")
+    return nome.rsplit("_", 1)[0].rsplit("-", 1)[-1]
+
+
+def _sha256_completo(valor: str) -> bool:
+    return len(valor) == 64 and all(caractere in "0123456789abcdef" for caractere in valor)
+
+
+def baixa_checkpoint(
+    url: str,
+    destino: Path,
+    sha256: str,
+    *,
+    baixar: Callable[[str, Path], None] | None = None,
+) -> None:
+    """Baixa o `.pth` e confere o sha256 antes de qualquer load.
+
+    O arquivo é pickle. Sem esta conferência, o mmdeploy executa o que estiver
+    dentro. Hash errado apaga o arquivo e aborta — não segue para o torch.
+    """
+    if not _sha256_completo(sha256):
+        raise ExportaError(f"sha256 do checkpoint não é 64 hex, recebi {sha256!r}")
+    if destino.is_file():
+        if sha256_arquivo(destino) == sha256:
+            print(f"==> checkpoint já está em {destino}", flush=True)
+            return
+        destino.unlink()
+        raise ExportaError(
+            f"checkpoint em {destino.name} não bate com o sha256 oficial "
+            f"(esperava {sha256}). Apaguei o arquivo; rode de novo para baixar. "
+            "Um .pth é pickle: carregar sem conferir executa o que estiver dentro"
+        )
+
     destino.parent.mkdir(parents=True, exist_ok=True)
     parcial = destino.with_suffix(destino.suffix + ".parcial")
     print(f"==> baixando {url}", flush=True)
     try:
-        urllib.request.urlretrieve(url, parcial)  # noqa: S310 - URL pública, sem credencial
+        if baixar is None:
+            urllib.request.urlretrieve(url, parcial)  # noqa: S310 - URL pública, sem credencial
+        else:
+            baixar(url, parcial)
     except OSError as erro:
         parcial.unlink(missing_ok=True)
         raise ExportaError(f"download falhou: {erro}") from erro
+    if not parcial.is_file():
+        raise ExportaError(f"o download não escreveu {parcial.name}")
+    obtido = sha256_arquivo(parcial)
+    if obtido != sha256:
+        parcial.unlink(missing_ok=True)
+        destino.unlink(missing_ok=True)
+        raise ExportaError(
+            f"sha256 de {destino.name} não bate (esperava {sha256}, veio {obtido}). "
+            "Apaguei o arquivo. Um .pth é pickle e não pode ser carregado assim"
+        )
     parcial.replace(destino)
 
 
@@ -312,7 +383,7 @@ def executar(plano: Plano) -> None:
     _clone(MMPOSE_GIT, MMPOSE_REF, plano.cache / "mmpose")
     _clone(MMDEPLOY_GIT, MMDEPLOY_REF, plano.cache / "mmdeploy")
     checkpoint = plano.cache / "checkpoints" / nome_do_url(plano.checkpoint_url)
-    _baixa(plano.checkpoint_url, checkpoint)
+    baixa_checkpoint(plano.checkpoint_url, checkpoint, plano.sha256)
     imagem = plano.cache / "amostra.bmp"
     escreve_bmp(imagem)
 

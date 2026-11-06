@@ -120,7 +120,7 @@ class OnnxDetector:
 
         self._options = options
         self._spec = spec
-        self._session = (session_factory or _abre_sessao)(model_path, options.providers)
+        self._session = (session_factory or abre_sessao)(model_path, options.providers)
 
         entradas = self._session.get_inputs()
         if len(entradas) != 1:
@@ -202,8 +202,10 @@ class OnnxDetector:
         self._session = None
 
 
-def _abre_sessao(model_path: Path, providers: tuple[str, ...]):
-    """Import adiado de propósito.
+def abre_sessao(model_path: Path, providers: tuple[str, ...]):
+    """Abre a sessão do ONNX Runtime. O detector e a pose usam esta função.
+
+    Import adiado de propósito.
 
     `onnxruntime` leva perto de um segundo para importar e reserva arenas de memória na
     subida. Um agente com a detecção desligada (§3.9: máquina sem GPU, box de
