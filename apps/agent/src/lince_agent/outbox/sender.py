@@ -41,8 +41,19 @@ from lince_agent.outbox.policy import (
 )
 from lince_agent.outbox.state import ClipState, ItemKind, QueueItem, SenderStats
 from lince_agent.outbox.store import OutboxStore
+from lince_agent.redact import redige_texto
 
 log = logging.getLogger(__name__)
+
+
+def _motivo(erro: Exception) -> str:
+    """O texto de uma falha de rede, pronto para log, fila e `PATCH`.
+
+    `HttpCloudClient` já entrega a mensagem redigida; esta segunda passagem é para
+    qualquer outro `CloudClient` — o Protocol não obriga ninguém a redigir, e o que
+    sai daqui vai para o `last_error` no Redis e, no fim, para a nuvem (§4.4).
+    """
+    return redige_texto(str(erro))
 
 
 class OutboxSender:
@@ -143,7 +154,7 @@ class OutboxSender:
         try:
             resposta = self._client.post_event(item.payload, event_id=item.event_id)
         except NetworkError as erro:
-            self._reagenda(item, Outcome.RETRY, agora_ms, erro=str(erro))
+            self._reagenda(item, Outcome.RETRY, agora_ms, erro=_motivo(erro))
             return
 
         desfecho = classify_response(resposta.status)
@@ -229,7 +240,7 @@ class OutboxSender:
             self._desiste_do_clipe(item, "clipe removido durante o upload")
             return
         except NetworkError as erro:
-            self._reagenda_clipe(item, Outcome.RETRY, agora_ms, erro=str(erro))
+            self._reagenda_clipe(item, Outcome.RETRY, agora_ms, erro=_motivo(erro))
             return
 
         desfecho = classify_response(resposta.status)
@@ -255,12 +266,14 @@ class OutboxSender:
             item.payload.get("clip", {}),
             status=ClipStatus.OK if upload_ok else ClipStatus.CLIP_FAILED,
             object_key=item.object_key if upload_ok else None,
-            error=None if upload_ok else item.last_error,
+            # Redigido de novo aqui, e não só na origem: `last_error` pode ter vindo de
+            # uma fila gravada por uma versão anterior do agente, e este campo sai do box.
+            error=None if upload_ok or item.last_error is None else redige_texto(item.last_error),
         )
         try:
             resposta = self._client.patch_event(item.event_id, patch)
         except NetworkError as erro:
-            self._reagenda_clipe(item, Outcome.RETRY, agora_ms, erro=str(erro))
+            self._reagenda_clipe(item, Outcome.RETRY, agora_ms, erro=_motivo(erro))
             return
 
         desfecho = classify_response(resposta.status)
