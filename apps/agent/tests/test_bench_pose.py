@@ -15,6 +15,15 @@ import numpy as np
 import pytest
 
 _CAMINHO = Path(__file__).resolve().parents[1] / "tools" / "bench_pose.py"
+# O estágio `teste` da imagem copia tests/ e não tools/. São scripts offline
+# e não vão para a loja; sem este pulo a coleta quebra com FileNotFoundError
+# e o job da imagem fica vermelho. No CI do repositório, onde tools/ existe,
+# a suíte roda.
+if not _CAMINHO.is_file():
+    pytest.skip(
+        f"{_CAMINHO} não está nesta árvore. A imagem do agente não copia tools/.",
+        allow_module_level=True,
+    )
 _SPEC = importlib.util.spec_from_file_location("bench_pose", _CAMINHO)
 assert _SPEC is not None and _SPEC.loader is not None
 bench = importlib.util.module_from_spec(_SPEC)
