@@ -28,6 +28,7 @@ from collections.abc import Callable
 
 from lince_agent.backoff import backoff_delay as _backoff_delay
 from lince_agent.config import CameraConfig, SupervisionOptions
+from lince_agent.ffmpeg.command import redige_credencial
 from lince_agent.ffmpeg.process import FfmpegIngest, IngestCallbacks, IngestProcess
 from lince_agent.ingest.state import CameraHealth, CameraStatus
 
@@ -196,7 +197,13 @@ class CameraSupervisor:
         except OSError as error:
             return f"falha ao executar o ffmpeg: {error}"
 
-        log.info("câmera %s: %s", self.camera_id, " ".join(ingest.command))
+        # O argv tem a URL real: o ffmpeg autentica com ela. O journal não pode
+        # receber a mesma string — esta linha sai a cada subida e a cada reconexão.
+        log.info(
+            "câmera %s: %s",
+            self.camera_id,
+            redige_credencial(" ".join(ingest.command)),
+        )
         try:
             return self._watch(ingest)
         finally:

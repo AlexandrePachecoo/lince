@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 
 from lince_agent.config import DecodeOptions
-from lince_agent.ffmpeg.command import build_probe_command
+from lince_agent.ffmpeg.command import build_probe_command, redige_credencial
 
 log = logging.getLogger(__name__)
 
@@ -61,24 +61,31 @@ def probe_stream(
     timeout_s: float = 20.0,
 ) -> StreamInfo:
     argv = build_probe_command(url, decode, ffprobe_bin=ffprobe_bin)
+    # O processo recebe a URL real — ela está no argv. Daqui para baixo a URL só
+    # existe para um humano ler o erro. O ffprobe ainda a repete no stderr
+    # (`rtsp://user:pass@host/cam: Connection refused`), e um `TimeoutExpired`
+    # encadeado carrega o argv inteiro no `str()`. Os dois recolocariam a senha
+    # no traceback de uma exceção que acabou de ser redigida.
+    url_segura = redige_credencial(url)
     try:
         result = subprocess.run(  # noqa: S603 - argv montado por build_probe_command
             argv, capture_output=True, text=True, timeout=timeout_s, check=False
         )
-    except subprocess.TimeoutExpired as error:
-        raise ProbeError(f"ffprobe não respondeu em {timeout_s:.0f}s para {url}") from error
+    except subprocess.TimeoutExpired:
+        raise ProbeError(f"ffprobe não respondeu em {timeout_s:.0f}s para {url_segura}") from None
     except OSError as error:
         raise ProbeError(f"não consegui executar {ffprobe_bin}: {error}") from error
 
     if result.returncode != 0:
-        raise ProbeError(f"ffprobe falhou em {url}: {result.stderr.strip()}")
+        detalhe = redige_credencial(result.stderr.strip())
+        raise ProbeError(f"ffprobe falhou em {url_segura}: {detalhe}")
 
     try:
         streams = json.loads(result.stdout).get("streams", [])
     except json.JSONDecodeError as error:
         raise ProbeError(f"saída do ffprobe não é JSON: {error}") from error
     if not streams:
-        raise ProbeError(f"nenhum stream de vídeo em {url}")
+        raise ProbeError(f"nenhum stream de vídeo em {url_segura}")
 
     stream = streams[0]
     info = StreamInfo(

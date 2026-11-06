@@ -582,7 +582,29 @@ class CameraConfig:
             raise ValueError("camera_id é obrigatório")
         if not self.url:
             raise ValueError("url é obrigatória")
+        self._valida_url()
         self._valida_regras()
+
+    def _valida_url(self) -> None:
+        """Recusa senha com `#`, `/` ou `?` cru antes de o ffmpeg ver a URL.
+
+        Esses caracteres encerram a autoridade. O processo autentica contra um
+        host que não é o da câmera, e o pedaço da senha que ficou do outro lado
+        segue para o log. A codificação é `%23`, `%2F` e `%3F`. A mensagem não
+        repete a senha: a recusa iria para o log da subida, e seria outro vazamento.
+
+        O import é tardio porque `ffmpeg.command` importa este módulo. No topo,
+        os dois ficariam esperando um pelo outro na carga.
+        """
+        from lince_agent.ffmpeg.command import credencial_tem_reservado_cru
+
+        if not credencial_tem_reservado_cru(self.url):
+            return
+        raise ValueError(
+            f"câmera {self.camera_id}: a senha da URL tem '#', '/' ou '?' cru. "
+            "O ffmpeg corta a URL nesse caractere e não autentica, e o resto da "
+            "senha vaza no log. Codifique a senha: # é %23, / é %2F, ? é %3F"
+        )
 
     def _valida_regras(self) -> None:
         """Recusa na subida a zona que nunca conteria ninguém.

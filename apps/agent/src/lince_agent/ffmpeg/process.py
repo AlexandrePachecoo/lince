@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from lince_agent.config import DecodeOptions
-from lince_agent.ffmpeg.command import build_ingest_command
+from lince_agent.ffmpeg.command import build_ingest_command, redige_credencial
 from lince_agent.ffmpeg.fmp4 import Fmp4ParseError, Fmp4Parser, Fragment, InitSegment
 from lince_agent.ffmpeg.queues import DropOldestQueue
 from lince_agent.ffmpeg.rawframe import Frame, read_exact
@@ -315,6 +315,14 @@ class FfmpegIngest:
                 text = line.decode(_STDERR_ENCODING, errors="replace").rstrip()
                 if not text:
                     continue
+                # Medido no ffmpeg 6: ao falhar a abertura, o stderr repete a URL de
+                # entrada (`Error opening input file rtsp://user:pass@host/cam.` e
+                # `rtsp://user:pass@host/cam: Connection refused`). A linha do tcp
+                # (`tcp://host:porta`) não traz a senha; estas trazem. Redigir antes
+                # do `on_log` e do log cobre os dois destinos, inclusive o debug de
+                # encerramento — um callback futuro que só repete a linha não pode
+                # reabrir o vazamento.
+                text = redige_credencial(text)
                 if self._stopping.is_set():
                     # Ao receber SIGTERM o ffmpeg reclama de cada saída que não
                     # conseguiu fechar ("Immediate exit requested"). É o encerramento
