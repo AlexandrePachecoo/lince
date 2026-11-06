@@ -18,6 +18,7 @@ Duas armadilhas do `urllib` que este módulo esconde do resto do agente:
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import urllib.error
@@ -28,6 +29,7 @@ from typing import Protocol
 from urllib.parse import urljoin
 
 from lince_agent import __version__
+from lince_agent.redact import redige_texto, redige_url
 
 log = logging.getLogger(__name__)
 
@@ -145,7 +147,7 @@ class HttpCloudClient:
             # documento inteiro a cada 30 s para sempre, e o `304` do §5.2 — que é o
             # caso comum, milhares de vezes por dia — nunca acontece.
             cabecalhos["If-None-Match"] = etag
-        requisicao = urllib.request.Request(  # noqa: S310 - base_url é configuração
+        requisicao = _requisicao(
             urljoin(self._base_url, "v1/agents/config"),
             method="GET",
             headers=cabecalhos,
@@ -155,7 +157,7 @@ class HttpCloudClient:
     def put_clip(self, url: str, path: Path, *, content_type: str = "video/mp4") -> CloudResponse:
         tamanho = path.stat().st_size
         with path.open("rb") as arquivo:
-            requisicao = urllib.request.Request(  # noqa: S310 - URL vem da própria API
+            requisicao = _requisicao(
                 url,
                 data=arquivo,
                 method="PUT",
@@ -194,7 +196,7 @@ class HttpCloudClient:
     ) -> CloudResponse:
         cabecalhos = self._cabecalhos(**{"Content-Type": _JSON, **(extra_headers or {})})
 
-        requisicao = urllib.request.Request(  # noqa: S310 - base_url é configuração
+        requisicao = _requisicao(
             url,
             data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
             method=metodo,
@@ -203,6 +205,16 @@ class HttpCloudClient:
         return self._enviar(requisicao, timeout_s=self._timeout_s)
 
     def _enviar(self, requisicao: urllib.request.Request, *, timeout_s: float) -> CloudResponse:
+        """Uma requisição e a resposta, ou `NetworkError` com a URL já redigida.
+
+        As exceções que saem daqui são **construídas dentro do `except` e levantadas
+        fora dele**. Não é estilo: levantada lá dentro, a exceção nova carregaria a
+        original em `__context__` (ou em `__cause__`, com `from`), e o traceback do
+        `log.exception` imprimiria o `str()` dela — que, num `InvalidURL` do
+        `http.client`, é a URL pré-assinada inteira. Fora do bloco não há contexto a
+        herdar. O tipo da original vai no texto, que é o que se usa para depurar.
+        """
+        falha: Exception
         try:
             with self._opener.open(requisicao, timeout=timeout_s) as resposta:
                 return CloudResponse(
@@ -226,7 +238,58 @@ class HttpCloudClient:
                     date=erro.headers.get("Date"),
                 )
         except (urllib.error.URLError, TimeoutError, OSError) as erro:
-            raise NetworkError(f"{requisicao.get_method()} {requisicao.full_url}: {erro}") from erro
+            falha = NetworkError(_descreve(requisicao, erro))
+        except (ValueError, http.client.InvalidURL) as erro:
+            # URL malformada (`unknown url type`, `InvalidURL` por caractere de controle):
+            # não é rede, e sai como `ValueError` para quem chama. Mas o `str()` do
+            # `http.client` inclui a URL com a assinatura, e este erro cai no
+            # `log.exception` do laço do sender. `InvalidURL` não herda de `ValueError`
+            # nem de `OSError`: o `urllib` o deixa passar cru.
+            falha = ValueError(_descreve(requisicao, erro))
+        except http.client.HTTPException as erro:
+            # `BadStatusLine`, `IncompleteRead`: o servidor respondeu lixo ou cortou no
+            # meio. O `urllib` também os deixa passar cru; para a política é o mesmo
+            # que não ter resposta, e o lado seguro é tentar de novo (§5.4).
+            falha = NetworkError(_descreve(requisicao, erro))
+        raise falha
+
+
+def _requisicao(url: str, **opcoes: object) -> urllib.request.Request:
+    """`urllib.request.Request`, sem a URL inteira no erro de construção.
+
+    O construtor recusa URL sem esquema com `ValueError("unknown url type: '<url>'")`
+    — a URL pré-assinada inteira, antes de qualquer socket. Mesma disciplina do
+    `_enviar`: a exceção nova é levantada fora do `except`, sem contexto encadeado.
+    """
+    falha: ValueError
+    try:
+        return urllib.request.Request(url, **opcoes)  # type: ignore[arg-type]  # noqa: S310
+    except ValueError as erro:
+        metodo = opcoes.get("method", "GET")
+        falha = ValueError(
+            f"{metodo} {redige_url(url)}: {type(erro).__name__}: "
+            f"{redige_texto(str(erro).replace(url, redige_url(url)))}"
+        )
+    raise falha
+
+
+def _descreve(requisicao: urllib.request.Request, erro: BaseException) -> str:
+    """`MÉTODO url: Tipo: mensagem`, sem segredo nenhum.
+
+    A URL passa por `redige_url` e a mensagem da biblioteca por `redige_texto`: o
+    `str()` de exceção de `urllib`/`http.client` às vezes repete a URL, e não há
+    contrato que diga quando. Isto alimenta o log, o `last_error` da fila e o campo
+    `error` do `PATCH` — que sai do box (§4.4).
+    """
+    url = redige_url(requisicao.full_url)
+    mensagem = str(erro)
+    # O `http.client` cita a URL inteira ou só o seletor (`/caminho?query`), e às vezes
+    # em `repr`. Trocar as formas cruas conhecidas pela redigida cobre o valor inteiro
+    # mesmo quando ele tem espaço — que é justamente o que produz o `InvalidURL`.
+    for bruto in (requisicao.full_url, requisicao.selector):
+        if bruto:
+            mensagem = mensagem.replace(bruto, redige_url(bruto))
+    return f"{requisicao.get_method()} {url}: {type(erro).__name__}: {redige_texto(mensagem)}"
 
 
 def _corpo_json(bruto: bytes, content_type: str | None) -> dict[str, object] | None:

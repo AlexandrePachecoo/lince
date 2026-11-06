@@ -480,7 +480,7 @@ console do MinIO em `http://localhost:9001` (credencial em `infra/.env`) ou por 
 set -a && . infra/.env && set +a
 docker run --rm --network lince-dev_default \
   -e MC_HOST_local="http://$MINIO_ROOT_USER:$MINIO_ROOT_PASSWORD@minio:9000" \
-  minio/mc ls --recursive local/"$S3_BUCKET"
+  cgr.dev/chainguard/minio-client:latest ls --recursive local/"$S3_BUCKET"
 ```
 
 Na linha `[regras]` o que se vigia são os **descartes**, não os eventos: numa loja de

@@ -13,8 +13,11 @@ resposta sob comando — o que dá o teste de timeout sem `sleep` (regra 6 do CL
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import threading
+import traceback
+import urllib.error
 
 import pytest
 from nuvem_falsa import PRAZO_S, Resposta, ServidorFalso
@@ -349,3 +352,137 @@ def test_heartbeat_sem_resposta_vira_falha_de_rede(nuvem):
 
     with pytest.raises(NetworkError):
         cliente.post_heartbeat({"schema_version": 1})
+
+
+# --- nenhum segredo de URL nas mensagens de erro ------------------------------
+
+ASSINATURA_FALSA = "deadbeef" * 8
+PRE_ASSINADA = (
+    "http://127.0.0.1:1/lince-clipes/tenant-1/2026-11-06/e1.mp4"
+    "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+    "&X-Amz-Credential=CHAVEFALSA%2F20261106%2Fauto%2Fs3%2Faws4_request"
+    "&X-Amz-Date=20261106T120000Z&X-Amz-Expires=900&X-Amz-SignedHeaders=host"
+    f"&X-Amz-Signature={ASSINATURA_FALSA}"
+)
+
+
+class OpenerQueFalha:
+    """Opener que registra a URL que recebeu e falha com a exceção dada.
+
+    É o único dublê de `urllib` desta suíte, e por um motivo: o caso que importa é a
+    biblioteca **repetir a URL no `str()` da exceção**, e não há como forçar o `urllib`
+    real a fazer isso sob comando. A porta fechada de verdade está no teste anterior.
+    """
+
+    def __init__(self, fabrica) -> None:
+        self.fabrica = fabrica
+        self.urls: list[str] = []
+
+    def open(self, requisicao, timeout=None):
+        self.urls.append(requisicao.full_url)
+        raise self.fabrica(requisicao.full_url)
+
+
+def _sem_assinatura(erro: BaseException) -> str:
+    """O texto inteiro que um `log.exception` imprimiria, causa e contexto inclusos."""
+    texto = "".join(traceback.format_exception(erro))
+    assert ASSINATURA_FALSA not in texto
+    assert "CHAVEFALSA" not in texto
+    return texto
+
+
+def _clipe(tmp_path):
+    caminho = tmp_path / "e1.mp4"
+    caminho.write_bytes(b"mp4")
+    return caminho
+
+
+def test_put_na_porta_fechada_nao_vaza_a_assinatura(tmp_path):
+    """A URL pré-assinada é a credencial de escrita no bucket. Esta mensagem vira
+    `last_error` no Redis e `error` no `PATCH`, que sai do box (§4.4). Host e caminho
+    ficam: são o que diz para onde o upload ia."""
+    cliente = HttpCloudClient("http://127.0.0.1:1/", upload_timeout_s=1.0)
+
+    with pytest.raises(NetworkError) as capturado:
+        cliente.put_clip(PRE_ASSINADA, _clipe(tmp_path))
+
+    mensagem = str(capturado.value)
+    assert "PUT http://127.0.0.1:1/lince-clipes/tenant-1/2026-11-06/e1.mp4?" in mensagem
+    assert "X-Amz-Signature=***" in mensagem
+    _sem_assinatura(capturado.value)
+
+
+def test_url_repetida_pela_biblioteca_nao_volta_pela_causa(tmp_path):
+    """Redigir só a nossa parte da mensagem não basta: se a exceção original ficar
+    encadeada, o traceback do `log.exception` a imprime inteira, com a URL que ela
+    carrega. A requisição, por outro lado, tem que sair com a URL completa — sem a
+    assinatura o bucket responde `403`."""
+    opener = OpenerQueFalha(lambda url: urllib.error.URLError(f"proxy recusou {url}"))
+    cliente = HttpCloudClient("http://api.exemplo/", opener=opener)
+
+    with pytest.raises(NetworkError) as capturado:
+        cliente.put_clip(PRE_ASSINADA, _clipe(tmp_path))
+
+    assert opener.urls == [PRE_ASSINADA], "a requisição de verdade leva a URL inteira"
+    assert capturado.value.__cause__ is None
+    assert capturado.value.__context__ is None
+    texto = _sem_assinatura(capturado.value)
+    assert "URLError: <urlopen error proxy recusou http://127.0.0.1:1/lince-clipes/" in texto
+
+
+def test_url_malformada_continua_value_error_e_sem_assinatura(tmp_path):
+    """`InvalidURL` do `http.client` põe o caminho com a query inteira no `str()`, e o
+    `urllib` o deixa passar cru — nem `URLError`, nem `OSError`. Basta um espaço na URL
+    que a API devolveu. Não é rede, então sai como `ValueError`, e cai no
+    `log.exception` do laço do sender, com traceback."""
+    cliente = HttpCloudClient("http://127.0.0.1:1/", upload_timeout_s=1.0)
+
+    with pytest.raises(ValueError, match="InvalidURL") as capturado:
+        cliente.put_clip(PRE_ASSINADA + "%20&Signature=fora do padrao", _clipe(tmp_path))
+
+    assert capturado.value.__context__ is None
+    _sem_assinatura(capturado.value)
+    # Na mensagem, não no traceback: o traceback cita a linha deste teste, que tem o
+    # valor escrito.
+    mensagem = str(capturado.value)
+    assert "fora do padrao" not in mensagem
+    assert "/lince-clipes/tenant-1/2026-11-06/e1.mp4" in mensagem
+
+
+def test_resposta_cortada_vira_falha_de_rede(tmp_path):
+    """`IncompleteRead` e `BadStatusLine` também escapam do `urllib` sem embrulho. Sem
+    isto, um proxy que corta a resposta derrubaria o envio no `log.exception` em vez
+    de entrar no backoff (§5.4) — e com a URL inteira no traceback."""
+    opener = OpenerQueFalha(lambda url: http.client.BadStatusLine(url))
+    cliente = HttpCloudClient("http://api.exemplo/", opener=opener)
+
+    with pytest.raises(NetworkError, match="BadStatusLine") as capturado:
+        cliente.put_clip(PRE_ASSINADA, _clipe(tmp_path))
+
+    _sem_assinatura(capturado.value)
+
+
+def test_falha_de_rede_na_api_nao_vaza_credencial_da_url():
+    """`--api-url` com `usuario:senha@` é o mesmo vazamento da senha RTSP, agora no
+    log do poll e do heartbeat, que repetem esta mensagem a cada 30 s."""
+    cliente = HttpCloudClient("http://agente:senha-falsa@127.0.0.1:1/", timeout_s=1.0)
+
+    with pytest.raises(NetworkError) as capturado:
+        cliente.get_config()
+
+    assert "senha-falsa" not in str(capturado.value)
+    assert "http://***@127.0.0.1:1/v1/agents/config" in str(capturado.value)
+
+
+def test_url_sem_esquema_nao_vaza_na_construcao_da_requisicao(tmp_path):
+    """`urllib.request.Request` recusa URL sem esquema já no construtor, com a URL
+    inteira no `str()` — antes de qualquer socket. Basta a API devolver uma chave de
+    objeto no lugar da URL para a assinatura cair no `log.exception` do sender."""
+    sem_esquema = PRE_ASSINADA.removeprefix("http://127.0.0.1:1")
+
+    with pytest.raises(ValueError, match="unknown url type") as capturado:
+        HttpCloudClient("http://api.exemplo/").put_clip(sem_esquema, _clipe(tmp_path))
+
+    assert capturado.value.__context__ is None
+    _sem_assinatura(capturado.value)
+    assert "PUT /lince-clipes/tenant-1/2026-11-06/e1.mp4?" in str(capturado.value)

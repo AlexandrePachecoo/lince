@@ -12,6 +12,7 @@ sistema é temporário, e "temporário" só é verificável olhando se ele sumiu
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 import pytest
@@ -579,3 +580,115 @@ def test_caminho_completo_contra_http_de_verdade(tmp_path):
         assert not m.clipes.path_for(event_id).exists()
     finally:
         nuvem.encerra()
+
+
+# --- a URL pré-assinada não sai do box --------------------------------------
+
+ASSINATURA_FALSA = "cafebabe" * 8
+CAMINHO_DO_OBJETO = "/lince-clipes/tenant-1/2026-11-06/clipe.mp4"
+URL_ASSINADA_INALCANCAVEL = (
+    f"http://127.0.0.1:1{CAMINHO_DO_OBJETO}"
+    "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+    "&X-Amz-Credential=CHAVEFALSA%2F20261106%2Fauto%2Fs3%2Faws4_request"
+    "&X-Amz-Date=20261106T120000Z&X-Amz-Expires=900&X-Amz-SignedHeaders=host"
+    f"&X-Amz-Signature={ASSINATURA_FALSA}"
+)
+
+
+def _sem_segredo(texto: str) -> None:
+    assert ASSINATURA_FALSA not in texto
+    assert "CHAVEFALSA" not in texto
+
+
+def test_upload_que_falha_nao_leva_a_assinatura_para_log_fila_nem_patch(tmp_path, caplog):
+    """A URL pré-assinada é a credencial de escrita no bucket até vencer. A mensagem de
+    erro do `PUT` vira `last_error` no Redis, linha de log e, quando o upload esgota,
+    o `error` do `PATCH` — que sai do box e vai para o banco da nuvem (§4.4).
+
+    Socket de verdade dos dois lados: a nuvem falsa aceita o evento e oferece uma URL
+    numa porta fechada, que é a falha que uma loja com o R2 inalcançável produz.
+    Host e caminho têm que continuar legíveis: é com eles que se depura o upload.
+    """
+    nuvem = ServidorFalso()
+    try:
+        nuvem.roteiro = [
+            RespostaHttp(
+                status=202,
+                corpo={"schema_version": 1, "clip_upload_url": URL_ASSINADA_INALCANCAVEL},
+            )
+        ]
+        nuvem.padrao = RespostaHttp(status=200)
+        cliente = HttpCloudClient(nuvem.url, token="tok", timeout_s=5.0, upload_timeout_s=5.0)
+        m = monta(tmp_path, cliente)
+        event_id = enfileira(m)
+
+        with caplog.at_level("DEBUG"):
+            m.sender.tick()  # POST aceito, URL de upload guardada
+            m.sender.tick()  # PUT falha na porta fechada
+
+            na_fila = m.store.get(event_id)
+            assert na_fila.upload_url == URL_ASSINADA_INALCANCAVEL, "a fila guarda a URL inteira"
+            _sem_segredo(na_fila.last_error)
+            assert f"127.0.0.1:1{CAMINHO_DO_OBJETO}" in na_fila.last_error
+            _sem_segredo(repr(na_fila))
+            _sem_segredo(m.sender.stats().last_error)
+
+            for _ in range(10):
+                m.relogio.avanca(3600)
+                m.sender.tick()
+                if any(r.metodo == "PATCH" for r in nuvem.recebidas):
+                    break
+
+        patches = [r for r in nuvem.recebidas if r.metodo == "PATCH"]
+        assert len(patches) == 1, "o upload esgotou e o clip_failed subiu"
+        clipe = json.loads(patches[0].corpo)["clip"]
+        assert clipe["status"] == "clip_failed"
+        _sem_segredo(clipe["error"])
+        assert f"127.0.0.1:1{CAMINHO_DO_OBJETO}" in clipe["error"]
+        assert "X-Amz-Signature=***" in clipe["error"]
+
+        _sem_segredo(caplog.text)
+        assert CAMINHO_DO_OBJETO in caplog.text, "o log de desistência diz para onde ia"
+    finally:
+        nuvem.encerra()
+
+
+def test_outro_cloud_client_sem_redacao_tambem_nao_vaza(tmp_path, caplog):
+    """O Protocol `CloudClient` não obriga ninguém a redigir. Um cliente novo — `httpx`
+    um dia, ou um dublê de instalação — que ponha a URL crua na exceção não pode
+    reabrir o vazamento: o sender redige de novo antes da fila e do `PATCH`."""
+    falha = NetworkError(f"PUT {URL_ASSINADA_INALCANCAVEL}: timeout")
+    m = monta(tmp_path, ClienteRoteirizado(put=[R(erro=falha)] * 3))
+    event_id = enfileira(m)
+
+    with caplog.at_level("DEBUG"):
+        m.sender.tick()
+        m.sender.tick()
+        _sem_segredo(m.store.get(event_id).last_error)
+        for _ in range(4):
+            m.relogio.avanca(3600)
+            m.sender.tick()
+
+    patch = m.cliente.corpos[-1]
+    assert patch["clip"]["status"] == "clip_failed"
+    _sem_segredo(patch["clip"]["error"])
+    assert CAMINHO_DO_OBJETO in patch["clip"]["error"]
+    _sem_segredo(caplog.text)
+
+
+def test_last_error_antigo_e_redigido_antes_do_patch(tmp_path):
+    """Uma fila gravada por uma versão anterior do agente já tem a URL crua no
+    `last_error` do Redis. A atualização não pode subi-la no `PATCH` do primeiro boot."""
+    m = monta(tmp_path)
+    event_id = enfileira(m)
+    m.sender.tick()  # POST aceito; o clipe entra na fila de upload
+    # O que a versão anterior teria gravado ao desistir do upload.
+    m.store.give_up_clip(event_id, reason=f"PUT {URL_ASSINADA_INALCANCAVEL}: timeout")
+
+    m.sender.tick()
+
+    assert m.cliente.verbos == ["POST", "PATCH"]
+    patch = m.cliente.corpos[-1]
+    assert patch["clip"]["status"] == "clip_failed"
+    _sem_segredo(patch["clip"]["error"])
+    assert CAMINHO_DO_OBJETO in patch["clip"]["error"]
