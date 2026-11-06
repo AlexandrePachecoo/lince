@@ -11,15 +11,22 @@ o que `OnnxPose` e `decode_simcc` leem. O zip `onnx_sdk` e o rtmlib não
 servem aqui: o rtmlib não exporta o grafo, só baixa um ONNX que pode trazer
 o pós-processamento, e aí a saída deixa de ser SimCC.
 
-WholeBody (133) e Halpe (26 ou 136) não estão entre as variantes. O body8
-deste script é o COCO-17 do metafile `rtmpose_body8-coco`: o arquivo oficial
-se chama `body7` porque foi assim que o OpenMMLab publicou, e a cabeça tem
-17 canais. Não é o `body8-halpe26`.
+WholeBody (133) e Halpe (26 ou 136) não estão entre as variantes. O padrão
+é o body8, o COCO-17 do metafile `rtmpose_body8-coco`: o arquivo oficial se
+chama `body7` porque foi assim que o OpenMMLab publicou, e a cabeça tem 17
+canais. Não é o `body8-halpe26`. O sha256 dele começa com `acd4a1ef`, que é
+o prefixo do nome — a convenção do OpenMMLab.
+
+O coco (`…-8edcf0d7_…`) fica bloqueado. Nesse catálogo o prefixo do nome é o
+início do sha256, e o arquivo publicado não começa com `8edcf0d7`. Sem essa
+coincidência não dá para confiar no pickle. Ele só segue com
+`--aceita-coco-nao-verificado` e com o sha256 que quem chama conferiu,
+passado em `--sha256`. Esse hash não fica gravado aqui.
 
 Torch de CPU chega para exportar. A GPU do fundador entra no benchmark, pelo
 ONNX Runtime, não neste venv.
 
-    python tools/exporta_rtmpose.py --destino ~/lince-modelos/rtmpose-s.onnx
+    python tools/exporta_rtmpose.py --destino ~/lince-modelos/rtmpose-s.onnx --variante body8
     python tools/exporta_rtmpose.py --destino D:\\lince-modelos\\rtmpose-s.onnx --variante body8
     python tools/exporta_rtmpose.py --destino ~/lince-modelos/rtmpose-s.onnx --dry-run
 """
@@ -75,14 +82,16 @@ class Variante:
 
     config_relativa: str
     checkpoint_url: str
-    sha256: str
+    sha256: str | None
+    """Hash conferido do `.pth`. `None` no coco: o prefixo do nome não é o
+    início do sha256 do arquivo publicado, e um hash medido daqui não entra
+    como se fosse confiável."""
 
 
-# Medidos no arquivo publicado em download.openmmlab.com. O body8 segue a
-# convenção do OpenMMLab: o token do nome é sha256[:8] (acd4a1ef). O coco de
-# 2023-01-27 traz 8edcf0d7 no nome e o sha256 do arquivo nesse URL é outro
-# (29dcacbb…); os dois tokens continuam no nome para não baixar o arquivo
-# vizinho, e o que vale na conferência é o hash completo.
+VARIANTE_PADRAO = "body8"
+
+# O body8 tem sha256 conferido: o token do nome é sha256[:8]. O coco não tem
+# hash neste dicionário. Quem insistir passa `--sha256` na linha de comando.
 VARIANTES: dict[str, Variante] = {
     "coco": Variante(
         config_relativa=(
@@ -92,7 +101,7 @@ VARIANTES: dict[str, Variante] = {
             "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/"
             "rtmpose-s_simcc-coco_pt-aic-coco_420e-256x192-8edcf0d7_20230127.pth"
         ),
-        sha256="29dcacbb5c5f3ab2f03a67fedcb58cf7287f93b9a8a9d893f42416b63fc304ba",
+        sha256=None,
     ),
     "body8": Variante(
         config_relativa=(
@@ -201,7 +210,7 @@ def recusa_nome(nome: str, o_que: str) -> None:
         raise ExportaError(
             f"{o_que} '{Path(nome).name}' não é o RTMPose-s COCO-17 do piloto "
             f"('{marca.group(0)}'). WholeBody, Halpe e Ultralytics ficam de fora. "
-            "As variantes são coco e body8, as duas com 17 juntas"
+            "A variante do piloto é body8, 17 juntas. O coco fica bloqueado"
         )
 
 
@@ -246,20 +255,71 @@ def escreve_bmp(caminho: Path, largura: int = 64, altura: int = 64) -> None:
     caminho.write_bytes(cabecalho + info + pixels)
 
 
+def _normaliza_sha256(valor: str | None) -> str | None:
+    if valor is None:
+        return None
+    texto = valor.strip().lower()
+    if not _sha256_completo(texto):
+        raise ExportaError(
+            f"--sha256 tem que ser 64 hex, recebi {valor!r}. "
+            "É o hash do .pth inteiro, conferido por quem chama"
+        )
+    return texto
+
+
+def recusa_coco_nao_verificado(*, aceita: bool, sha256: str | None) -> str:
+    """O coco só segue com a flag e com um sha256 que não está neste arquivo.
+
+    No OpenMMLab o prefixo do nome é o início do sha256. O arquivo
+    `…-8edcf0d7_…` publicado não começa com esse prefixo, então o pickle não
+    é confiável. O hash que libera o download vem de `--sha256`, não daqui.
+    """
+    if not aceita or sha256 is None:
+        raise ExportaError(
+            "a variante coco está bloqueada. O nome do checkpoint traz 8edcf0d7, "
+            "e no OpenMMLab esse prefixo é o início do sha256 — o arquivo publicado "
+            "nesse URL não começa com 8edcf0d7. Sem essa coincidência o .pth, que é "
+            "pickle, não é confiável. O padrão é --variante body8. Para seguir mesmo "
+            "assim, passe --aceita-coco-nao-verificado e --sha256 com o hash que você "
+            "conferiu; ele não fica gravado neste script"
+        )
+    return sha256
+
+
 def montar_plano(
     *,
     destino: Path,
-    variante: str = "coco",
+    variante: str = VARIANTE_PADRAO,
     cache: Path | None = None,
     venv: Path | None = None,
     forcar: bool = False,
+    aceita_coco_nao_verificado: bool = False,
+    sha256: str | None = None,
 ) -> Plano:
     if variante not in VARIANTES:
         raise ExportaError(
-            f"variante {variante!r} não é coco nem body8. "
+            f"variante {variante!r} não é body8 nem coco. "
             "WholeBody e Halpe não são opção: outra contagem de juntas"
         )
     escolhida = VARIANTES[variante]
+    sha256 = _normaliza_sha256(sha256)
+    if variante == "coco":
+        sha256_efetivo = recusa_coco_nao_verificado(
+            aceita=aceita_coco_nao_verificado, sha256=sha256
+        )
+    else:
+        if escolhida.sha256 is None or not escolhida.sha256.startswith(
+            token_do_checkpoint(escolhida.checkpoint_url)
+        ):
+            raise ExportaError(
+                f"a variante {variante} não tem sha256 conferido contra o prefixo do nome"
+            )
+        if sha256 is not None and sha256 != escolhida.sha256:
+            raise ExportaError(
+                f"a variante {variante} já tem sha256 conferido ({escolhida.sha256}). "
+                "Não substitua por --sha256"
+            )
+        sha256_efetivo = escolhida.sha256
     destino = destino.expanduser()
     if destino.suffix.lower() != ".onnx":
         raise ExportaError(f"o destino tem que ser um .onnx, recebi {destino.name}")
@@ -283,7 +343,7 @@ def montar_plano(
         variante=variante,
         config_relativa=escolhida.config_relativa,
         checkpoint_url=escolhida.checkpoint_url,
-        sha256=escolhida.sha256,
+        sha256=sha256_efetivo,
         forcar=forcar,
     )
 
@@ -447,7 +507,7 @@ def _analisa(argv: list[str]) -> argparse.Namespace:
     analise.add_argument(
         "--destino", type=Path, required=True, help="caminho do .onnx, fora do git"
     )
-    analise.add_argument("--variante", choices=tuple(VARIANTES), default="coco")
+    analise.add_argument("--variante", choices=tuple(VARIANTES), default=VARIANTE_PADRAO)
     analise.add_argument(
         "--cache", type=Path, default=None, help="clones e checkpoint; fora do git"
     )
@@ -458,6 +518,16 @@ def _analisa(argv: list[str]) -> argparse.Namespace:
         "--forcar", action="store_true", help="exporta de novo mesmo se o destino existir"
     )
     analise.add_argument("--dry-run", action="store_true", help="mostra o plano e não baixa nada")
+    analise.add_argument(
+        "--aceita-coco-nao-verificado",
+        action="store_true",
+        help="libera a variante coco, cujo prefixo do nome não é o sha256 do arquivo",
+    )
+    analise.add_argument(
+        "--sha256",
+        default=None,
+        help="sha256 completo do .pth; obrigatório junto com --aceita-coco-nao-verificado",
+    )
     return analise.parse_args(argv)
 
 
@@ -470,6 +540,8 @@ def main(argv: list[str] | None = None) -> int:
             cache=args.cache,
             venv=args.venv,
             forcar=args.forcar,
+            aceita_coco_nao_verificado=args.aceita_coco_nao_verificado,
+            sha256=args.sha256,
         )
         if args.dry_run:
             print(plano.texto())

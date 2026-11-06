@@ -4,11 +4,16 @@ O agente não carrega torch, mmpose nem rtmlib. O `.onnx` também não entra no
 git. Estes dois scripts rodam na máquina do fundador, com o arquivo fora do
 repositório (`~/lince-modelos` no Linux, `D:\lince-modelos` no Windows).
 
-Os dois checkpoints aceitos são Apache-2.0 e têm **17 juntas COCO**:
+O checkpoint do export é Apache-2.0 e tem **17 juntas COCO**:
 
-- `coco` — `rtmpose-s_8xb256-420e_coco-256x192`
-- `body8` — o COCO-17 do metafile `rtmpose_body8-coco` (o arquivo publicado se
-  chama `body7`; não é o `body8-halpe26`)
+- `body8` (o padrão) — o COCO-17 do metafile `rtmpose_body8-coco`. O arquivo
+  publicado se chama `body7`; o sha256 começa com `acd4a1ef`, o prefixo do
+  nome. Não é o `body8-halpe26`.
+
+A variante `coco` (`…-8edcf0d7_…`) fica bloqueada. No OpenMMLab esse prefixo
+é o início do sha256, e o arquivo publicado não começa com `8edcf0d7`. O
+script só segue com `--aceita-coco-nao-verificado` e `--sha256` do arquivo
+que você conferiu. Esse hash não fica gravado no repositório.
 
 WholeBody e Halpe são recusados pelo nome. Ultralytics também.
 
@@ -25,7 +30,7 @@ Linux:
 ```bash
 python3 apps/agent/tools/exporta_rtmpose.py \
   --destino "$HOME/lince-modelos/rtmpose-s.onnx" \
-  --variante coco
+  --variante body8
 ```
 
 Windows (PowerShell):
@@ -33,12 +38,12 @@ Windows (PowerShell):
 ```powershell
 py -3.12 apps\agent\tools\exporta_rtmpose.py `
   --destino D:\lince-modelos\rtmpose-s.onnx `
-  --variante coco
+  --variante body8
 ```
 
-`--dry-run` mostra o plano e não baixa nada. `--variante body8` troca o
-checkpoint. O YOLOX do detector continua sendo o de `bash scripts/modelo.sh`
-(no Windows, o mesmo URL do script, com `curl`).
+`--dry-run` mostra o plano e não baixa nada. O YOLOX do detector continua
+sendo o de `bash scripts/modelo.sh` (no Windows, o mesmo URL do script, com
+`curl`).
 
 ## Benchmark na GPU
 
