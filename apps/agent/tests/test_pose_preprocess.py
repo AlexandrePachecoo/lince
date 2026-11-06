@@ -24,6 +24,7 @@ from lince_agent.pose.preprocess import (
     PreprocessSpec,
     crop_bbox,
     frame_to_bgr,
+    plano_crop,
     to_crop,
     undo_crop,
 )
@@ -94,6 +95,14 @@ def test_caixa_de_referencia_tem_padding_e_razao_do_rtmpose():
     assert recorte.scale_w / recorte.scale_h == pytest.approx(INPUT_LARGURA / INPUT_ALTURA)
     assert (recorte.input_width, recorte.input_height) == (INPUT_LARGURA, INPUT_ALTURA)
     assert (recorte.source_width, recorte.source_height) == (LARGURA, ALTURA)
+
+
+def test_plano_do_recorte_e_o_mesmo_crop_do_tensor():
+    """O benchmark mede `cv2.warpAffine` em cima de `plano_crop`. Se o centro
+    divergir do que `crop_bbox` usou, a curva do OpenCV deixa de ser a
+    alternativa do recorte NumPy — e a mais rápida parece ganhar."""
+    _, recorte = crop_bbox(imagem(), CAIXA)
+    assert plano_crop(imagem(), CAIXA) == recorte
 
 
 @pytest.mark.parametrize(

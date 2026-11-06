@@ -120,7 +120,7 @@ class OnnxDetector:
 
         self._options = options
         self._spec = spec
-        self._session = (session_factory or _abre_sessao)(model_path, options.providers)
+        self._session = (session_factory or abre_sessao)(model_path, options.providers)
 
         entradas = self._session.get_inputs()
         if len(entradas) != 1:
@@ -202,8 +202,21 @@ class OnnxDetector:
         self._session = None
 
 
-def _abre_sessao(model_path: Path, providers: tuple[str, ...]):
-    """Import adiado de propósito.
+def abre_sessao(model_path: Path, providers: tuple[str, ...]):
+    """Abre a sessão do ONNX Runtime. O detector e a pose usam esta função.
+
+    Há duas listas, e confundir as duas é o que esconde a queda para CPU (§10.10):
+
+    - `get_available_providers` é o que o pacote **compilou**. No
+      `onnxruntime-gpu` o `CUDAExecutionProvider` entra aí mesmo sem
+      `libcuda.so.1` — essa biblioteca é do driver e vem do host.
+    - `InferenceSession.get_providers` é o que a sessão **inicializou**. Sem a
+      `libcuda`, o runtime aceita CUDA na lista, não carrega, e devolve CPU.
+      Quem chama lê esta segunda lista e avisa quando ela não é o primeiro
+      pedido. Tirar o CUDA daqui, porque ele só estava anunciado, apagaria
+      exatamente esse aviso.
+
+    Import adiado de propósito.
 
     `onnxruntime` leva perto de um segundo para importar e reserva arenas de memória na
     subida. Um agente com a detecção desligada (§3.9: máquina sem GPU, box de
@@ -212,6 +225,8 @@ def _abre_sessao(model_path: Path, providers: tuple[str, ...]):
     """
     import onnxruntime as ort
 
+    # Interseção com o pacote, não com o que a placa consegue carregar. O que
+    # carregou só existe depois do `InferenceSession`.
     disponiveis = set(ort.get_available_providers())
     pedidos = [provider for provider in providers if provider in disponiveis]
     if not pedidos:
