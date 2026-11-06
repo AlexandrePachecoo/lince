@@ -104,8 +104,10 @@ services:
   # seria um jeito bobo de perder uma tarde.
   #
   # Mesma origem e mesma regra de digest da imagem do servidor, pelo mesmo motivo
-  # (`minio/mc` também sumiu do Docker Hub). A imagem tem `/bin/sh`, que o `entrypoint`
-  # abaixo usa.
+  # (`minio/mc` também sumiu do Docker Hub). Esta imagem **não tem `sh`**, só
+  # `/usr/bin/bash` (com `/bin` apontando para `/usr/bin`): é por isso que o
+  # `entrypoint` chama `bash`, e um `sh` aqui falha na criação do container com
+  # `stat /bin/sh: no such file or directory`.
   minio-buckets:
     image: cgr.dev/chainguard/minio-client:latest@sha256:ac75abc3947742b7d5d11e145eb0759c5b59ae697956fda325e91f6fd742b005
     container_name: lince-minio-buckets
@@ -118,7 +120,7 @@ services:
       S3_BUCKET: ${S3_BUCKET:-lince-clipes}
       TEST_S3_BUCKET: ${TEST_S3_BUCKET:-lince-clipes-teste}
     entrypoint: >
-      /bin/sh -c "
+      /bin/bash -c "
       mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
       mc mb --ignore-existing local/$${S3_BUCKET} &&
       mc mb --ignore-existing local/$${TEST_S3_BUCKET}
