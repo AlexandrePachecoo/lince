@@ -11,7 +11,7 @@
 # (`uv run pytest -m redis`), que usam o banco 15 e prefixo próprio por teste. Não é
 # o Redis do box — é o mesmo software cumprindo dois papéis em desenvolvimento.
 #
-# O MinIO faz o papel do Cloudflare R2 (§4.4) em desenvolvimento: é a mesma API S3,
+# O RustFS faz o papel do Cloudflare R2 (§4.4) em desenvolvimento: é a mesma API S3,
 # então a URL pré-assinada que a API emite e o `PUT` que o agente faz nela são o
 # mesmo código dos dois lados — o que muda é só o endpoint. Vale a pena rodar um
 # container a mais por isso: o caminho do clipe é onde moram as armadilhas já pagas
@@ -57,23 +57,31 @@ services:
       retries: 12
 
   # Papel do Cloudflare R2 (§4.4) em desenvolvimento. Path-style (`/bucket/chave`) é
-  # o que o MinIO fala e o que o R2 também aceita, então o mesmo assinador serve aos
-  # dois sem um caso especial por ambiente.
-  minio:
-    image: minio/minio:latest
-    container_name: lince-minio
+  # o que o RustFS fala sem `RUSTFS_SERVER_DOMAINS` e o que o R2 também aceita, então o
+  # mesmo assinador serve aos dois sem um caso especial por ambiente.
+  #
+  # Até 2026-09 isto era `minio/minio:latest`. A MinIO tirou `minio/minio` e `minio/mc`
+  # do Docker Hub e fechou o pull anônimo no quay.io, e o CI passou a cair aqui antes do
+  # primeiro teste. RustFS é Apache-2.0, publica release no Docker Hub e fala a mesma
+  # API S3 com o mesmo desenho de portas (9000 S3, 9001 console). A versão é fixa pelo
+  # mesmo motivo do box (§3.8): `latest` foi o que quebrou o CI sem commit nenhum.
+  s3:
+    image: rustfs/rustfs:1.0.4
+    container_name: lince-s3
     restart: unless-stopped
-    command: ["server", "/data", "--console-address", ":9001"]
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-lince}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?defina MINIO_ROOT_PASSWORD em infra/.env}
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+      RUSTFS_ACCESS_KEY: ${S3_ROOT_USER:-lince}
+      RUSTFS_SECRET_KEY: ${S3_ROOT_PASSWORD:?defina S3_ROOT_PASSWORD em infra/.env}
     ports:
-      - "${MINIO_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      - "${S3_PORT:-9000}:9000"
+      - "${S3_CONSOLE_PORT:-9001}:9001"
     volumes:
-      - miniodata:/data
+      - s3data:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
       interval: 5s
       timeout: 5s
       retries: 12
@@ -86,25 +94,32 @@ services:
   # Dois buckets pelo mesmo motivo do schema `lince_test` do Postgres: a suíte da API
   # apaga o que cria, e apagar por engano os clipes que o dev estava olhando na mão
   # seria um jeito bobo de perder uma tarde.
-  minio-buckets:
-    image: minio/mc:latest
-    container_name: lince-minio-buckets
+  #
+  # O cliente é a AWS CLI oficial, e não o cliente de um servidor específico: ela fala
+  # S3 com qualquer um, então a próxima troca de servidor não arrasta esta etapa junto.
+  # `head-bucket || mb` faz o papel do `--ignore-existing` que o `aws s3 mb` não tem —
+  # sem ele, o segundo `pnpm infra:up` falharia com BucketAlreadyOwnedByYou.
+  s3-buckets:
+    image: amazon/aws-cli:2.39.5
+    container_name: lince-s3-buckets
     depends_on:
-      minio:
+      s3:
         condition: service_healthy
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-lince}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?defina MINIO_ROOT_PASSWORD em infra/.env}
+      AWS_ACCESS_KEY_ID: ${S3_ROOT_USER:-lince}
+      AWS_SECRET_ACCESS_KEY: ${S3_ROOT_PASSWORD:?defina S3_ROOT_PASSWORD em infra/.env}
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://s3:9000
       S3_BUCKET: ${S3_BUCKET:-lince-clipes}
       TEST_S3_BUCKET: ${TEST_S3_BUCKET:-lince-clipes-teste}
     entrypoint: >
       /bin/sh -c "
-      mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
-      mc mb --ignore-existing local/$${S3_BUCKET} &&
-      mc mb --ignore-existing local/$${TEST_S3_BUCKET}
+      for b in $${S3_BUCKET} $${TEST_S3_BUCKET}; do
+      aws s3api head-bucket --bucket $$b 2>/dev/null || aws s3 mb s3://$$b || exit 1;
+      done
       "
 
 volumes:
   pgdata:
   redisdata:
-  miniodata:
+  s3data:

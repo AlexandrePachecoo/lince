@@ -7,7 +7,7 @@
 #   docker compose logs -f agente
 #
 # Não confundir com infra/docker-compose.yml, que é a infraestrutura de
-# DESENVOLVIMENTO do control plane (Postgres, MinIO). Os dois têm um Redis, e são
+# DESENVOLVIMENTO do control plane (Postgres, S3). Os dois têm um Redis, e são
 # Redis diferentes: aquele é do BullMQ da nuvem; este é a fila do ADR-004, e nunca sai
 # da loja.
 #

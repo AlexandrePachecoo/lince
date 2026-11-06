@@ -336,7 +336,7 @@ projeto. O agente valida o payload real contra o schema em
 ## Comandos
 
 ```bash
-pnpm infra:up                 # Postgres, Redis e MinIO (papel do R2 em desenvolvimento)
+pnpm infra:up                 # Postgres, Redis e RustFS (S3; papel do R2 em desenvolvimento)
 bash scripts/modelo.sh        # modelo .onnx e vídeo com pessoas (fora do git)
 pnpm rtsp:up                  # câmeras RTSP sintéticas (MediaMTX)
 
@@ -385,7 +385,7 @@ cp .env.example .env           # senha já bate com infra/.env por padrão
 pnpm install
 pnpm migrate                   # aplica prisma/migrations contra DATABASE_URL
 DATABASE_URL=$TEST_DATABASE_URL pnpm exec prisma migrate deploy   # só na 1ª vez, schema de teste
-pnpm test                      # Postgres e MinIO reais (TEST_*), nada mockado
+pnpm test                      # Postgres e S3 (RustFS) reais (TEST_*), nada mockado
 pnpm lint
 pnpm seed                      # tenant/loja/agente/câmeras de dev, espelha config.exemplo.json
 pnpm dev                       # sobe em :3000
@@ -474,13 +474,15 @@ ele aparece. E `clip_state` não é `clip.status`: o primeiro é o desfecho do *
 segundo o do **corte** na borda.
 
 O que aterrissou no bucket, para conferir na mão o que a linha `[fila]` afirma — pelo
-console do MinIO em `http://localhost:9001` (credencial em `infra/.env`) ou por `mc`:
+console do RustFS em `http://localhost:9001/rustfs/console/` (credencial em `infra/.env`)
+ou pela AWS CLI, a mesma imagem que cria os buckets:
 
 ```bash
 set -a && . infra/.env && set +a
 docker run --rm --network lince-dev_default \
-  -e MC_HOST_local="http://$MINIO_ROOT_USER:$MINIO_ROOT_PASSWORD@minio:9000" \
-  minio/mc ls --recursive local/"$S3_BUCKET"
+  -e AWS_ACCESS_KEY_ID="$S3_ROOT_USER" -e AWS_SECRET_ACCESS_KEY="$S3_ROOT_PASSWORD" \
+  -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ENDPOINT_URL=http://s3:9000 \
+  amazon/aws-cli:2.39.5 s3 ls --recursive s3://"$S3_BUCKET"
 ```
 
 Na linha `[regras]` o que se vigia são os **descartes**, não os eventos: numa loja de
@@ -684,3 +686,10 @@ Não reintroduza nenhuma destas — cada uma custou depuração e tem teste guar
 - **Ordenar a triagem vigente por `criadoEm` é cara ou coroa.** Duas decisões no mesmo
   milissegundo empatam, e "a última" passa a depender de como o Postgres devolveu a
   linha. Por isso existe `Triagem.seq`: a sequência não empata.
+- **Imagem `latest` de terceiro quebra o CI sem commit nenhum.** Foi o que aconteceu
+  quando `minio/minio` e `minio/mc` sumiram do Docker Hub: o job da API passou a cair no
+  `pull` antes do primeiro teste, na `main` e em todo PR. Toda imagem de
+  `infra/docker-compose.yml` tem versão fixa; o S3 local hoje é `rustfs/rustfs` e os
+  buckets são criados pela `amazon/aws-cli`, que fala com qualquer S3. O passo do CI usa
+  `--exit-code-from s3-buckets`: sem ele, um bucket que não foi criado não derruba o
+  passo, e o sintoma volta a ser o `404` no `PUT`.

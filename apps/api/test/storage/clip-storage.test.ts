@@ -3,9 +3,9 @@ import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { ArmazenamentoClipes } from "../../src/storage/clip-storage.js";
 import { configArmazenamentoTeste } from "../helpers/build-app.js";
-import { apagaObjeto, urlCrua } from "../helpers/minio.js";
+import { apagaObjeto, urlCrua } from "../helpers/s3.js";
 
-// MinIO real (infra/docker-compose.yml), não um stub de assinatura. O que importa aqui
+// S3 real (infra/docker-compose.yml), não um stub de assinatura. O que importa aqui
 // não é o formato da URL -- é o bucket aceitar. Uma assinatura impecável contra um
 // escopo errado é indistinguível de uma correta até alguém tentar o PUT.
 

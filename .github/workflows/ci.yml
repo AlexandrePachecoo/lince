@@ -82,17 +82,17 @@ jobs:
       # A infra de teste é o MESMO docker-compose que o dev sobe com `pnpm infra:up`.
       # Declarar `services:` no workflow duplicaria a definição do ambiente, e a cópia
       # do CI é a que ninguém percebe que ficou para trás.
-      - name: infra (Postgres + MinIO)
+      - name: infra (Postgres + S3)
         working-directory: .
         env:
           SENHA_CI: senha-de-ci-nao-secreta
         run: |
           sed "s/troque-esta-senha/$SENHA_CI/g" infra/.env.example > infra/.env
-          docker compose -f infra/docker-compose.yml up -d --wait postgres redis minio
+          docker compose -f infra/docker-compose.yml up -d --wait postgres redis s3
           # Serviço de uma tacada só: cria os buckets e sai. Em primeiro plano, porque
           # o que interessa é ele ter terminado antes do primeiro teste — URL assinada
           # contra bucket inexistente é 404 no PUT, e parece erro de credencial.
-          docker compose -f infra/docker-compose.yml up minio-buckets
+          docker compose -f infra/docker-compose.yml up --exit-code-from s3-buckets s3-buckets
 
       - name: .env da API
         env:
@@ -143,7 +143,7 @@ jobs:
       - name: biome
         run: pnpm lint
 
-      # Sem Postgres nem MinIO: a rede é fingida na suíte do front, então este job não
+      # Sem Postgres nem S3: a rede é fingida na suíte do front, então este job não
       # espera infra nenhuma subir. O que ele guarda de verdade é o teste de contrato,
       # que valida as fixturas contra os schemas de packages/shared -- é ele que impede
       # os tipos escritos à mão em src/api/tipos.ts de divergirem da API em silêncio.

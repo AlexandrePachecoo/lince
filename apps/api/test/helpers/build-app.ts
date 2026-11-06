@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { buildApp } from "../../src/server.js";
 import type { ConfigArmazenamento } from "../../src/storage/clip-storage.js";
 
-// Monta o app real (server.ts + plugin do Prisma real + MinIO real) contra
+// Monta o app real (server.ts + plugin do Prisma real + S3 real) contra
 // TEST_DATABASE_URL e TEST_S3_BUCKET -- nenhum mock: os testes de rota batem no mesmo
 // caminho de código que produção, só apontado para o schema e o bucket de teste (ver
 // test/helpers/test-db.ts e infra/docker-compose.yml).
@@ -12,7 +12,7 @@ export function configArmazenamentoTeste(): ConfigArmazenamento {
   if (!bucket) {
     throw new Error(
       "TEST_S3_BUCKET não definida -- copie apps/api/.env.example para .env e rode " +
-        "`pnpm infra:up`, que cria os buckets no MinIO.",
+        "`pnpm infra:up`, que cria os buckets no S3 local.",
     );
   }
   return {

@@ -3,10 +3,10 @@ import { randomUUID } from "node:crypto";
 import { after, before, beforeEach, test } from "node:test";
 import type { FastifyInstance } from "fastify";
 import { buildTestApp } from "../helpers/build-app.js";
-import { apagaObjeto, leObjeto } from "../helpers/minio.js";
+import { apagaObjeto, leObjeto } from "../helpers/s3.js";
 import { type LojaSemeada, limpaBanco, prismaTeste, semeiaLoja } from "../helpers/test-db.js";
 
-// O caminho inteiro do §5.2, com Postgres e MinIO de verdade:
+// O caminho inteiro do §5.2, com Postgres e S3 de verdade:
 //
 //   POST /v1/events  ->  PUT na URL pré-assinada  ->  PATCH /v1/events/{id}
 //

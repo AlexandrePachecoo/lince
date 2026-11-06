@@ -7,9 +7,10 @@ import { AwsClient } from "aws4fetch";
 // `aws4fetch` em vez do SDK da AWS pelo mesmo motivo que o agente usa `urllib` em vez
 // de `httpx`: o que se precisa aqui é assinar uma URL, e o SDK traz um cliente S3
 // inteiro -- retry, paginação, streaming de multipart -- para isso. Assinar é a única
-// operação, é SigV4 puro, e o teste contra o MinIO cobre o resultado de ponta a ponta.
+// operação, é SigV4 puro, e o teste contra o S3 local (RustFS) cobre o resultado de
+// ponta a ponta.
 //
-// Path-style (`{endpoint}/{bucket}/{chave}`) serve ao R2 e ao MinIO, então não há um
+// Path-style (`{endpoint}/{bucket}/{chave}`) serve ao R2 e ao RustFS, então não há um
 // caso especial por ambiente: o que muda entre desenvolvimento e produção é só o
 // endpoint e a credencial.
 

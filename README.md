@@ -41,7 +41,7 @@ apps/api/          API Fastify + Prisma (control plane)
 apps/dashboard/    Dashboard React PWA (triagem no celular)
 apps/agent/        Agente da borda em Python (YOLO, ByteTrack, ffmpeg)
 packages/shared/   Contrato agente ↔ nuvem em JSON Schema (§5 da arquitetura)
-infra/             docker-compose de desenvolvimento (Postgres + Redis + MinIO)
+infra/             docker-compose de desenvolvimento (Postgres + Redis + RustFS, o S3 local)
 infra/box/         docker-compose do box da loja (agente + Redis local, §3.8)
 docs/              Arquitetura e ADRs
 ```
@@ -53,7 +53,7 @@ Pré-requisitos: Node 24, pnpm, Python 3.12 e Docker. Já com eles instalados:
 ```bash
 bash scripts/setup.sh              # instala ffmpeg e uv; cria infra/.env
 $EDITOR infra/.env                 # troque POSTGRES_PASSWORD (em dois lugares)
-pnpm infra:up                      # sobe Postgres, Redis e MinIO
+pnpm infra:up                      # sobe Postgres, Redis e RustFS (S3)
 pnpm infra:ps                      # ambos devem aparecer como healthy
 ```
 

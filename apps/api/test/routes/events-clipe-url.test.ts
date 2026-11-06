@@ -4,7 +4,7 @@ import { after, before, beforeEach, test } from "node:test";
 import type { FastifyInstance } from "fastify";
 import { emiteToken } from "../../src/auth/jwt.js";
 import { SEGREDO_TESTE, buildTestApp } from "../helpers/build-app.js";
-import { apagaObjeto, urlCrua } from "../helpers/minio.js";
+import { apagaObjeto, urlCrua } from "../helpers/s3.js";
 import {
   type LojaSemeada,
   type UsuarioSemeado,
@@ -14,7 +14,7 @@ import {
   semeiaUsuario,
 } from "../helpers/test-db.js";
 
-// A leitura do clipe pelo dashboard, com MinIO de verdade. Vale o caminho completo
+// A leitura do clipe pelo dashboard, com S3 de verdade. Vale o caminho completo
 // (POST -> PUT -> PATCH -> GET clip-url -> GET no bucket) porque o que se quer provar
 // aqui é que a URL emitida **lê os bytes que o agente subiu** -- uma URL bem formada
 // contra a chave errada é indistinguível de uma certa até alguém tentar assistir.
