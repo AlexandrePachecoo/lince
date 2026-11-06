@@ -109,27 +109,51 @@ def test_modelo_ausente_e_recusado(tmp_path: Path):
 
 
 @pytest.mark.parametrize(
-    "nome",
+    ("nome", "recusado"),
     [
-        "yolov8n.onnx",
-        "YOLOv8s-pessoas.onnx",
-        "yolo11m.onnx",
-        "Yolo11n_int8.onnx",
-        "ultralytics_export.onnx",
-        "modelo-ULTRALYTICS.onnx",
+        ("yolov5s.onnx", True),
+        ("yolov8n.onnx", True),
+        ("YOLOv8s-pessoas.onnx", True),
+        ("yolo11m.onnx", True),
+        ("Yolo11n_int8.onnx", True),
+        ("yolo26n.onnx", True),
+        ("ultralytics_export.onnx", True),
+        ("modelo-ULTRALYTICS.onnx", True),
+        ("yolox_s.onnx", False),
     ],
 )
-def test_pesos_da_ultralytics_sao_recusados_citando_a_agpl(tmp_path: Path, nome: str):
+def test_trava_de_licenca_olha_o_nome_do_arquivo(tmp_path: Path, nome: str, recusado: bool):
     """Peso da Ultralytics é AGPL-3.0 e o produto é fechado (ADR-009): um box rodando
-    `yolov8n.onnx` "só para testar" obriga a abrir o código. A recusa vem antes de
-    tudo — nem o arquivo precisa existir, e a sessão nunca é aberta, então este teste
-    não precisa de um `.onnx` de verdade."""
+    `yolov8n.onnx` "só para testar" obriga a abrir o código. A família ganha nome novo
+    a cada geração (v5, v8, 11, 26...), e uma lista fechada de versões deixaria a
+    próxima passar. Na recusa, a sessão nunca é aberta.
 
-    def nunca_abre(*_args):
-        raise AssertionError("a sessão não pode ser aberta para um peso AGPL")
+    O caso do YOLOX é o outro lado do erro: uma trava que pegasse "yolo" seguido de
+    qualquer coisa recusaria o modelo do próprio agente, e a loja não subiria."""
+    caminho = tmp_path / nome
+    caminho.write_bytes(b"nao e um onnx de verdade, e nao precisa ser")
+    aberturas: list[tuple] = []
 
+    def fabrica(*args):
+        aberturas.append(args)
+        return SessaoFalsa()
+
+    opcoes = DetectionOptions(enabled=True, model_path=caminho)
+    if recusado:
+        with pytest.raises(ModelError, match="AGPL-3.0"):
+            OnnxDetector(caminho, opcoes, session_factory=fabrica)
+        assert aberturas == []
+    else:
+        assert OnnxDetector(caminho, opcoes, session_factory=fabrica).info() is not None
+        assert len(aberturas) == 1
+
+
+def test_recusa_vem_antes_de_conferir_se_o_arquivo_existe(tmp_path: Path):
+    """A recusa por licença não pode depender de o arquivo estar no disco: um caminho
+    `yolov8n.onnx` errado tem que dizer "AGPL", não "modelo não encontrado" — senão o
+    conserto óbvio é baixar o arquivo."""
     with pytest.raises(ModelError, match="AGPL-3.0"):
-        OnnxDetector(tmp_path / nome, DetectionOptions(), session_factory=nunca_abre)
+        OnnxDetector(tmp_path / "yolov8n.onnx", DetectionOptions())
 
 
 def test_recusa_olha_o_nome_do_arquivo_e_nao_o_diretorio(tmp_path: Path):
@@ -141,11 +165,6 @@ def test_recusa_olha_o_nome_do_arquivo_e_nao_o_diretorio(tmp_path: Path):
     opcoes = DetectionOptions(enabled=True, model_path=caminho)
     unidade = OnnxDetector(caminho, opcoes, session_factory=lambda *_args: SessaoFalsa())
     assert unidade.info() is not None
-
-
-def test_yolox_nao_e_confundido_com_peso_agpl(tmp_path: Path):
-    """O modelo do agente tem que passar pela trava — senão ela desliga o produto."""
-    assert detector(tmp_path, SessaoFalsa()).info() is not None
 
 
 def test_info_reporta_o_provider_que_de_fato_pegou(tmp_path: Path):

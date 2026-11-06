@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -54,8 +55,12 @@ class ModelError(RuntimeError):
     """O modelo não pôde ser carregado ou não é o que a configuração diz."""
 
 
-_MARCAS_AGPL = ("yolov8", "yolo11", "ultralytics")
-"""Trechos de nome de arquivo que denunciam pesos da Ultralytics, que são AGPL-3.0.
+_MARCAS_AGPL = re.compile(r"yolov[58]|yolo\d{2}|ultralytics", re.IGNORECASE)
+"""Nome de arquivo que denuncia pesos da Ultralytics, que são AGPL-3.0.
+
+`yolo` seguido de dois dígitos, e não uma lista de versões: a família ganha nome novo
+a cada geração (YOLO11, YOLO26...), e uma lista fechada deixaria a próxima passar. O
+`yolox` do agente não casa com nenhum ramo — é letra depois de `yolo`, não dígito.
 
 É uma trava contra o engano, não contra a má-fé: renomear o arquivo a contorna. O que
 ela impede é o caminho comum — alguém baixa `yolov8n.onnx` "só para testar" e o box
@@ -70,11 +75,11 @@ def recusa_pesos_agpl(model_path: Path) -> None:
     Olha só o nome do arquivo, não o diretório: um box com o projeto clonado em
     `/srv/ultralytics-comparativo/` não pode deixar de subir por causa do caminho.
     """
-    nome = model_path.name.casefold()
-    marca = next((m for m in _MARCAS_AGPL if m in nome), None)
+    marca = _MARCAS_AGPL.search(model_path.name)
     if marca is not None:
         raise ModelError(
-            f"{model_path.name} parece ser um peso da Ultralytics ('{marca}' no nome), "
+            f"{model_path.name} parece ser um peso da Ultralytics "
+            f"('{marca.group(0)}' no nome), "
             "licenciado sob AGPL-3.0 — incompatível com o produto, que é fechado "
             "(ADR-009). Use o YOLOX-s oficial da Megvii (Apache-2.0): "
             "bash scripts/modelo.sh"

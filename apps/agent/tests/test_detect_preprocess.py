@@ -207,10 +207,16 @@ def test_size_nao_positivo_e_recusado():
 # --- a volta --------------------------------------------------------------------
 
 
-def test_ida_e_volta_devolve_a_caixa_original():
+@pytest.mark.parametrize(
+    "spec", [YOLOX, PreprocessSpec(centered=True)], ids=["yolox", "centralizado"]
+)
+def test_ida_e_volta_devolve_a_caixa_original(spec: PreprocessSpec):
     """O teste que guarda o módulo inteiro: uma caixa conhecida no frame da câmera,
-    levada para o espaço do modelo e trazida de volta, tem que ser a mesma caixa."""
-    _, caixa = letterbox(imagem(), size=LADO, spec=YOLOX)
+    levada para o espaço do modelo e trazida de volta, tem que ser a mesma caixa.
+
+    O caso centralizado existe pelo `pad_y`: no YOLOX ele é zero, e um `undo_letterbox`
+    que esquecesse de descontá-lo passaria só com o YOLOX."""
+    _, caixa = letterbox(imagem(), size=LADO, spec=spec)
     original = np.array([[100.0, 50.0, 300.0, 400.0]], dtype=np.float32)
 
     no_modelo = original * caixa.scale
