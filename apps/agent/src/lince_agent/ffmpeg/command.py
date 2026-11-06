@@ -46,19 +46,22 @@ def is_rtsp(url: str) -> bool:
 def redige_credencial(url: str) -> str:
     """Troca `user:password@` e `user@` por `***@`.
 
-    Preserva esquema, host, porta, caminho e query. URL sem credencial volta
-    intacta, caractere por caractere — inclusive `@` que só aparece na query.
+    Para cada `esquema://`, esconde o que está entre `://` e o último `@` do
+    token. O token vai até o espaço que encerra a URL na linha de log, ou até
+    o fim do texto. Espaço na senha (`user:my password@host`) não encerra:
+    ainda há um `@` antes do próximo esquema, e cortar nele publicaria
+    `password@host`.
 
-    A senha com `@` ou `:` precisa ir percent-encoded (`%40`, `%3A`). O separador
-    entre credencial e host é o último `@` cru antes de `/`, `?` e `#`. Tudo
-    antes dele sai. Errar para o lado de redigir demais esconde um pedaço de
-    host; errar para o outro publica a senha da câmera no journal.
+    `#`, `/` e `?` crus na senha (`admin:2024/11@cam/stream`) não são
+    autoridade: o ffmpeg corta a URL neles e não autentica. A configuração
+    recusa esse caso. Se a URL chegar ao stderr mesmo assim, o trecho até o
+    último `@` sai inteiro — inclusive quando `2024` parece uma porta. Na
+    dúvida, esconde demais: o que se perde é um pedaço de host, e o outro lado
+    publica a senha da câmera no journal.
 
-    `#`, `/` e `?` crus na senha (`admin:a/b@cam/stream`) não são autoridade:
-    o ffmpeg corta a URL neles e não autentica. A configuração recusa esse caso.
-    Aqui a redação ainda esconde a senha, como defesa se a URL chegar ao stderr
-    por outro caminho: o `@` do host é o que vem depois do reservado, não o
-    primeiro `/` `?` ou `#`.
+    URL sem credencial volta intacta, caractere por caractere — inclusive `@`
+    que só aparece na query (`cam/path?email=a@b.com`). Sem `:` não há senha,
+    e redigir esconderia parâmetro legítimo.
 
     Serve para a URL sozinha e para o texto que a contém. O ffmpeg, ao falhar a
     abertura, escreve a URL de entrada no stderr (`Error opening input file
@@ -89,7 +92,7 @@ def redige_credencial(url: str) -> str:
             continue
 
         fim = _fim_do_token(url, marca + 3)
-        arroba = _arroba_userinfo(url[marca + 3 : fim])
+        arroba = _arroba_da_credencial(url[marca + 3 : fim])
         if arroba is None:
             pedacos.append(url[cursor:fim])
             cursor = fim
@@ -105,22 +108,20 @@ def redige_credencial(url: str) -> str:
 
 
 def credencial_tem_reservado_cru(url: str) -> bool:
-    """Se a senha tem `#`, `/` ou `?` cru.
+    """Se há `#`, `/` ou `?` cru entre `://` e o último `@` da string.
 
-    O ffmpeg (e o `urlsplit`) tratam esses caracteres como caminho, query ou
-    fragmento. A câmera não autentica, e cortar a redação no mesmo lugar
-    deixaria o resto da senha no log. A forma que autentica é `%23`, `%2F` e
-    `%3F` — estes não disparam, porque não são o caractere cru.
+    Não tenta ler `admin:2024` como host e porta. Qualquer reservado nesse
+    intervalo é senha: o ffmpeg corta a URL nele, não autentica, e o resto
+    vaza no log. A forma que autentica é `%23`, `%2F` e `%3F` — estes não
+    disparam, porque não são o caractere cru.
     """
     marca = url.find("://")
-    if marca == -1 or "@" not in url:
+    if marca == -1:
         return False
-    fim = _fim_do_token(url, marca + 3)
-    resto = url[marca + 3 : fim]
-    arroba = _arroba_userinfo(resto)
-    if arroba is None:
+    arroba = url.rfind("@")
+    if arroba < marca + 3:
         return False
-    return any(caractere in _RESERVADOS_NA_SENHA for caractere in resto[:arroba])
+    return any(caractere in _RESERVADOS_NA_SENHA for caractere in url[marca + 3 : arroba])
 
 
 def _caractere_de_esquema(caractere: str) -> bool:
@@ -155,76 +156,26 @@ def _espaco_encerra_token(url: str, indice: int) -> bool:
     return True
 
 
-def _arroba_userinfo(resto: str) -> int | None:
-    """Índice do `@` entre credencial e host, ou None se não há credencial.
+def _arroba_da_credencial(resto: str) -> int | None:
+    """Índice do `@` até onde a redação esconde, ou None se não há credencial.
 
-    `@` só na query (`cam/path?email=a@b.com`) não é userinfo. Senha com `@` cru
-    usa o último `@` antes do caminho. Senha com `#` `/` `?` cru deixa o `@` do
-    host depois do reservado; esse ainda é o separador.
+    É o último `@` do token. `#`, `/` e `?` antes dele saem junto quando há um
+    `:` — isso é senha (`user:2024/11@host`, `user:a@b?c@host`), e conferir se
+    o que vem depois do `:` são dígitos de porta foi o furo. Sem `:`, não há
+    senha: o `@` antes do caminho é só o usuário, e o `@` que vive na query
+    fica.
     """
-    if "@" not in resto:
+    arroba = resto.rfind("@")
+    if arroba == -1:
         return None
-
-    delim = _primeiro_reservado(resto)
-    limite = delim if delim != -1 else len(resto)
-    arroba = resto.rfind("@", 0, limite)
-    if arroba != -1 and not _reservado_ainda_e_senha(resto, arroba):
+    antes = resto[:arroba]
+    if ":" in antes or not any(caractere in _RESERVADOS_NA_SENHA for caractere in antes):
         return arroba
-    return _arroba_da_senha_com_reservado(resto)
-
-
-def _primeiro_reservado(texto: str, inicio: int = 0) -> int:
-    for i in range(inicio, len(texto)):
-        if texto[i] in _RESERVADOS_NA_SENHA:
-            return i
-    return -1
-
-
-def _reservado_ainda_e_senha(resto: str, arroba: int) -> bool:
-    """O `/` logo depois deste `@` ainda é senha quando o segmento tem outro `@`.
-
-    `user:p@ss/word@cam/stream`: o `@` entre `p` e `ss` é cedo demais, e `word@cam`
-    no primeiro segmento denuncia isso. `user:pass@host/stream?e=a@b` não: o `@`
-    da query fica depois do `?`, fora do primeiro segmento.
-    """
-    depois = resto[arroba + 1 :]
-    barra = depois.find("/")
-    if barra == -1:
-        return False
-    segmento = depois[barra + 1 :]
-    fim = len(segmento)
-    for i, caractere in enumerate(segmento):
+    for indice, caractere in enumerate(antes):
         if caractere in _RESERVADOS_NA_SENHA:
-            fim = i
-            break
-    return "@" in segmento[:fim]
-
-
-def _arroba_da_senha_com_reservado(resto: str) -> int | None:
-    """`user:a/b@cam/stream` e os primos com `#` e `?`.
-
-    `host:554/caminho?email=a@b` não entra: depois do `:` só há dígitos de porta
-    e em seguida o caminho ou a query. Aí o `@` não é credencial.
-    """
-    dois_pontos = resto.find(":")
-    if dois_pontos == -1:
-        return None
-    i = dois_pontos + 1
-    while i < len(resto) and resto[i].isdigit():
-        i += 1
-    if i > dois_pontos + 1 and (i >= len(resto) or resto[i] in "/?"):
-        return None
-
-    escolhido: int | None = None
-    inicio = dois_pontos + 1
-    while True:
-        arroba = resto.find("@", inicio)
-        if arroba == -1:
-            return escolhido
-        host = arroba + 1 < len(resto) and resto[arroba + 1] not in _RESERVADOS_NA_SENHA
-        if host and not _reservado_ainda_e_senha(resto, arroba):
-            escolhido = arroba
-        inicio = arroba + 1
+            usuario = antes.rfind("@", 0, indice)
+            return usuario if usuario != -1 else None
+    return None
 
 
 def build_ingest_command(

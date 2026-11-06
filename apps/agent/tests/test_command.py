@@ -210,6 +210,28 @@ def test_fd_negativo_e_rejeitado():
             "rtsp://user:pass@[2001:db8::1]:554/cam",
             "rtsp://***@[2001:db8::1]:554/cam",
         ),
+        # `2024` parece porta. Tratar como host:porta deixava a senha no log.
+        (
+            "rtsp://admin:2024/11@cam/stream",
+            "rtsp://***@cam/stream",
+        ),
+        (
+            "rtsp://admin:pw@cam:554/s",
+            "rtsp://***@cam:554/s",
+        ),
+        (
+            "rtsp://admin:a@b?c@cam/stream",
+            "rtsp://***@cam/stream",
+        ),
+        (
+            "rtsp://admin:x@y#z@cam/stream",
+            "rtsp://***@cam/stream",
+        ),
+        (
+            "rtsp://admin:p@ss/word@cam/stream",
+            "rtsp://***@cam/stream",
+        ),
+        ("rtsp://cam.local:554/s", "rtsp://cam.local:554/s"),
     ],
 )
 def test_redige_credencial(bruta: str, esperada: str):
@@ -224,12 +246,17 @@ def test_redige_credencial(bruta: str, esperada: str):
         ("rtsp://admin:Admin#2024@cam/stream", "Admin#2024"),
         ("rtsp://admin:a/b@cam/stream", "a/b"),
         ("rtsp://admin:x?y@cam/stream", "x?y"),
+        ("rtsp://admin:2024/11@cam/stream", "2024/11"),
+        ("rtsp://admin:a@b?c@cam/stream", "a@b?c"),
+        ("rtsp://admin:x@y#z@cam/stream", "x@y#z"),
+        ("rtsp://admin:p@ss/word@cam/stream", "p@ss/word"),
     ],
 )
 def test_redige_senha_com_reservado_cru(bruta: str, senha: str):
     """A config recusa `#` `/` `?` crus na senha. Se a URL ainda chegar ao stderr,
-    cortar a autoridade no reservado deixaria `2024@cam` no log. O `@` do host é
-    o que vem depois, e host e caminho continuam visíveis."""
+    cortar a autoridade no reservado — ou ler `admin:2024` como host e porta —
+    deixaria `11@cam` no log. O `@` do host é o último do token, e host e caminho
+    continuam visíveis."""
     assert redige_credencial(bruta) == "rtsp://***@cam/stream"
     linha = f"Error opening input file {bruta}."
     saida = redige_credencial(linha)
@@ -249,6 +276,28 @@ def test_redige_linha_que_o_ffmpeg_escreve_no_stderr():
     assert "senha-secreta" not in redige_credencial(abertura)
     assert "senha-secreta" not in redige_credencial(recusa)
     assert "127.0.0.1:9/canal" in redige_credencial(abertura)
+
+
+def test_redige_stderr_com_varias_urls():
+    """O ffprobe devolve o stderr inteiro, e uma rajada cita mais de uma URL.
+    Parar na primeira deixaria a senha da seguinte no traceback do probe."""
+    texto = (
+        "Error opening input file rtsp://admin:2024/11@cam-a/stream.\n"
+        "rtsp://admin:a@b?c@cam-b/stream: Connection refused\n"
+        "rtsp://admin:x@y#z@cam-c/live: Invalid data found\n"
+        "rtsp://admin:p@ss/word@cam-d:554/s: Server returned 401\n"
+        "rtsp://cam-e:554/s: Server returned 404 Not Found"
+    )
+    saida = redige_credencial(texto)
+    assert saida == (
+        "Error opening input file rtsp://***@cam-a/stream.\n"
+        "rtsp://***@cam-b/stream: Connection refused\n"
+        "rtsp://***@cam-c/live: Invalid data found\n"
+        "rtsp://***@cam-d:554/s: Server returned 401\n"
+        "rtsp://cam-e:554/s: Server returned 404 Not Found"
+    )
+    for senha in ("2024/11", "a@b?c", "x@y#z", "p@ss/word"):
+        assert senha not in saida
 
 
 def test_argv_preserva_a_credencial_para_o_ffmpeg():

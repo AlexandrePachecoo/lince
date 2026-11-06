@@ -183,12 +183,13 @@ def test_camera_sem_url_e_recusada(tmp_path):
 
 @pytest.mark.parametrize(
     "senha",
-    ["Admin#2024", "a/b", "x?y"],
+    ["Admin#2024", "a/b", "x?y", "2024/11", "a@b?c", "x@y#z", "p@ss/word"],
 )
 def test_senha_com_reservado_cru_e_recusada(tmp_path, senha: str):
     """`#` `/` `?` crus na senha: o ffmpeg corta a URL ali, não autentica, e o
-    pedaço que sobra vaza no log. A mensagem manda codificar (%23, %2F, %3F) e
-    não repete a senha — a recusa iria para o log da subida."""
+    pedaço que sobra vaza no log. `2024/11` parece porta e passava. A mensagem
+    manda codificar (%23, %2F, %3F) e não repete a senha — a recusa iria para o
+    log da subida."""
     url = f"rtsp://admin:{senha}@cam/stream"
     doc = documento(cameras=[{"camera_id": "porta", "url": url}])
 
@@ -213,6 +214,22 @@ def test_senha_com_reservado_cru_e_recusada(tmp_path, senha: str):
 def test_senha_com_reservado_codificado_e_aceita(tmp_path, url: str):
     """Codificada, a senha atravessa o demuxer. Recusar `%23` mandaria a loja
     tirar a senha que o ffmpeg finalmente consegue usar."""
+    config = monta(documento(cameras=[{"camera_id": "porta", "url": url}]), tmp_path)
+    assert config.cameras[0].url == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "rtsp://admin:pw@cam:554/s",
+        "rtsp://cam.local:554/s",
+        "rtsp://user:p@ss@cam:554/s",
+    ],
+)
+def test_porta_e_senha_sem_reservado_sao_aceitas(tmp_path, url: str):
+    """Porta de verdade (`:554`) e `@` cru na senha não são `#` `/` `?`.
+    Recusá-los tiraria do ar a câmera que o ffmpeg autentica, e uma URL sem
+    credencial não tem senha para codificar."""
     config = monta(documento(cameras=[{"camera_id": "porta", "url": url}]), tmp_path)
     assert config.cameras[0].url == url
 
