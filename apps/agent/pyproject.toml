@@ -48,6 +48,9 @@ dev = [
     # Só para tests/test_box.py ler o compose do box (§3.8) como dado, e não por regex.
     "pyyaml>=6.0",
     "ruff>=0.8",
+    # Só para a suíte montar um RTMPose mínimo com `onnx.helper`. Não é runtime:
+    # o box continua falando só com o ONNX Runtime, e torch/mmpose/rtmlib não entram.
+    "onnx>=1.16",
 ]
 
 [tool.uv]

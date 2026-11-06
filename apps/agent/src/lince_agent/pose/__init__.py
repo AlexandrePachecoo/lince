@@ -1,6 +1,5 @@
-"""Pose da pessoa — fase 1 do piloto de gesto de ocultação.
+"""Pose da pessoa — piloto de gesto de ocultação.
 
-Só o pré-processamento do recorte e o decode SimCC. O RTMPose-s COCO-17 em
-ONNX entra depois, no mesmo mecanismo de providers e checksum de
-`detect/onnx.py`. Sem arquivo de modelo nesta fase.
+Recorte top-down, sessão ONNX do RTMPose-s COCO-17 e decode SimCC. O
+carregamento segue `detect/onnx.py`: providers, checksum e a trava de nome.
 """

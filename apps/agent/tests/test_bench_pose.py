@@ -1,0 +1,135 @@
+"""O benchmark da pose, sem vídeo e sem modelo.
+
+O que se mede aqui é a separação dos tempos e o lote, não o percentil de uma
+GPU. Um `inferir` que empilha quando o modelo é de lote 1, ou um warpAffine
+obrigatório, quebraria o número que decide se o recorte NumPy cabe no box.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+_CAMINHO = Path(__file__).resolve().parents[1] / "tools" / "bench_pose.py"
+_SPEC = importlib.util.spec_from_file_location("bench_pose", _CAMINHO)
+assert _SPEC is not None and _SPEC.loader is not None
+bench = importlib.util.module_from_spec(_SPEC)
+sys.modules["bench_pose"] = bench
+_SPEC.loader.exec_module(bench)
+
+
+class _Pose:
+    def __init__(self, dinamico: bool) -> None:
+        self.lote_dinamico = dinamico
+        self.chamadas: list[int] = []
+
+    def inferir(self, tensor: np.ndarray):
+        self.chamadas.append(int(tensor.shape[0]))
+        n = int(tensor.shape[0])
+        return (
+            np.zeros((n, 17, 384), dtype=np.float32),
+            np.zeros((n, 17, 512), dtype=np.float32),
+        )
+
+
+def test_lote_dinamico_empilha_e_o_fixo_repete():
+    imagem = np.zeros((120, 160, 3), dtype=np.uint8)
+    caixas = [(20.0, 10.0, 80.0, 100.0), (40.0, 30.0, 90.0, 110.0), (10.0, 10.0, 40.0, 80.0)]
+    dinamica = _Pose(True)
+    medida = bench.mede_caixas(imagem, caixas, dinamica, usar_opencv=False)
+    assert dinamica.chamadas == [3]
+    assert medida["recorte_warp_pessoa"] is None
+    assert len(medida["recorte_numpy_pessoa"]) == 3
+    assert len(medida["inferencia_pessoa"]) == 3
+    # O tempo por pessoa no lote é o do frame dividido por N. O relógio de
+    # fora inclui umas instruções a mais; a folga é isso, não outro estágio.
+    assert sum(medida["inferencia_pessoa"]) == pytest.approx(medida["inferencia_frame"], abs=5.0)
+
+    estatica = _Pose(False)
+    medida_fixa = bench.mede_caixas(imagem, caixas, estatica, usar_opencv=False)
+    assert estatica.chamadas == [1, 1, 1]
+    assert len(medida_fixa["decode_pessoa"]) == 3
+
+
+def test_repete_caixas_ate_o_lote_e_nao_inventa_pessoa():
+    caixas = [(0.0, 0.0, 10.0, 20.0), (1.0, 1.0, 2.0, 3.0)]
+    saida = bench.escolhe_caixas(caixas, 6)
+    assert len(saida) == 6
+    assert saida[0] == caixas[0]
+    assert saida[5] == caixas[1]
+    assert bench.escolhe_caixas([], 6) == []
+
+
+def test_percentis_e_providers():
+    bloco = bench.percentis([1.0, 2.0, 3.0, 4.0, 10.0])
+    assert bloco["n"] == 5
+    assert bloco["p50"] == pytest.approx(3.0)
+    assert bloco["p50"] <= bloco["p95"]
+    assert bench.providers_de("cpu") == ("CPUExecutionProvider",)
+    assert bench.providers_de("cuda") == ("CUDAExecutionProvider", "CPUExecutionProvider")
+    assert bench.interpreta_pessoas("1,3,6") == (1, 3, 6)
+    with pytest.raises(bench.BenchError):
+        bench.providers_de("tensorrt")
+    with pytest.raises(bench.BenchError):
+        bench.interpreta_pessoas("0,3")
+
+
+def test_tabela_marca_warp_pulado():
+    numpy_ms = {
+        "por_pessoa": bench.percentis([1.0, 2.0, 3.0]),
+        "por_frame": bench.percentis([3.0, 4.0]),
+    }
+    inferencia = {
+        "por_pessoa": bench.percentis([5.0]),
+        "por_frame": bench.percentis([5.0]),
+    }
+    decode = {
+        "por_pessoa": bench.percentis([0.2]),
+        "por_frame": bench.percentis([0.2]),
+    }
+    relatorio = bench.monta_relatorio(
+        fonte=Path("video.mp4"),
+        frames_lidos=4,
+        frames_com_pessoa=2,
+        limiar=0.1,
+        aquecimento=3,
+        pessoas=(1,),
+        detector_versao="yolox_s@abc",
+        detector_provider="CPUExecutionProvider",
+        pose_versao="rtmpose-s@def",
+        pose_provider="CPUExecutionProvider",
+        lote_dinamico=True,
+        opencv=False,
+        nota_opencv="cv2.warpAffine foi pulado",
+        estagios={
+            1: {
+                "amostras_frame": 2,
+                "recorte_numpy_ms": numpy_ms,
+                "recorte_warp_affine_ms": None,
+                "inferencia_ms": inferencia,
+                "decode_ms": decode,
+            }
+        },
+    )
+    texto = bench.formata_tabela(relatorio)
+    assert "pulado" in texto
+    assert "warpAffine" in texto
+    assert "2.000" in texto
+    assert relatorio["unidade"] == "ms"
+    assert relatorio["pose"]["lote_dinamico"] is True
+
+
+def test_opencv_so_entra_se_ja_estiver_no_ambiente():
+    """Sem o pacote, a coluna some. Com ele, o warp tem que devolver o tensor
+    do recorte — senão a curva compara outra coisa."""
+    if bench.opencv_disponivel():
+        imagem = np.zeros((80, 80, 3), dtype=np.uint8)
+        tensor = bench.recorte_warp_affine(imagem, (10.0, 10.0, 40.0, 70.0))
+        assert tensor.shape == (1, 3, 256, 192)
+        assert tensor.dtype == np.float32
+    else:
+        assert bench.opencv_disponivel() is False
