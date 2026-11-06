@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 
@@ -70,7 +70,10 @@ class QueueItem:
     clip_state: ClipState = ClipState.NONE
     clip_path: str | None = None
     clip_size_bytes: int = 0
-    upload_url: str | None = None
+    upload_url: str | None = field(default=None, repr=False)
+    """A URL pré-assinada **é** a credencial de escrita no bucket até vencer. Fora do
+    `repr` para não aparecer num `log.debug("%r", item)` nem num traceback com
+    variáveis locais; ela só existe para ir ao `put_clip`."""
     upload_expires_ms: int | None = None
     object_key: str | None = None
     last_error: str | None = None
