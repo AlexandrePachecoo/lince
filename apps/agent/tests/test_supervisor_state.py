@@ -8,6 +8,7 @@ teste determinístico de milissegundos.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
@@ -239,6 +240,30 @@ def test_stop_durante_o_backoff_nao_espera_o_backoff():
     sup.stop(timeout=5.0)
     assert time.monotonic() - inicio < 2.0
     assert sup.health().status is CameraStatus.STOPPED
+
+
+def test_log_da_subida_nao_vaza_a_credencial_da_url(caplog):
+    """O supervisor loga o argv inteiro na subida, e o argv leva a URL real em `-i`.
+    Sem redação, a senha da câmera entra no journal a cada reconexão."""
+    senha = "s3nha-super-secreta"
+    url = f"rtsp://operador:{senha}@cam.loja:554/substream"
+
+    class ComCredencial(IngestFalso):
+        @property
+        def command(self) -> list[str]:
+            return ["ffmpeg", "-hide_banner", "-i", url]
+
+        def is_running(self) -> bool:
+            return False
+
+    sup = supervisor([ComCredencial()])
+    with caplog.at_level(logging.DEBUG):
+        sup._run_once()
+
+    assert senha not in caplog.text
+    assert "operador" not in caplog.text
+    assert "cam.loja:554/substream" in caplog.text
+    assert "***@" in caplog.text
 
 
 def test_processo_que_nao_executa_vira_falha_e_nao_excecao():

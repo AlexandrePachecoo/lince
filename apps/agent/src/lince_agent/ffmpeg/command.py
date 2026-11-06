@@ -37,9 +37,79 @@ a correção é no intervalo de I-frame da câmera.
 
 _RTSP_SCHEMES = frozenset({"rtsp", "rtsps"})
 
+# O que encerra a autoridade (userinfo@host:porta). Espaço não entra: senha com
+# espaço cru ainda está antes do `@`, e cortar nele deixaria `password@host` no log.
+# Quebra de linha entra para o stderr multilinha do ffprobe não colar a linha
+# seguinte no host.
+_FIM_DE_AUTORIDADE = frozenset("/?#\r\n")
+
 
 def is_rtsp(url: str) -> bool:
     return urlsplit(url).scheme.lower() in _RTSP_SCHEMES
+
+
+def redige_credencial(url: str) -> str:
+    """Troca `user:password@` e `user@` por `***@`.
+
+    Preserva esquema, host, porta, caminho e query. URL sem credencial volta
+    intacta, caractere por caractere — inclusive `@` que só aparece na query.
+
+    A senha com `@` ou `:` precisa ir percent-encoded (`%40`, `%3A`). O separador
+    entre credencial e host é o último `@` cru da autoridade; tudo antes dele,
+    codificado ou não, sai. Errar para o lado de redigir demais esconde um pedaço
+    de host; errar para o outro publica a senha da câmera no journal.
+
+    Serve para a URL sozinha e para o texto que a contém. O ffmpeg, ao falhar a
+    abertura, escreve a URL de entrada no stderr (`Error opening input file
+    rtsp://user:pass@host/cam.`), e o ffprobe repete a mesma URL na mensagem de
+    erro. Redigir só o argumento `-i` deixaria a senha sair por aí.
+
+    O argv do ffmpeg continua com a credencial real: o demuxer autentica com ela.
+    A redação é só para log e exceção.
+    """
+    if "://" not in url or "@" not in url:
+        return url
+
+    pedacos: list[str] = []
+    cursor = 0
+    while True:
+        marca = url.find("://", cursor)
+        if marca == -1:
+            pedacos.append(url[cursor:])
+            break
+
+        inicio = marca
+        while inicio > cursor and _caractere_de_esquema(url[inicio - 1]):
+            inicio -= 1
+        if inicio == marca or not url[inicio].isalpha():
+            # `://` sem esquema não é URL. Avança para não entrar em laço.
+            pedacos.append(url[cursor : marca + 3])
+            cursor = marca + 3
+            continue
+
+        fim = marca + 3
+        while fim < len(url) and url[fim] not in _FIM_DE_AUTORIDADE:
+            fim += 1
+        autoridade = url[marca + 3 : fim]
+        arroba = autoridade.rfind("@")
+        if arroba == -1:
+            pedacos.append(url[cursor:fim])
+            cursor = fim
+            continue
+
+        pedacos.append(url[cursor:inicio])
+        pedacos.append(url[inicio : marca + 3])
+        pedacos.append("***@")
+        pedacos.append(autoridade[arroba + 1 :])
+        cursor = fim
+
+    return "".join(pedacos)
+
+
+def _caractere_de_esquema(caractere: str) -> bool:
+    """RFC 3986: ALPHA / DIGIT / "+" / "-" / ".". O primeiro caractere é conferido
+    à parte — esquema que começa com dígito não é URL."""
+    return caractere.isalnum() or caractere in "+-."
 
 
 def build_ingest_command(

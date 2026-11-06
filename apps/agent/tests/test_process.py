@@ -8,6 +8,8 @@ o que se ganha é que estes testes rodam por padrão, sem `pnpm rtsp:up`.
 
 from __future__ import annotations
 
+import io
+import logging
 import subprocess
 import threading
 import time
@@ -81,6 +83,33 @@ def roda_ate_o_fim(ingest: FfmpegIngest, prazo: float = 60.0) -> None:
     # O processo sair não significa que as threads já drenaram o que ficou nos
     # pipes; `stop` fecha tudo e espera por elas.
     ingest.stop()
+
+
+def test_stderr_nao_eco_a_credencial(caplog):
+    """O ffmpeg escreve a URL de entrada no stderr quando a abertura falha. Essa
+    linha é o caminho do `on_log`: chega aqui mesmo com o argv já redigido no
+    supervisor, e o callback que só repete o que recebe não pode reabrir o vazamento."""
+    senha = "s3nha-super-secreta"
+    url = f"rtsp://operador:{senha}@cam.loja:554/substream"
+    linha = f"Error opening input file {url}.\n".encode()
+    recebidas: list[str] = []
+
+    com_callback = FfmpegIngest(url, DecodeOptions(), IngestCallbacks(on_log=recebidas.append))
+    com_callback._read_stderr(io.BytesIO(linha))
+
+    assert recebidas == ["Error opening input file rtsp://***@cam.loja:554/substream."]
+    assert senha not in recebidas[0]
+    assert "operador" not in recebidas[0]
+
+    sem_callback = FfmpegIngest(url, DecodeOptions())
+    with caplog.at_level(logging.DEBUG, logger="lince_agent.ffmpeg.process"):
+        sem_callback._read_stderr(io.BytesIO(linha))
+        sem_callback._stopping.set()
+        sem_callback._read_stderr(io.BytesIO(f"{url}: Connection refused\n".encode()))
+
+    assert senha not in caplog.text
+    assert "operador" not in caplog.text
+    assert "cam.loja:554/substream" in caplog.text
 
 
 def test_entrega_frames_e_fragmentos(video_file: str):

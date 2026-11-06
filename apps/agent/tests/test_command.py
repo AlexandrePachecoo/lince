@@ -13,6 +13,7 @@ from lince_agent.ffmpeg.command import (
     build_probe_command,
     is_live_source,
     is_rtsp,
+    redige_credencial,
 )
 
 RTSP = "rtsp://cam.local/substream"
@@ -172,6 +173,70 @@ def test_fd_do_fragmento_e_respeitado():
 def test_fd_negativo_e_rejeitado():
     with pytest.raises(ValueError, match="fragment_fd"):
         build_ingest_command(RTSP, DecodeOptions(), -1)
+
+
+@pytest.mark.parametrize(
+    ("bruta", "esperada"),
+    [
+        (
+            "rtsp://operador:s3nha-super-secreta@cam.loja:554/sub/stream",
+            "rtsp://***@cam.loja:554/sub/stream",
+        ),
+        (
+            "rtsps://operador:s3nha-super-secreta@cam.loja/sub",
+            "rtsps://***@cam.loja/sub",
+        ),
+        ("rtsp://admin@cam.local:554/live", "rtsp://***@cam.local:554/live"),
+        (
+            "RTSP://Operador:S3nha@Host.Local:554/Path?x=1",
+            "RTSP://***@Host.Local:554/Path?x=1",
+        ),
+        (
+            "rtsp://op:seg%40redo%3A1@10.0.0.8:8554/cam/1?a=%40",
+            "rtsp://***@10.0.0.8:8554/cam/1?a=%40",
+        ),
+        (
+            "rtsp://user:my password@cam.local/path",
+            "rtsp://***@cam.local/path",
+        ),
+        (
+            "rtsp://user:p@ss@cam.local/path",
+            "rtsp://***@cam.local/path",
+        ),
+        ("rtsp://cam.local:554/substream?profile=1", "rtsp://cam.local:554/substream?profile=1"),
+        ("rtsp://cam.local/path?email=a@b.com", "rtsp://cam.local/path?email=a@b.com"),
+        ("/tmp/gravacao.mp4", "/tmp/gravacao.mp4"),
+        (
+            "rtsp://user:pass@[2001:db8::1]:554/cam",
+            "rtsp://***@[2001:db8::1]:554/cam",
+        ),
+    ],
+)
+def test_redige_credencial(bruta: str, esperada: str):
+    """A senha sai, o host e o caminho ficam. Sem credencial, a string volta intacta —
+    um `@` na query não é userinfo, e redigi-lo esconderia parâmetro legítimo."""
+    assert redige_credencial(bruta) == esperada
+
+
+def test_redige_linha_que_o_ffmpeg_escreve_no_stderr():
+    """Medido no ffmpeg 6: ao falhar a abertura, o stderr repete a URL inteira, senha
+    inclusive. O ponto final é pontuação da frase; a outra forma é a do ffprobe, com
+    a mensagem de erro colada na URL por dois-pontos."""
+    abertura = "Error opening input file rtsp://usuario:senha-secreta@127.0.0.1:9/canal."
+    assert redige_credencial(abertura) == ("Error opening input file rtsp://***@127.0.0.1:9/canal.")
+    recusa = "rtsp://usuario:senha-secreta@127.0.0.1:9/canal: Connection refused"
+    assert redige_credencial(recusa) == "rtsp://***@127.0.0.1:9/canal: Connection refused"
+    assert "senha-secreta" not in redige_credencial(abertura)
+    assert "senha-secreta" not in redige_credencial(recusa)
+    assert "127.0.0.1:9/canal" in redige_credencial(abertura)
+
+
+def test_argv_preserva_a_credencial_para_o_ffmpeg():
+    """A redação é para log e exceção. O demuxer autentica com a URL real; tirá-la
+    do argv faria toda câmera com senha falhar com 401 e o log parecer limpo."""
+    url = "rtsp://operador:s3nha-super-secreta@cam.loja:554/substream"
+    assert url in build_ingest_command(url, DecodeOptions(), 3)
+    assert build_probe_command(url, DecodeOptions())[-1] == url
 
 
 def test_is_rtsp():
