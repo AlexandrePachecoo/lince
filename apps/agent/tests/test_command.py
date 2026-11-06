@@ -218,6 +218,26 @@ def test_redige_credencial(bruta: str, esperada: str):
     assert redige_credencial(bruta) == esperada
 
 
+@pytest.mark.parametrize(
+    ("bruta", "senha"),
+    [
+        ("rtsp://admin:Admin#2024@cam/stream", "Admin#2024"),
+        ("rtsp://admin:a/b@cam/stream", "a/b"),
+        ("rtsp://admin:x?y@cam/stream", "x?y"),
+    ],
+)
+def test_redige_senha_com_reservado_cru(bruta: str, senha: str):
+    """A config recusa `#` `/` `?` crus na senha. Se a URL ainda chegar ao stderr,
+    cortar a autoridade no reservado deixaria `2024@cam` no log. O `@` do host é
+    o que vem depois, e host e caminho continuam visíveis."""
+    assert redige_credencial(bruta) == "rtsp://***@cam/stream"
+    linha = f"Error opening input file {bruta}."
+    saida = redige_credencial(linha)
+    assert saida == "Error opening input file rtsp://***@cam/stream."
+    assert senha not in saida
+    assert "cam/stream" in saida
+
+
 def test_redige_linha_que_o_ffmpeg_escreve_no_stderr():
     """Medido no ffmpeg 6: ao falhar a abertura, o stderr repete a URL inteira, senha
     inclusive. O ponto final é pontuação da frase; a outra forma é a do ffprobe, com

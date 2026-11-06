@@ -181,6 +181,42 @@ def test_camera_sem_url_e_recusada(tmp_path):
         monta(documento(cameras=[{"camera_id": "cam1"}]), tmp_path)
 
 
+@pytest.mark.parametrize(
+    "senha",
+    ["Admin#2024", "a/b", "x?y"],
+)
+def test_senha_com_reservado_cru_e_recusada(tmp_path, senha: str):
+    """`#` `/` `?` crus na senha: o ffmpeg corta a URL ali, não autentica, e o
+    pedaço que sobra vaza no log. A mensagem manda codificar (%23, %2F, %3F) e
+    não repete a senha — a recusa iria para o log da subida."""
+    url = f"rtsp://admin:{senha}@cam/stream"
+    doc = documento(cameras=[{"camera_id": "porta", "url": url}])
+
+    with pytest.raises(ConfigError) as erro:
+        monta(doc, tmp_path)
+
+    mensagem = str(erro.value)
+    assert senha not in mensagem
+    assert url not in mensagem
+    assert "cameras[0]" in mensagem
+    assert "%23" in mensagem and "%2F" in mensagem and "%3F" in mensagem
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "rtsp://admin:Admin%232024@cam/stream",
+        "rtsp://admin:a%2Fb@cam/stream",
+        "rtsp://admin:x%3Fy@cam/stream",
+    ],
+)
+def test_senha_com_reservado_codificado_e_aceita(tmp_path, url: str):
+    """Codificada, a senha atravessa o demuxer. Recusar `%23` mandaria a loja
+    tirar a senha que o ffmpeg finalmente consegue usar."""
+    config = monta(documento(cameras=[{"camera_id": "porta", "url": url}]), tmp_path)
+    assert config.cameras[0].url == url
+
+
 def test_zona_fora_do_quadro_e_recusada_na_subida(tmp_path):
     """Zona desenhada sobre um frame de outra resolução não contém ninguém: tempo de
     caixa zero para todo mundo, e a câmera alerta a loja inteira (R-1). É o caminho
