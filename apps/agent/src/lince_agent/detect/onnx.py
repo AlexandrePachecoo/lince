@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,37 @@ para identificar o arquivo em log e heartbeat sem poluir a linha."""
 
 class ModelError(RuntimeError):
     """O modelo não pôde ser carregado ou não é o que a configuração diz."""
+
+
+_MARCAS_AGPL = re.compile(r"yolov[58]|yolo\d{2}|ultralytics", re.IGNORECASE)
+"""Nome de arquivo que denuncia pesos da Ultralytics, que são AGPL-3.0.
+
+`yolo` seguido de dois dígitos, e não uma lista de versões: a família ganha nome novo
+a cada geração (YOLO11, YOLO26...), e uma lista fechada deixaria a próxima passar. O
+`yolox` do agente não casa com nenhum ramo — é letra depois de `yolo`, não dígito.
+
+É uma trava contra o engano, não contra a má-fé: renomear o arquivo a contorna. O que
+ela impede é o caminho comum — alguém baixa `yolov8n.onnx` "só para testar" e o box
+da loja passa a rodar um modelo cuja licença obriga a abrir o código do produto. Além
+da licença, a convenção de entrada é outra (centraliza, RGB, 0..1), e rodar esses
+pesos com a `PreprocessSpec` do YOLOX dá caixas plausíveis e deslocadas, sem erro."""
+
+
+def recusa_pesos_agpl(model_path: Path) -> None:
+    """Levanta `ModelError` se o nome do arquivo indica pesos da Ultralytics.
+
+    Olha só o nome do arquivo, não o diretório: um box com o projeto clonado em
+    `/srv/ultralytics-comparativo/` não pode deixar de subir por causa do caminho.
+    """
+    marca = _MARCAS_AGPL.search(model_path.name)
+    if marca is not None:
+        raise ModelError(
+            f"{model_path.name} parece ser um peso da Ultralytics "
+            f"('{marca.group(0)}' no nome), "
+            "licenciado sob AGPL-3.0 — incompatível com o produto, que é fechado "
+            "(ADR-009). Use o YOLOX-s oficial da Megvii (Apache-2.0): "
+            "bash scripts/modelo.sh"
+        )
 
 
 def model_version(model_path: Path) -> str:
@@ -80,6 +112,9 @@ class OnnxDetector:
         spec: PreprocessSpec = YOLOX,
         session_factory: Callable[[Path, tuple[str, ...]], Any] | None = None,
     ) -> None:
+        # Antes de qualquer outra coisa, inclusive de conferir se o arquivo existe: a
+        # recusa por licença não pode depender de o arquivo estar no disco.
+        recusa_pesos_agpl(model_path)
         if not model_path.is_file():
             raise ModelError(f"modelo não encontrado em {model_path}")
 

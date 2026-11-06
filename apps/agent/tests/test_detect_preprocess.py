@@ -14,10 +14,10 @@ import pytest
 from lince_agent.config import PixelFormat
 from lince_agent.detect.preprocess import (
     PAD_VALUE,
-    YOLOV8,
     YOLOX,
     Letterbox,
     PreprocessError,
+    PreprocessSpec,
     frame_to_bgr,
     letterbox,
     undo_letterbox,
@@ -92,19 +92,6 @@ def test_yolox_encosta_no_canto_superior_esquerdo():
     assert np.all(tensor[0, :, ALTURA:, :] == PAD_VALUE)
 
 
-def test_yolov8_centraliza():
-    _, caixa = letterbox(imagem(), size=LADO, spec=YOLOV8)
-    assert (caixa.pad_x, caixa.pad_y) == (0, (LADO - ALTURA) // 2)
-
-
-def test_as_duas_convencoes_produzem_tensores_diferentes():
-    """A prova de que "letterbox é letterbox" é falso. Trocar o modelo alvo (ADR-006)
-    sem trocar a `PreprocessSpec` junto é perda de recall sem sintoma."""
-    yolox, _ = letterbox(imagem(), size=LADO, spec=YOLOX)
-    yolov8, _ = letterbox(imagem(), size=LADO, spec=YOLOV8)
-    assert not np.allclose(yolox, yolov8 * 255.0)
-
-
 def test_moldura_recebe_cinza_medio():
     """Preto daria uma borda de alto contraste que o modelo nunca viu no treino, e
     borda assim produz detecção fantasma na moldura."""
@@ -125,12 +112,60 @@ def test_yolox_mantem_bgr_e_a_faixa_0_255():
     assert tensor[0, 2, 0, 0] == 30.0
 
 
-def test_yolov8_troca_para_rgb_e_normaliza():
+def test_padrao_yolox_canto_superior_esquerdo_bgr_e_0_255():
+    """As três convenções do YOLOX num tensor só, porque erram juntas: quem copia o
+    pré-processamento de outra família de modelo costuma trazer as três de uma vez.
+    Qualquer uma delas errada produz caixas plausíveis e deslocadas, e o sintoma
+    aparece no §3.4 como zona errada — falso positivo que ninguém explica (R-1).
+
+    - o pixel (0, 0) do frame fica no (0, 0) do tensor: nada de centralizar;
+    - o canal 0 é o azul: nada de trocar para RGB;
+    - o valor chega como 200.0, não 200/255: nada de normalizar.
+    """
     img = np.zeros((ALTURA, LARGURA, 3), dtype=np.uint8)
-    img[0, 0] = (10, 20, 30)
-    tensor, caixa = letterbox(img, size=LADO, spec=YOLOV8)
-    assert tensor[0, 0, caixa.pad_y, caixa.pad_x] == pytest.approx(30 / 255)
-    assert tensor[0, 2, caixa.pad_y, caixa.pad_x] == pytest.approx(10 / 255)
+    img[0, 0] = (200, 100, 50)  # B, G, R no canto superior esquerdo
+    img[-1, -1] = (7, 8, 9)  # B, G, R no canto inferior direito
+
+    tensor, caixa = letterbox(img, size=LADO, spec=YOLOX)
+
+    assert (caixa.pad_x, caixa.pad_y) == (0, 0)
+    assert tensor[0, :, 0, 0].tolist() == [200.0, 100.0, 50.0]
+    assert tensor[0, :, ALTURA - 1, LARGURA - 1].tolist() == [7.0, 8.0, 9.0]
+    assert tensor.max() == 200.0
+    # a moldura toda à direita e embaixo, com o cinza do treino
+    assert np.all(tensor[0, :, ALTURA:, :] == float(PAD_VALUE))
+
+
+def test_yolox_e_o_default_do_letterbox():
+    """Quem chama `letterbox` sem `spec` tem que receber a convenção do modelo do
+    agente. Um default diferente valeria em todo chamador que esqueceu o argumento."""
+    padrao, _ = letterbox(imagem(), size=LADO)
+    explicito, _ = letterbox(imagem(), size=LADO, spec=YOLOX)
+    assert np.array_equal(padrao, explicito)
+
+
+# Os campos da `PreprocessSpec` existem para que a convenção seja dado, não constante
+# embutida. Um campo que `letterbox` deixasse de ler seria um botão desligado: ligá-lo
+# não mudaria nada e ninguém perceberia. Cada um, sozinho sobre o YOLOX, tem que agir.
+
+
+def test_spec_centered_centraliza():
+    _, caixa = letterbox(imagem(), size=LADO, spec=PreprocessSpec(centered=True))
+    assert (caixa.pad_x, caixa.pad_y) == (0, (LADO - ALTURA) // 2)
+
+
+def test_spec_to_rgb_inverte_os_canais():
+    base, _ = letterbox(imagem(), size=LADO, spec=YOLOX)
+    trocado, _ = letterbox(imagem(), size=LADO, spec=PreprocessSpec(to_rgb=True))
+    assert np.array_equal(trocado[0, 0], base[0, 2])
+    assert np.array_equal(trocado[0, 2], base[0, 0])
+
+
+def test_spec_normalize_divide_por_255():
+    base, _ = letterbox(imagem(), size=LADO, spec=YOLOX)
+    normalizado, _ = letterbox(imagem(), size=LADO, spec=PreprocessSpec(normalize=True))
+    assert normalizado.max() <= 1.0
+    assert np.allclose(normalizado * 255.0, base)
 
 
 def test_tensor_sai_nchw_contiguo_e_float32():
@@ -172,10 +207,15 @@ def test_size_nao_positivo_e_recusado():
 # --- a volta --------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("spec", [YOLOX, YOLOV8], ids=["yolox", "yolov8"])
-def test_ida_e_volta_devolve_a_caixa_original(spec):
+@pytest.mark.parametrize(
+    "spec", [YOLOX, PreprocessSpec(centered=True)], ids=["yolox", "centralizado"]
+)
+def test_ida_e_volta_devolve_a_caixa_original(spec: PreprocessSpec):
     """O teste que guarda o módulo inteiro: uma caixa conhecida no frame da câmera,
-    levada para o espaço do modelo e trazida de volta, tem que ser a mesma caixa."""
+    levada para o espaço do modelo e trazida de volta, tem que ser a mesma caixa.
+
+    O caso centralizado existe pelo `pad_y`: no YOLOX ele é zero, e um `undo_letterbox`
+    que esquecesse de descontá-lo passaria só com o YOLOX."""
     _, caixa = letterbox(imagem(), size=LADO, spec=spec)
     original = np.array([[100.0, 50.0, 300.0, 400.0]], dtype=np.float32)
 
