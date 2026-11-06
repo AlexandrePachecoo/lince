@@ -46,6 +46,10 @@ RECORTE = Crop(
 )
 BINS_X = int(INPUT_LARGURA * SPLIT_RATIO)
 BINS_Y = int(INPUT_ALTURA * SPLIT_RATIO)
+# Sentinela do SimCCLabel neste recorte: índice -1 / split 2.0 = -0.5, projetado.
+# O bin 0 cairia em (56.25, 25). Os dois números são vizinhos de propósito —
+# um teste que só olha "perto do canto" não distingue o sentinela do argmax.
+SENTINELA = (55.76171875, 24.51171875)
 
 
 def simcc(com_lote: bool = True) -> tuple[np.ndarray, np.ndarray]:
@@ -83,8 +87,9 @@ def test_pico_conhecido_cai_na_junta_do_frame(com_lote: bool):
     assert pulso.nome == "pulso_esquerdo"
     assert (pulso.x, pulso.y) == pytest.approx((150.0, 150.0))
     assert pulso.confianca == pytest.approx(0.3)
-    # Junta sem pico nenhum não pode herdar o bin 0, que é um canto plausível.
-    assert math.isnan(juntas[0].x) and math.isnan(juntas[0].y)
+    # Sem pico, o codec usa o sentinela -1, não o bin 0.
+    assert (juntas[0].x, juntas[0].y) == pytest.approx(SENTINELA)
+    assert (juntas[0].x, juntas[0].y) != pytest.approx((56.25, 25.0))
     assert juntas[0].confianca == 0.0
     assert np.array_equal(simcc_x, copia_x)
 
@@ -120,11 +125,11 @@ def test_confianca_baixa_permanece_no_lugar_certo():
     assert (pulso.x, pulso.y) == pytest.approx((150.0, 150.0))
 
 
-def test_pico_nao_positivo_nao_vira_junta_no_canto():
-    """O MMPose marca o pico ≤ 0 com o sentinela -1, ainda no espaço do SimCC.
-    Projetar esse -1 com a inversa do recorte cria uma junta perto do canto,
-    com cara de pulso. Aqui o pico menos ruim está no bin 0, que cairia em
-    (56.25, 25) se alguém esquecesse o corte."""
+def test_pico_nao_positivo_usa_o_sentinela_nao_o_argmax():
+    """`get_simcc_maximum` troca o pico ≤ 0 pelo sentinela -1, nos dois eixos,
+    antes de dividir pelo split ratio. O pico menos ruim deste vetor está no
+    bin 0, que cairia em (56.25, 25). O sentinela cai ao lado, em SENTINELA —
+    e usar o argmax seria a junta errada com confiança negativa."""
     simcc_x, simcc_y = simcc()
     simcc_x[:] = -1.0
     simcc_y[:] = -1.0
@@ -134,7 +139,8 @@ def test_pico_nao_positivo_nao_vira_junta_no_canto():
     nariz = decode_simcc(simcc_x, simcc_y, RECORTE)[0]
 
     assert nariz.confianca == pytest.approx(-0.2)
-    assert math.isnan(nariz.x) and math.isnan(nariz.y)
+    assert (nariz.x, nariz.y) == pytest.approx(SENTINELA)
+    assert (nariz.x, nariz.y) != pytest.approx((56.25, 25.0))
 
 
 def test_pico_nao_finito_nao_ancora_junta():
@@ -160,7 +166,8 @@ def test_eixo_zerado_nao_ancora_a_junta_no_outro():
     pulso = decode_simcc(simcc_x, simcc_y, RECORTE)[9]
 
     assert pulso.confianca == 0.0
-    assert math.isnan(pulso.x) and math.isnan(pulso.y)
+    assert (pulso.x, pulso.y) == pytest.approx(SENTINELA)
+    assert (pulso.x, pulso.y) != pytest.approx((150.0, 150.0))
 
 
 def test_ordem_coco_tem_dezessete_e_os_pulsos_nos_indices_certos():

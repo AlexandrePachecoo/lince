@@ -297,6 +297,14 @@ def _pontos(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return copiados[:, 0], copiados[:, 1]
 
 
+# `cv::warpAffine` INTER_LINEAR quantiza a fração do pixel em 5 bits (passos
+# de 1/32) e arredonda a soma inteira. Um bilinear em float discorda disso em
+# até alguns níveis de cinza — o bastante para o tensor não ser o que o
+# TopdownAffine entrega, com a junta ainda parecendo certa.
+_PESO_BITS = 5
+_PESO_PASSOS = 1 << _PESO_BITS
+
+
 def _warp_bilinear(image: np.ndarray, crop: Crop) -> np.ndarray:
     """Amostra o frame no retângulo do recorte, com borda constante 0.
 
@@ -311,18 +319,24 @@ def _warp_bilinear(image: np.ndarray, crop: Crop) -> np.ndarray:
     mapa_y = crop.center_y + (grade_v - crop.input_height / 2.0) * (
         crop.scale_h / crop.input_height
     )
-    amostrado = _bilinear(image, mapa_x, mapa_y)
-    return np.clip(np.rint(amostrado), 0, 255).astype(np.uint8)
+    return _bilinear(image, mapa_x, mapa_y)
 
 
 def _bilinear(image: np.ndarray, mapa_x: np.ndarray, mapa_y: np.ndarray) -> np.ndarray:
     altura, largura = image.shape[:2]
     x0 = np.floor(mapa_x).astype(np.int32)
     y0 = np.floor(mapa_y).astype(np.int32)
-    x1 = x0 + 1
-    y1 = y0 + 1
-    wx = (mapa_x - x0).astype(np.float32)
-    wy = (mapa_y - y0).astype(np.float32)
+    # O mesmo arredondamento do INTER_LINEAR: floor(fração * 32 + 0.5). Peso
+    # 32 significa "o pixel seguinte inteiro", senão a borda do frame — onde
+    # o vizinho não existe — diverge do warpAffine.
+    ax = np.floor((mapa_x - x0) * _PESO_PASSOS + 0.5).astype(np.int32)
+    ay = np.floor((mapa_y - y0) * _PESO_PASSOS + 0.5).astype(np.int32)
+    carrega_x = ax >= _PESO_PASSOS
+    carrega_y = ay >= _PESO_PASSOS
+    x0 = x0 + carrega_x.astype(np.int32)
+    y0 = y0 + carrega_y.astype(np.int32)
+    ax = np.where(carrega_x, np.int32(0), ax)
+    ay = np.where(carrega_y, np.int32(0), ay)
 
     def pixels(xx: np.ndarray, yy: np.ndarray) -> np.ndarray:
         # Fora do frame pesa zero, sem renormalizar o vizinho que existe: é o
@@ -331,17 +345,20 @@ def _bilinear(image: np.ndarray, mapa_x: np.ndarray, mapa_y: np.ndarray) -> np.n
         valido = (xx >= 0) & (xx < largura) & (yy >= 0) & (yy < altura)
         xx_c = np.clip(xx, 0, largura - 1)
         yy_c = np.clip(yy, 0, altura - 1)
-        amostra = image[yy_c, xx_c].astype(np.float32)
-        amostra[~valido] = 0.0
+        amostra = image[yy_c, xx_c].astype(np.int32)
+        amostra[~valido] = 0
         return amostra
 
-    peso_00 = (1.0 - wx) * (1.0 - wy)
-    peso_10 = wx * (1.0 - wy)
-    peso_01 = (1.0 - wx) * wy
-    peso_11 = wx * wy
-    return (
+    peso_00 = (_PESO_PASSOS - ax) * (_PESO_PASSOS - ay)
+    peso_10 = ax * (_PESO_PASSOS - ay)
+    peso_01 = (_PESO_PASSOS - ax) * ay
+    peso_11 = ax * ay
+    # + 2^(2*bits - 1) antes do deslocamento é o arredondamento do OpenCV.
+    acumulado = (
         pixels(x0, y0) * peso_00[..., None]
-        + pixels(x1, y0) * peso_10[..., None]
-        + pixels(x0, y1) * peso_01[..., None]
-        + pixels(x1, y1) * peso_11[..., None]
+        + pixels(x0 + 1, y0) * peso_10[..., None]
+        + pixels(x0, y0 + 1) * peso_01[..., None]
+        + pixels(x0 + 1, y0 + 1) * peso_11[..., None]
+        + (1 << (_PESO_BITS * 2 - 1))
     )
+    return (acumulado >> (_PESO_BITS * 2)).astype(np.uint8)

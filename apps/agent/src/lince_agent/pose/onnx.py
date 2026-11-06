@@ -97,10 +97,11 @@ class DecodeError(ValueError):
 class Junta:
     """Uma junta no frame da câmera, já com o recorte desfeito.
 
-    `x` e `y` são NaN quando a confiança não é positiva. O MMPose marca esse
-    caso com o sentinela -1 no espaço do SimCC; projetar o sentinela com
-    `undo_crop` colocaria uma junta que o modelo disse não existir — em geral
-    perto do canto do recorte, que é um pulso perfeitamente plausível.
+    Confiança ≤ 0 segue o `get_simcc_maximum`: os dois eixos viram o sentinela
+    -1, dividido pelo split ratio e projetado. Não é o argmax desse vetor — o
+    pico menos ruim de um mapa não positivo cairia noutro lugar, com cara de
+    pulso. Confiança não finita fica sem coordenada: `nan <= limiar` é falso,
+    e uma junta com x/y preenchido passaria no gesto.
     """
 
     indice: int
@@ -189,16 +190,21 @@ def decode_simcc(
     # in-place mudaria a confiança e o tensor ainda pareceria o mesmo.
     eixo_x = np.array(eixo_x, dtype=np.float64, copy=True)
     eixo_y = np.array(eixo_y, dtype=np.float64, copy=True)
-    bin_x = np.argmax(eixo_x, axis=1)
-    bin_y = np.argmax(eixo_y, axis=1)
+    bin_x = np.argmax(eixo_x, axis=1).astype(np.float64)
+    bin_y = np.argmax(eixo_y, axis=1).astype(np.float64)
     confianca = np.minimum(np.max(eixo_x, axis=1), np.max(eixo_y, axis=1))
+    # `locs[vals <= 0] = -1` no get_simcc_maximum, e o decode divide isso pelo
+    # split ratio. O argmax de um vetor não positivo não entra.
+    sem_pico = confianca <= 0
+    bin_x[sem_pico] = -1.0
+    bin_y[sem_pico] = -1.0
     no_recorte = np.stack((bin_x / split_ratio, bin_y / split_ratio), axis=1).astype(np.float32)
     no_frame = undo_crop(no_recorte, crop)
 
     juntas: list[Junta] = []
     for indice in range(NUM_JUNTAS):
         valor = float(confianca[indice])
-        if not math.isfinite(valor) or valor <= 0.0:
+        if not math.isfinite(valor):
             x = y = math.nan
         else:
             x = float(no_frame[indice, 0])
