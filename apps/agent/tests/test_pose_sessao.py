@@ -272,19 +272,41 @@ def test_sem_caixa_nao_chama_a_sessao(tmp_path: Path):
     assert conta.lotes == []
 
 
-def test_versao_e_a_do_detector_e_o_provider_e_o_disponivel(tmp_path: Path):
+def test_versao_e_o_provider_inicializado_nao_o_anunciado(tmp_path: Path, caplog):
+    """`get_available_providers` é o que o pacote compilou. No onnxruntime-gpu
+    o CUDA entra nessa lista mesmo sem `libcuda.so.1`, e a sessão inicializa
+    em CPU. `info().provider` tem que ser o que `get_providers` devolveu, e a
+    queda para o próximo da lista tem que sair no aviso. Usar o anunciado
+    como se fosse o obtido esconde o box que caiu para CPU (§10.10)."""
     import onnxruntime as ort
 
     caminho = grava_modelo(tmp_path / "rtmpose-s.onnx")
-    pose = OnnxPose(caminho, providers=PROVIDERS)
-    disponiveis = ort.get_available_providers()
-    esperado = next(provider for provider in PROVIDERS if provider in disponiveis)
+    with caplog.at_level("WARNING"):
+        pose = OnnxPose(caminho, providers=PROVIDERS)
+    sessao = abre_sessao(caminho, PROVIDERS)
+    anunciados = ort.get_available_providers()
+    inicializado = sessao.get_providers()[0]
     info = pose.info()
-    assert info.provider == esperado
+
+    assert info.provider == inicializado
+    assert info.provider in PROVIDERS
+    assert info.provider in anunciados
     assert info.model_version == versao_do_detector(caminho)
     assert info.input_width == INPUT_LARGURA
     assert info.input_height == INPUT_ALTURA
     assert info.lote_dinamico is True
+
+    quedas = [
+        registro.getMessage()
+        for registro in caplog.records
+        if "indisponível" in registro.getMessage()
+    ]
+    if info.provider != PROVIDERS[0]:
+        assert len(quedas) == 1
+        assert PROVIDERS[0] in quedas[0]
+        assert info.provider in quedas[0]
+    else:
+        assert quedas == []
 
 
 def test_sessao_fechada_recusa_a_proxima_caixa(tmp_path: Path):
