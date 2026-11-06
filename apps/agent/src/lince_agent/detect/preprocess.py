@@ -44,24 +44,24 @@ class PreprocessSpec:
 
     centered: bool = False
     """Onde a imagem fica dentro do quadrado. YOLOX encosta no canto superior
-    esquerdo e preenche à direita e embaixo; a linhagem YOLOv5/v8 centraliza."""
+    esquerdo e preenche à direita e embaixo; centralizar desloca toda caixa."""
 
     to_rgb: bool = False
-    """YOLOX foi treinado em BGR e consome o frame como o ffmpeg entrega. YOLOv8
-    espera RGB — para ele, esquecer a troca custa recall sem sintoma nenhum."""
+    """YOLOX foi treinado em BGR e consome o frame como o ffmpeg entrega. Trocar os
+    canais "para ficar certo" custa recall sem sintoma nenhum."""
 
     normalize: bool = False
-    """YOLOX embute a normalização no próprio grafo e recebe 0..255. YOLOv8 recebe
-    0..1."""
+    """YOLOX embute a normalização no próprio grafo e recebe 0..255. Dividir por 255
+    aqui entrega ao modelo uma imagem quase preta."""
 
 
 YOLOX = PreprocessSpec()
-"""O default do agente: Apache-2.0, sem o acoplamento AGPL da linhagem Ultralytics."""
+"""A convenção do modelo do agente, o YOLOX-s oficial da Megvii (Apache-2.0).
 
-YOLOV8 = PreprocessSpec(centered=True, to_rgb=True, normalize=True)
-"""Aqui para o dia em que o modelo alvo mudar — e para o teste que prova que as duas
-convenções produzem tensores diferentes, que é o que impede alguém de assumir que
-"letterbox é letterbox"."""
+É a única constante de propósito. Pesos da Ultralytics (YOLOv8/YOLO11) são AGPL-3.0 e
+o produto é fechado (ADR-009); uma constante "para o dia em que o modelo mudar" é um
+convite a trocar o modelo — e a licença junto — sem ninguém decidir isso. O
+`OnnxDetector` recusa esses pesos pelo nome do arquivo."""
 
 
 @dataclass(frozen=True, slots=True)

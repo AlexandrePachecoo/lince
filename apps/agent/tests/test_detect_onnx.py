@@ -108,6 +108,46 @@ def test_modelo_ausente_e_recusado(tmp_path: Path):
 # --- a subida -------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "nome",
+    [
+        "yolov8n.onnx",
+        "YOLOv8s-pessoas.onnx",
+        "yolo11m.onnx",
+        "Yolo11n_int8.onnx",
+        "ultralytics_export.onnx",
+        "modelo-ULTRALYTICS.onnx",
+    ],
+)
+def test_pesos_da_ultralytics_sao_recusados_citando_a_agpl(tmp_path: Path, nome: str):
+    """Peso da Ultralytics é AGPL-3.0 e o produto é fechado (ADR-009): um box rodando
+    `yolov8n.onnx` "só para testar" obriga a abrir o código. A recusa vem antes de
+    tudo — nem o arquivo precisa existir, e a sessão nunca é aberta, então este teste
+    não precisa de um `.onnx` de verdade."""
+
+    def nunca_abre(*_args):
+        raise AssertionError("a sessão não pode ser aberta para um peso AGPL")
+
+    with pytest.raises(ModelError, match="AGPL-3.0"):
+        OnnxDetector(tmp_path / nome, DetectionOptions(), session_factory=nunca_abre)
+
+
+def test_recusa_olha_o_nome_do_arquivo_e_nao_o_diretorio(tmp_path: Path):
+    """O que se recusa é o peso, não o lugar onde o projeto foi clonado. Um diretório
+    chamado `ultralytics-comparativo` não pode impedir o YOLOX de subir."""
+    pasta = tmp_path / "ultralytics-comparativo"
+    pasta.mkdir()
+    caminho = modelo_falso(pasta)
+    opcoes = DetectionOptions(enabled=True, model_path=caminho)
+    unidade = OnnxDetector(caminho, opcoes, session_factory=lambda *_args: SessaoFalsa())
+    assert unidade.info() is not None
+
+
+def test_yolox_nao_e_confundido_com_peso_agpl(tmp_path: Path):
+    """O modelo do agente tem que passar pela trava — senão ela desliga o produto."""
+    assert detector(tmp_path, SessaoFalsa()).info() is not None
+
+
 def test_info_reporta_o_provider_que_de_fato_pegou(tmp_path: Path):
     """Pedido não é obtido: um box com o driver quebrado aceita `CUDAExecutionProvider`
     na lista e roda em CPU sem dizer nada. É o dado que fecha a pendência §10.10 com
