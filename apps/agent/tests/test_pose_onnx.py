@@ -211,7 +211,7 @@ def test_split_ratio_invalido_e_recusado():
         decode_simcc(simcc_x, simcc_y, RECORTE, split_ratio=0.0)
 
 
-# --- a sessão que ainda não abre ------------------------------------------------
+# --- identidade e trava de nome -------------------------------------------------
 
 
 def test_checksum_e_o_mesmo_mecanismo_do_detector(tmp_path: Path):
@@ -246,7 +246,7 @@ def test_providers_sao_os_do_detector():
 def test_modelo_fora_do_piloto_e_recusado_pelo_nome(tmp_path: Path, nome: str):
     """Ultralytics é AGPL-3.0 (ADR-009). WholeBody e Halpe têm outra contagem
     de juntas. O arquivo não precisa existir: a recusa é anterior a abrir
-    sessão, que nesta fase nem abre."""
+    a sessão, e `OnnxPose` chama esta função antes de qualquer leitura."""
     with pytest.raises(ModelError):
         recusa_modelo_fora_do_piloto(tmp_path / nome)
 

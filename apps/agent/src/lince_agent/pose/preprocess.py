@@ -130,18 +130,17 @@ def frame_to_bgr(frame: Frame) -> np.ndarray:
     return frame.as_array()
 
 
-def crop_bbox(
+def plano_crop(
     image: np.ndarray,
     bbox: np.ndarray | Sequence[float],
     *,
     spec: PreprocessSpec = RTMPOSE,
-) -> tuple[np.ndarray, Crop]:
-    """Recorta a caixa da pessoa e devolve o tensor NCHW float32 e o `Crop`.
+) -> Crop:
+    """Centro e escala do recorte, sem amostrar pixel.
 
-    `bbox` é `(x1, y1, x2, y2)` no frame BGR do ffmpeg, o mesmo espaço das
-    caixas do detector depois do `undo_letterbox`. A caixa pode transbordar o
-    frame — pessoa encostada na borda — e o que falta é preenchido com 0 antes
-    da normalização, como o `warpAffine` do treino.
+    O benchmark compara o warp NumPy com `cv2.warpAffine` em cima deste plano.
+    Recalcular o centro lá fora é como o deslocamento entra: as duas curvas
+    deixam de medir o mesmo recorte, e a mais rápida parece ganhar.
     """
     _valida_spec(spec)
     _valida_imagem(image)
@@ -156,7 +155,7 @@ def crop_bbox(
         (y2 - y1) * spec.padding,
         spec.input_width / spec.input_height,
     )
-    crop = Crop(
+    return Crop(
         center_x=center_x,
         center_y=center_y,
         scale_w=scale_w,
@@ -166,6 +165,22 @@ def crop_bbox(
         source_width=int(image.shape[1]),
         source_height=int(image.shape[0]),
     )
+
+
+def crop_bbox(
+    image: np.ndarray,
+    bbox: np.ndarray | Sequence[float],
+    *,
+    spec: PreprocessSpec = RTMPOSE,
+) -> tuple[np.ndarray, Crop]:
+    """Recorta a caixa da pessoa e devolve o tensor NCHW float32 e o `Crop`.
+
+    `bbox` é `(x1, y1, x2, y2)` no frame BGR do ffmpeg, o mesmo espaço das
+    caixas do detector depois do `undo_letterbox`. A caixa pode transbordar o
+    frame — pessoa encostada na borda — e o que falta é preenchido com 0 antes
+    da normalização, como o `warpAffine` do treino.
+    """
+    crop = plano_crop(image, bbox, spec=spec)
 
     # `image` pode ser a vista somente leitura do pipe (`Frame.as_array`).
     # O warp aloca o destino; escrever no frame estouraria na primeira câmera.

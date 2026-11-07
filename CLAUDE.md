@@ -52,7 +52,7 @@ Regras práticas:
 Antes de dar qualquer coisa por concluída:
 
 ```bash
-cd apps/agent && uv run ruff check src tests && uv run ruff format --check src tests && uv run pytest
+cd apps/agent && uv run ruff check src tests tools && uv run ruff format --check src tests tools && uv run pytest
 ```
 
 ---
