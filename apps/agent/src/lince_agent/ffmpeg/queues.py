@@ -58,6 +58,20 @@ class DropOldestQueue[T]:
             self._condition.notify()
             return descartado
 
+    def espera(self, timeout: float | None = None) -> bool:
+        """Espera haver item ou a fila fechar. Não remove nada.
+
+        Quem precisa lançar o item num contador no mesmo instante em que o tira
+        não pode usar o `get` bloqueante: ele entrega o item e só depois o
+        chamador toma outro lock. Nesse intervalo o snapshot sumiu da fila e
+        ainda não está em lugar nenhum. Espera-se aqui, sem segurar o lock dos
+        contadores, e o `get(timeout=0)` seguinte tira e contabiliza juntos.
+        """
+        with self._condition:
+            if not self._items and not self._closed:
+                self._condition.wait(timeout)
+            return bool(self._items)
+
     def get(self, timeout: float | None = None) -> T | None:
         """Devolve o próximo item, ou `None` no timeout ou após o fechamento."""
         with self._condition:
