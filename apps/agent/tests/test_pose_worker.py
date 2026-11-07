@@ -18,7 +18,7 @@ import pytest
 from lince_agent.config import PixelFormat
 from lince_agent.ffmpeg.rawframe import Frame
 from lince_agent.pose.onnx import NUM_JUNTAS, Junta, PosePessoa
-from lince_agent.pose.worker import CaixaPose, PoseWorker, ResultadoPose
+from lince_agent.pose.worker import CaixaPose, PoseWorker, PoseWorkerStats, ResultadoPose
 
 LARGURA, ALTURA = 8, 6
 SENHA = "s3nha-super-secreta"
@@ -109,6 +109,14 @@ def worker(
     on_result=None,
 ) -> PoseWorker:
     return PoseWorker(pose or PoseFalsa(), queue_size=queue_size, on_result=on_result)
+
+
+def assert_particao(stats: PoseWorkerStats) -> None:
+    """Um snapshot aceito está num termo só. Os dois lados têm que ser o mesmo número."""
+    assert stats.queue_depth == stats.na_fila
+    assert stats.aceitos == (
+        stats.processados + stats.descartados + stats.erros + stats.em_curso + stats.na_fila
+    )
 
 
 def envia(
@@ -365,8 +373,15 @@ def test_consumidor_que_falha_nao_derruba_o_proximo_nem_vaza_segredo(caplog):
 
     stats = unidade.stats()
     assert [resultado.camera_id for resultado in recebidos] == ["cam2"]
+    # O primeiro snapshot foi inferido e o callback rejeitou. Está em `erros`,
+    # não em `processados`: os dois juntos contariam o mesmo frame duas vezes.
+    assert stats.aceitos == 2
     assert stats.erros == 1
-    assert stats.processados == 2
+    assert stats.processados == 1
+    assert (
+        stats.aceitos
+        == stats.processados + stats.descartados + stats.erros + stats.em_curso + stats.na_fila
+    )
     assert SENHA not in caplog.text
     assert TOKEN not in caplog.text
     assert "operador" not in caplog.text
@@ -481,6 +496,288 @@ def test_stop_no_callback_nao_trava_nem_entrega_o_seguinte():
     finally:
         travada.solta.set()
         unidade.stop(timeout=5)
+
+
+class _PosePresa:
+    """Trava em `estimar` e não solta no `close`.
+
+    Se `close` destravasse, um `stop` que fechou cedo esconderia a inferência
+    ainda em curso — que é a corrida que este dublê existe para deixar visível.
+    """
+
+    def __init__(self) -> None:
+        self.entrou = threading.Event()
+        self.solta = threading.Event()
+        self.chamadas = 0
+        self.fechamentos = 0
+        self.lock = threading.Lock()
+        self.max_dentro = 0
+        self._dentro = 0
+
+    def estimar(self, imagem: object, caixas: Sequence[Sequence[float]]) -> tuple[PosePessoa, ...]:
+        with self.lock:
+            self._dentro += 1
+            self.max_dentro = max(self.max_dentro, self._dentro)
+        self.chamadas += 1
+        self.entrou.set()
+        assert self.solta.wait(timeout=5)
+        with self.lock:
+            self._dentro -= 1
+        return tuple(pose_da_caixa(tuple(float(valor) for valor in caixa)) for caixa in caixas)
+
+    def close(self) -> None:
+        self.fechamentos += 1
+
+
+def test_tick_em_curso_recusa_a_thread():
+    """`tick` lia a thread e soltava o lock antes de `estimar`. `start` nesse
+    intervalo subia a thread, e as duas chamavam a sessão juntas."""
+    pose = _PosePresa()
+    unidade = PoseWorker(pose, queue_size=4)
+    envia(unidade, "cam", 1, 1.0)
+    envia(unidade, "cam", 2, 2.0)
+    encontro = threading.Barrier(2)
+    tick = threading.Thread(target=_tick_ate_o_encontro, args=(unidade, pose, encontro))
+    tick.start()
+    try:
+        encontro.wait(timeout=5)
+        with pytest.raises(RuntimeError, match="tick em curso"):
+            unidade.start()
+        assert pose.max_dentro == 1
+    finally:
+        pose.solta.set()
+        tick.join(timeout=5)
+        unidade.stop(timeout=5)
+
+
+def _tick_ate_o_encontro(
+    unidade: PoseWorker, pose: _PosePresa, encontro: threading.Barrier
+) -> None:
+    def estimar(imagem: object, caixas: Sequence[Sequence[float]]) -> tuple[PosePessoa, ...]:
+        pose.chamadas += 1
+        with pose.lock:
+            pose._dentro += 1
+            pose.max_dentro = max(pose.max_dentro, pose._dentro)
+        encontro.wait(timeout=5)
+        assert pose.solta.wait(timeout=5)
+        with pose.lock:
+            pose._dentro -= 1
+        return tuple(pose_da_caixa(tuple(float(valor) for valor in caixa)) for caixa in caixas)
+
+    pose.estimar = estimar  # type: ignore[method-assign]
+    unidade.tick()
+
+
+def test_stop_durante_o_tick_nao_fecha_nem_entrega_depois():
+    """`stop` juntava a thread de trabalho e, sem ela, fechava a sessão enquanto
+    o `tick` ainda estava em `estimar`. O callback saía depois do retorno."""
+    pose = _PosePresa()
+    recebidos: list[ResultadoPose] = []
+    entregue = threading.Event()
+
+    def on_result(resultado: ResultadoPose) -> None:
+        recebidos.append(resultado)
+        entregue.set()
+
+    unidade = PoseWorker(pose, on_result=on_result)
+    envia(unidade, "cam", 1, 1.0)
+    tick = threading.Thread(target=unidade.tick)
+    tick.start()
+    try:
+        assert pose.entrou.wait(timeout=5)
+        with pytest.raises(TimeoutError, match="sessão aberta"):
+            unidade.stop(timeout=0)
+        assert pose.fechamentos == 0
+        assert tick.is_alive()
+        assert recebidos == []
+        pose.solta.set()
+        assert entregue.wait(timeout=5)
+        assert [resultado.sequence for resultado in recebidos] == [1]
+        assert pose.fechamentos == 0
+        unidade.stop(timeout=5)
+        assert pose.fechamentos == 1
+        envia(unidade, "cam", 2, 2.0)
+        assert [resultado.sequence for resultado in recebidos] == [1]
+        assert pose.chamadas == 1
+    finally:
+        pose.solta.set()
+        tick.join(timeout=5)
+        unidade.stop(timeout=5)
+
+
+def test_stop_que_expira_nao_se_confunde_com_encerramento():
+    """Timeout esgotado devolvia `None`, igual ao `stop` que fechou. A sessão
+    tem que continuar com a inferência que não voltou, e o chamador tem que
+    poder distinguir os dois desfechos."""
+    pose = _PosePresa()
+    recebidos: list[ResultadoPose] = []
+    entregue = threading.Event()
+
+    def on_result(resultado: ResultadoPose) -> None:
+        recebidos.append(resultado)
+        entregue.set()
+
+    unidade = PoseWorker(pose, on_result=on_result)
+    unidade.start()
+    try:
+        envia(unidade, "cam", 1, 1.0)
+        assert pose.entrou.wait(timeout=5)
+        with pytest.raises(TimeoutError, match="sessão aberta"):
+            unidade.stop(timeout=0)
+        assert pose.fechamentos == 0
+        assert any(thread.name == "pose" and thread.is_alive() for thread in threading.enumerate())
+        pose.solta.set()
+        assert entregue.wait(timeout=5)
+        assert pose.fechamentos == 0
+        unidade.stop(timeout=5)
+        assert pose.fechamentos == 1
+        assert [resultado.sequence for resultado in recebidos] == [1]
+        assert not any(
+            thread.name == "pose" and thread.is_alive() for thread in threading.enumerate()
+        )
+        envia(unidade, "cam", 2, 2.0)
+        assert pose.chamadas == 1
+    finally:
+        pose.solta.set()
+        unidade.stop(timeout=5)
+
+
+def test_stop_imediato_sem_inferencia_fecha():
+    """Timeout zero com ninguém em `estimar` é encerramento de verdade: a
+    sessão fecha e não há exceção para confundir com a pose ainda ocupada."""
+    pose = PoseFalsa()
+    unidade = PoseWorker(pose)
+    unidade.stop(timeout=0)
+    assert pose.fechamentos == 1
+    unidade.stop(timeout=0)
+    assert pose.fechamentos == 1
+
+
+def test_submit_concorrente_com_stop_volta_e_nao_infere_depois():
+    """`submit` não pode esperar a inferência nem a parada. O que entra
+    enquanto `stop` já começou não vira callback depois que `stop` volta."""
+    pose = _PosePresa()
+    recebidos: list[ResultadoPose] = []
+    unidade = PoseWorker(pose, on_result=recebidos.append, queue_size=8)
+    unidade.start()
+    encontro = threading.Barrier(2)
+    submeteu = threading.Event()
+    parou = threading.Event()
+
+    def parar() -> None:
+        encontro.wait(timeout=5)
+        unidade.stop(timeout=5)
+        parou.set()
+
+    def submeter() -> None:
+        encontro.wait(timeout=5)
+        for sequencia in range(10, 18):
+            envia(unidade, "cam", sequencia, float(sequencia))
+        submeteu.set()
+
+    try:
+        envia(unidade, "cam", 1, 1.0)
+        assert pose.entrou.wait(timeout=5)
+        threading.Thread(target=parar).start()
+        threading.Thread(target=submeter).start()
+        assert submeteu.wait(timeout=5)
+        # O flag sobe antes do join: é a janela em que o submit tem de voltar
+        # e o que ainda está só na fila não pode começar a inferir.
+        assert unidade._encerrar.wait(timeout=5)
+        assert not parou.is_set()
+        pose.solta.set()
+        assert parou.wait(timeout=5)
+        assert [resultado.sequence for resultado in recebidos] == [1]
+        assert pose.chamadas == 1
+        assert_particao(unidade.stats())
+        envia(unidade, "cam", 99, 99.0)
+        assert [resultado.sequence for resultado in recebidos] == [1]
+        assert pose.chamadas == 1
+        assert unidade.stats().aceitos == unidade.stats().processados + unidade.stats().descartados
+    finally:
+        pose.solta.set()
+        unidade.stop(timeout=5)
+
+
+def test_processados_so_sobe_depois_que_o_callback_volta():
+    """Antes, `processados` subia antes do callback. Quem lesse a conta ali via
+    entrega que ainda podia falhar — e, se falhasse, o mesmo snapshot também
+    ia para `erros`."""
+    visto: dict[str, PoseWorkerStats] = {}
+
+    def on_result(resultado: ResultadoPose) -> None:
+        visto["durante"] = unidade.stats()
+        assert resultado.sequence == 1
+
+    unidade = PoseWorker(PoseFalsa(), on_result=on_result)
+    envia(unidade, "cam", 1, 1.0)
+    assert unidade.tick()
+    durante = visto["durante"]
+    assert durante.aceitos == 1
+    assert durante.processados == 0
+    assert durante.em_curso == 1
+    assert durante.erros == 0
+    assert_particao(durante)
+    depois = unidade.stats()
+    assert depois.processados == 1
+    assert depois.em_curso == 0
+    assert_particao(depois)
+
+
+def test_conta_fecha_em_curso_no_descarte_e_na_fila_recusada():
+    """No meio da inferência a conta já fecha: o que está em `estimar` não
+    falta em `aceitos`, o drop não fica invisível e o `submit` com a fila
+    fechada não entra."""
+    pose = _PosePresa()
+    unidade = PoseWorker(pose, queue_size=1)
+    unidade.start()
+    try:
+        envia(unidade, "cam", 1, 1.0)
+        assert pose.entrou.wait(timeout=5)
+        em_curso = unidade.stats()
+        assert em_curso.aceitos == 1
+        assert em_curso.em_curso == 1
+        assert em_curso.processados == 0
+        assert em_curso.na_fila == 0
+        assert_particao(em_curso)
+        envia(unidade, "cam", 2, 2.0)
+        envia(unidade, "cam", 3, 3.0)
+        cheia = unidade.stats()
+        assert cheia.aceitos == 3
+        assert cheia.descartados == 1
+        assert cheia.em_curso == 1
+        assert cheia.na_fila == 1
+        assert_particao(cheia)
+        with pytest.raises(TimeoutError, match="sessão aberta"):
+            unidade.stop(timeout=0)
+        assert pose.fechamentos == 0
+        aceitos = unidade.stats().aceitos
+        envia(unidade, "cam", 4, 4.0)
+        recusada = unidade.stats()
+        assert recusada.aceitos == aceitos
+        assert recusada.em_curso == 1
+        assert_particao(recusada)
+    finally:
+        pose.solta.set()
+        unidade.stop(timeout=5)
+
+
+def test_received_at_do_frame_e_track_id_integral():
+    """O instante do frame não precisa ser repetido. `np.int64` é o id que o
+    tracker entrega; bool não é track."""
+    recebidos: list[ResultadoPose] = []
+    unidade = PoseWorker(PoseFalsa(), on_result=recebidos.append)
+    frame = quadro(4, 3.5)
+    unidade.submit("cam", frame, [(np.int64(8), (1.0, 2.0, 3.0, 4.0))])
+    assert unidade.tick()
+    assert recebidos[0].received_at == 3.5
+    assert recebidos[0].pessoas[0].track_id == 8
+    with pytest.raises(ValueError, match="não bool"):
+        unidade.submit("cam", frame, [(True, (1.0, 2.0, 3.0, 4.0))])
+    with pytest.raises(ValueError, match="não finita"):
+        unidade.submit("cam", frame, [(1, (1.0, float("nan"), 3.0, 4.0))])
+    with pytest.raises(ValueError, match="received_at"):
+        unidade.submit("cam", np.zeros((2, 2, 3), dtype=np.uint8), [])
 
 
 def test_submit_depois_do_stop_nao_chama_de_volta():

@@ -25,19 +25,31 @@ todas as caixas daquele snapshot leem essa cópia. Os quatro números da caixa
 são copiados em `submit`: escrever no array do chamador depois não move o
 recorte. A profundidade da fila é o teto de frames retidos.
 
-**Parada.** `stop` é idempotente e terminal. A inferência já iniciada
-termina e o callback dela ainda pode rodar antes de `stop` voltar. O que
-estava só na fila é descartado sem callback — não é evento persistido, e
-drenar `queue_size` inferências tornaria o encerramento tão longo quanto a
-GPU. Depois que `stop` volta, a thread não está viva e o callback não é
-chamado, nem por um `submit` atrasado. A sessão é fechada ali; para rodar de
-novo, constrói-se outro worker.
+**Contas.** Cada snapshot aceito está em exatamente um lugar:
+`processados` (entrega feita, ou sem consumidor), `descartados` (fila cheia
+ou parada), `erros` (inferência, associação ou callback), `em_curso` ou
+`na_fila`. Somar `processados` e `erros` duas vezes contaria o callback
+falho nos dois lados — por isso `processados` só sobe depois da entrega.
+Erro de callback não mata o laço: o snapshot vai para `erros` e o próximo
+segue. `aceitos` entra no mesmo lock do `put`, antes de o item poder ser
+retirado; `submit` não segura o lock da sessão.
+
+**Parada.** `stop` que retorna fechou a sessão: a thread morreu, nenhum
+`tick` segue em inferência, e não há callback novo. O que estava só na fila
+é descartado sem inferir. Se o prazo estoura com alguém ainda dentro de
+`estimar` — a thread ou um `tick` — `stop` levanta `TimeoutError` e não
+fecha a sessão. Isso não é parada concluída: a inferência em curso pode
+ainda chamar o callback, e outro `stop`, quando ela puder voltar, é que
+fecha. Para rodar de novo, constrói-se outro worker.
 """
 
 from __future__ import annotations
 
 import logging
+import math
+import numbers
 import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -129,18 +141,38 @@ class ResultadoPose:
 class CameraPoseStats:
     camera_id: str
     aceitos: int = 0
-    """Snapshots que entraram na fila. O que a saturação descartou também passou
-    por aqui — é a mesma conta de `frames_in` do detector."""
+    """Entraram na fila. O que a saturação descartou também passou por aqui."""
 
     processados: int = 0
+    """Entrega concluída, ou inferência sem consumidor. Callback que levantou
+    não entra: esse snapshot está em `erros`, e somar os dois contaria duas
+    vezes."""
+
     descartados: int = 0
-    """*Drop oldest* e o que `stop` abandonou sem inferência."""
+    """*Drop oldest* e o que a parada tirou da fila sem inferir."""
 
     erros: int = 0
+    """Inferência, associação ou callback. Terminal para o snapshot, não para
+    o laço: a câmera seguinte continua."""
+
+    em_curso: int = 0
+    """Retirados da fila e ainda não entregues, descartados ou marcados como erro."""
+
+    na_fila: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class PoseWorkerStats:
+    """Fotografia em que a conta fecha.
+
+    `aceitos == processados + descartados + erros + em_curso + na_fila`.
+
+    Um snapshot não está em dois termos. `queue_depth` é a soma de `na_fila`,
+    lida no mesmo lock que move o snapshot de um termo para o outro — por isso
+    `processados` não aparece antes de `aceitos`, e um `submit` recusado (fila
+    já fechada) não entra na conta.
+    """
+
     queue_depth: int
     queue_size: int
     cameras: tuple[CameraPoseStats, ...] = ()
@@ -161,6 +193,14 @@ class PoseWorkerStats:
     def erros(self) -> int:
         return sum(camera.erros for camera in self.cameras)
 
+    @property
+    def em_curso(self) -> int:
+        return sum(camera.em_curso for camera in self.cameras)
+
+    @property
+    def na_fila(self) -> int:
+        return sum(camera.na_fila for camera in self.cameras)
+
 
 @dataclass(frozen=True, slots=True)
 class _Pedido:
@@ -177,6 +217,8 @@ class _Contador:
     processados: int = 0
     descartados: int = 0
     erros: int = 0
+    em_curso: int = 0
+    na_fila: int = 0
 
 
 class PoseWorker:
@@ -194,50 +236,77 @@ class PoseWorker:
         self._queue_size = queue_size
         self._fila: DropOldestQueue[_Pedido] = DropOldestQueue(queue_size)
         self._lock = threading.Lock()
-        self._vida = threading.Lock()
+        """Contas e a retirada da fila. Não é o lock da sessão: `submit` pode
+        segurá-lo no `put`, que não bloqueia, e nunca durante `estimar`."""
+
+        self._vida = threading.Condition()
         self._encerrar = threading.Event()
         self._cameras: dict[str, _Contador] = {}
         self._thread: threading.Thread | None = None
+        self._subindo = False
+        self._reservas: dict[int, int] = {}
+        """Profundidade de `tick` por thread. A thread de trabalho não entra:
+        `stop` a espera no `join`. Serve para `start` não abrir outra inferência
+        e para `stop` não fechar a sessão com um `tick` ainda dentro."""
+
         self._pose_fechada = False
 
     # --- ciclo de vida ------------------------------------------------------
 
     def start(self) -> None:
-        """Sobe a thread. A segunda chamada, com ela viva, não faz nada.
+        """Sobe a thread. Com ela viva, a segunda chamada não faz nada.
 
-        Idempotente de propósito: a sessão ONNX não aguenta duas threads, e o
-        adaptador ainda vai cruzar a subida com o runtime. Errar para uma
-        segunda thread seria inferência concorrente na mesma sessão.
+        Recusa se um `tick` reservou a sessão: os dois chamariam `estimar` ao
+        mesmo tempo. A reserva e esta decisão usam o mesmo lock — a checagem
+        não se solta antes da inferência.
         """
         with self._vida:
             if self._pose_fechada or self._encerrar.is_set():
                 raise RuntimeError("o worker de pose já foi encerrado")
+            while self._subindo:
+                self._vida.wait()
             if self._thread is not None and self._thread.is_alive():
                 return
-            self._thread = threading.Thread(target=self._run, name="pose", daemon=True)
-            self._thread.start()
+            if self._reservas:
+                raise RuntimeError("tick em curso; a sessão não admite outra inferência")
+            thread = threading.Thread(target=self._run, name="pose", daemon=True)
+            self._thread = thread
+            self._subindo = True
+        falhou = False
+        try:
+            thread.start()
+        except Exception:  # noqa: BLE001 - limpa `_subindo` e relança; senão o stop espera para sempre
+            falhou = True
+            raise
+        finally:
+            with self._vida:
+                if falhou and self._thread is thread:
+                    self._thread = None
+                self._subindo = False
+                self._vida.notify_all()
 
     def stop(self, timeout: float = 15.0) -> None:
-        """Para a thread e fecha a sessão. Pode ser chamado mais de uma vez.
+        """Para e fecha a sessão, ou avisa que não deu.
 
-        Não drena a fila. A inferência em curso acaba — e o callback dela pode
-        rodar enquanto este método espera — e o resto é contado como
-        descartado. Callback depois que isto retorna, ou thread ainda viva
-        sem ser o caso do timeout, é o encerramento que este método existe
-        para não deixar acontecer.
+        Retorno normal: thread morta, nenhum `tick` em inferência, fila
+        restante descartada, sessão fechada, sem callback novo. Pode repetir.
+
+        `TimeoutError`: ainda há inferência em curso. A sessão **continua
+        aberta** — fechá-la por baixo de um `estimar` que não voltou é uso
+        depois do close. O callback dessa inferência pode sair depois da
+        exceção. Outro `stop`, quando ela puder terminar, conclui a parada.
         """
+        if timeout < 0:
+            raise ValueError(f"timeout deve ser >= 0, recebi {timeout}")
+        prazo = time.monotonic() + timeout
         self._encerrar.set()
         self._fila.close()
-        with self._vida:
-            thread = self._thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout)
+        thread = self._thread_depois_de_subir(prazo, timeout)
+        if thread is not None and thread is not threading.current_thread() and thread.is_alive():
+            thread.join(max(0.0, prazo - time.monotonic()))
             if thread.is_alive():
-                # A sessão continua de pé: fechá-la por baixo de um `run` que
-                # não voltou é uso da sessão depois do close. Outro `stop`
-                # tenta o join de novo.
-                log.warning("thread de pose não terminou em %.1fs", timeout)
-                return
+                self._estourou(timeout)
+        self._esperar_ticks(prazo, timeout)
         self._descarta_restante()
         self._fechar_pose()
 
@@ -249,7 +318,7 @@ class PoseWorker:
         imagem: Frame | np.ndarray,
         pessoas: Sequence[CaixaPose | tuple[int, Sequence[float]]],
         *,
-        received_at: float,
+        received_at: float | None = None,
         sequence: int | None = None,
     ) -> None:
         """Enfileira um snapshot. **Nunca bloqueia** esperando a inferência.
@@ -259,136 +328,181 @@ class PoseWorker:
         se a imagem ou a caixa nem chegam a ser um snapshot; isso é erro de
         quem chama, não falha de inferência, e não entra na fila.
 
+        `received_at` omitido num `Frame` usa o instante do próprio frame. Num
+        ndarray continua obrigatório: não há outro relógio que não seja o da
+        inferência.
+
         Depois do retorno, mudar o array do chamador não muda o que a thread
-        vai ler. `submit` após `stop` é ignorado.
+        vai ler. `submit` com a fila já fechada não entra na conta. O lock da
+        sessão não é tomado aqui — só o das contas, e só em volta do `put`,
+        que não bloqueia.
         """
-        if self._encerrar.is_set() or self._fila.closed:
+        instante = _instante(imagem, received_at)
+        if self._encerrar.is_set():
             return
         pedido = _Pedido(
             camera_id=camera_id,
-            received_at=received_at,
+            received_at=instante,
             sequence=_sequencia(imagem, sequence),
             imagem=_possuir_imagem(imagem),
             caixas=tuple(_como_caixa(pessoa) for pessoa in pessoas),
         )
-        descartado = self._fila.put(pedido)
-        if descartado is pedido:
-            # A fila fechou entre a leitura e o `put`. O snapshot não entrou.
-            return
         with self._lock:
-            self._cameras.setdefault(camera_id, _Contador()).aceitos += 1
+            if self._encerrar.is_set():
+                return
+            # Aceito antes de o item ficar visível, e o `put` ainda sob este
+            # lock: a thread só retira com o mesmo lock, então `processados`
+            # não é publicado antes de `aceitos`.
+            cont = self._cont(camera_id)
+            cont.aceitos += 1
+            cont.na_fila += 1
+            descartado = self._fila.put(pedido)
+            if descartado is pedido:
+                cont.aceitos -= 1
+                cont.na_fila -= 1
+                return
             if descartado is not None:
-                self._cameras.setdefault(descartado.camera_id, _Contador()).descartados += 1
+                vitima = self._cont(descartado.camera_id)
+                vitima.na_fila -= 1
+                vitima.descartados += 1
 
     def tick(self, timeout: float = 0.0) -> bool:
         """Processa no máximo um snapshot, na thread de quem chama.
 
-        É o `DetectorWorker.tick`: saturação, erro e associação se testam sem
-        `sleep` e sem corrida. Não convive com a thread — os dois consumiriam
-        a mesma fila.
+        Reserva a sessão até voltar, no mesmo lock que `start` consulta. Sem
+        isso `start` abria a thread entre a checagem e o `estimar`, e `stop`
+        fechava a sessão com este método ainda lá dentro.
         """
-        with self._vida:
-            thread = self._thread
-        if thread is not None and thread.is_alive():
-            raise RuntimeError("tick disputa a fila com a thread de pose")
-        if self._encerrar.is_set():
+        if not self._reservar():
             return False
-        pedido = self._fila.get(timeout=timeout)
-        if pedido is None:
-            return False
-        self._processa(pedido)
-        return True
+        try:
+            pedido = self._retirar()
+            if pedido is None and timeout and not self._encerrar.is_set() and not self._fila.closed:
+                self._fila.espera(timeout)
+                pedido = self._retirar()
+            if pedido is None:
+                return False
+            self._processa(pedido)
+            return True
+        finally:
+            self._liberar()
 
     # --- processamento ------------------------------------------------------
 
     def _run(self) -> None:
         try:
             while not self._encerrar.is_set():
-                pedido = self._fila.get(timeout=_ESPERA_S)
+                pedido = self._retirar()
                 if pedido is None:
-                    if self._fila.closed or self._encerrar.is_set():
+                    if self._encerrar.is_set() or self._fila.closed:
                         return
+                    self._fila.espera(_ESPERA_S)
                     continue
-                if self._encerrar.is_set():
-                    self._conta_descarte(pedido.camera_id)
-                    return
-                try:
-                    self._processa(pedido)
-                except Exception as erro:  # noqa: BLE001 - a thread é a pose da loja inteira
-                    # `_processa` já segura inferência e callback. O que chega
-                    # aqui é defeito deste laço; morrer apagaria a pose de
-                    # todas as câmeras até o processo reiniciar.
-                    log.error("falha inesperada na pose: %s", _erro_seguro(erro))
-                    self._conta_erro(pedido.camera_id)
+                self._processa(pedido)
         finally:
             with self._vida:
                 if self._thread is threading.current_thread():
                     self._thread = None
 
     def _processa(self, pedido: _Pedido) -> None:
+        erro = False
         try:
-            poses = tuple(
-                self._pose.estimar(pedido.imagem, [caixa.xyxy for caixa in pedido.caixas])
-            )
-        except Exception as erro:  # noqa: BLE001 - falha numa câmera não pode parar as outras
-            log.error(
-                "inferência de pose falhou na câmera %s: %s",
-                redige_texto(pedido.camera_id),
-                _erro_seguro(erro),
-            )
-            self._conta_erro(pedido.camera_id)
-            return
-
-        if len(poses) != len(pedido.caixas):
-            # Entregar mesmo assim colaria a junta da pessoa seguinte no track
-            # anterior. Sem resultado é visível no contador; resultado trocado
-            # vira gesto no pulso errado, sem erro nenhum.
-            log.error(
-                "pose devolveu %d resultado(s) para %d caixa(s) na câmera %s "
-                "(tracks %s); nada foi entregue",
-                len(poses),
-                len(pedido.caixas),
-                redige_texto(pedido.camera_id),
-                ",".join(str(caixa.track_id) for caixa in pedido.caixas),
-            )
-            self._conta_erro(pedido.camera_id)
-            return
-
-        self._conta_processado(pedido.camera_id)
-        if self._on_result is None:
-            return
-        resultado = ResultadoPose(
-            camera_id=pedido.camera_id,
-            received_at=pedido.received_at,
-            sequence=pedido.sequence,
-            pessoas=tuple(
-                PessoaEstimada(
-                    track_id=caixa.track_id,
-                    x1=caixa.x1,
-                    y1=caixa.y1,
-                    x2=caixa.x2,
-                    y2=caixa.y2,
-                    pose=pose,
+            try:
+                poses = tuple(
+                    self._pose.estimar(pedido.imagem, [caixa.xyxy for caixa in pedido.caixas])
                 )
-                for caixa, pose in zip(pedido.caixas, poses, strict=True)
-            ),
-        )
-        try:
-            self._on_result(resultado)
-        except Exception as erro:  # noqa: BLE001 - o consumidor é o adaptador, que ainda não existe
-            log.error(
-                "consumidor da pose falhou na câmera %s: %s",
-                redige_texto(pedido.camera_id),
-                _erro_seguro(erro),
-            )
-            self._conta_erro(pedido.camera_id)
+            except Exception as exc:  # noqa: BLE001 - falha numa câmera não pode parar as outras
+                erro = True
+                log.error(
+                    "inferência de pose falhou na câmera %s: %s",
+                    redige_texto(pedido.camera_id),
+                    _erro_seguro(exc),
+                )
+                return
 
-    def _descarta_restante(self) -> None:
-        while True:
+            if len(poses) != len(pedido.caixas):
+                # Entregar mesmo assim colaria a junta da pessoa seguinte no track
+                # anterior. Sem resultado o contador vê o erro; resultado trocado
+                # vira gesto no pulso errado, sem erro nenhum.
+                erro = True
+                log.error(
+                    "pose devolveu %d resultado(s) para %d caixa(s) na câmera %s "
+                    "(tracks %s); nada foi entregue",
+                    len(poses),
+                    len(pedido.caixas),
+                    redige_texto(pedido.camera_id),
+                    ",".join(str(caixa.track_id) for caixa in pedido.caixas),
+                )
+                return
+
+            if self._on_result is None:
+                return
+            resultado = ResultadoPose(
+                camera_id=pedido.camera_id,
+                received_at=pedido.received_at,
+                sequence=pedido.sequence,
+                pessoas=tuple(
+                    PessoaEstimada(
+                        track_id=caixa.track_id,
+                        x1=caixa.x1,
+                        y1=caixa.y1,
+                        x2=caixa.x2,
+                        y2=caixa.y2,
+                        pose=pose,
+                    )
+                    for caixa, pose in zip(pedido.caixas, poses, strict=True)
+                ),
+            )
+            try:
+                self._on_result(resultado)
+            except Exception as exc:  # noqa: BLE001 - o callback é o adaptador, que ainda não existe
+                # Não soma em `processados`: o snapshot já vai para `erros`.
+                # O laço segue — o erro é deste snapshot, não da pose da loja.
+                erro = True
+                log.error(
+                    "consumidor da pose falhou na câmera %s: %s",
+                    redige_texto(pedido.camera_id),
+                    _erro_seguro(exc),
+                )
+        finally:
+            self._fechar_curso(pedido.camera_id, erro=erro)
+
+    def _retirar(self) -> _Pedido | None:
+        """Tira um snapshot e passa `na_fila` para `em_curso`, sob o mesmo lock.
+
+        Com a parada já pedida, o item vai para `descartados` e o retorno é
+        `None`: não se começa inferência nova.
+        """
+        with self._lock:
             pedido = self._fila.get(timeout=0)
             if pedido is None:
-                return
-            self._conta_descarte(pedido.camera_id)
+                return None
+            cont = self._cont(pedido.camera_id)
+            cont.na_fila -= 1
+            if self._encerrar.is_set():
+                cont.descartados += 1
+                return None
+            cont.em_curso += 1
+            return pedido
+
+    def _descarta_restante(self) -> None:
+        with self._lock:
+            while True:
+                pedido = self._fila.get(timeout=0)
+                if pedido is None:
+                    return
+                cont = self._cont(pedido.camera_id)
+                cont.na_fila -= 1
+                cont.descartados += 1
+
+    def _fechar_curso(self, camera_id: str, *, erro: bool) -> None:
+        with self._lock:
+            cont = self._cont(camera_id)
+            cont.em_curso -= 1
+            if erro:
+                cont.erros += 1
+            else:
+                cont.processados += 1
 
     def _fechar_pose(self) -> None:
         with self._vida:
@@ -397,17 +511,59 @@ class PoseWorker:
             self._pose_fechada = True
         self._pose.close()
 
-    def _conta_processado(self, camera_id: str) -> None:
-        with self._lock:
-            self._cameras.setdefault(camera_id, _Contador()).processados += 1
+    def _cont(self, camera_id: str) -> _Contador:
+        return self._cameras.setdefault(camera_id, _Contador())
 
-    def _conta_descarte(self, camera_id: str) -> None:
-        with self._lock:
-            self._cameras.setdefault(camera_id, _Contador()).descartados += 1
+    def _reservar(self) -> bool:
+        with self._vida:
+            if self._encerrar.is_set() or self._pose_fechada:
+                return False
+            thread = self._thread
+            if self._subindo or (
+                thread is not None
+                and thread.is_alive()
+                and thread is not threading.current_thread()
+            ):
+                raise RuntimeError("tick disputa a fila com a thread de pose")
+            ident = threading.get_ident()
+            self._reservas[ident] = self._reservas.get(ident, 0) + 1
+            return True
 
-    def _conta_erro(self, camera_id: str) -> None:
-        with self._lock:
-            self._cameras.setdefault(camera_id, _Contador()).erros += 1
+    def _liberar(self) -> None:
+        with self._vida:
+            ident = threading.get_ident()
+            falta = self._reservas.get(ident, 0) - 1
+            if falta <= 0:
+                self._reservas.pop(ident, None)
+            else:
+                self._reservas[ident] = falta
+            self._vida.notify_all()
+
+    def _thread_depois_de_subir(self, prazo: float, timeout: float) -> threading.Thread | None:
+        with self._vida:
+            while self._subindo:
+                if not self._espera_vida(prazo):
+                    self._estourou(timeout)
+            return self._thread
+
+    def _esperar_ticks(self, prazo: float, timeout: float) -> None:
+        ident = threading.get_ident()
+        with self._vida:
+            while any(dono != ident for dono in self._reservas):
+                if not self._espera_vida(prazo):
+                    self._estourou(timeout)
+
+    def _espera_vida(self, prazo: float) -> bool:
+        restante = prazo - time.monotonic()
+        if restante <= 0:
+            return False
+        self._vida.wait(restante)
+        return True
+
+    def _estourou(self, timeout: float) -> None:
+        raise TimeoutError(
+            f"a pose não encerrou em {timeout:.1f}s; a inferência em curso manteve a sessão aberta"
+        )
 
     # --- observação ---------------------------------------------------------
 
@@ -420,14 +576,29 @@ class PoseWorker:
                     processados=contador.processados,
                     descartados=contador.descartados,
                     erros=contador.erros,
+                    em_curso=contador.em_curso,
+                    na_fila=contador.na_fila,
                 )
                 for camera_id, contador in sorted(self._cameras.items())
             )
+            # Mesmo lock da retirada: a profundidade não anda sem `na_fila`.
+            profundidade = len(self._fila)
         return PoseWorkerStats(
-            queue_depth=len(self._fila),
+            queue_depth=profundidade,
             queue_size=self._queue_size,
             cameras=cameras,
         )
+
+
+def _instante(imagem: Frame | np.ndarray, received_at: float | None) -> float:
+    if received_at is not None:
+        return received_at
+    if isinstance(imagem, Frame):
+        return imagem.received_at
+    raise ValueError(
+        "received_at é obrigatório quando a imagem não é um Frame: "
+        "sem ele o resultado usaria o relógio da inferência"
+    )
 
 
 def _sequencia(imagem: Frame | np.ndarray, sequence: int | None) -> int | None:
@@ -470,12 +641,27 @@ def _possuir_imagem(imagem: Frame | np.ndarray) -> Frame | np.ndarray:
 
 def _como_caixa(pessoa: object) -> CaixaPose:
     if isinstance(pessoa, CaixaPose):
+        if not all(math.isfinite(valor) for valor in pessoa.xyxy):
+            raise ValueError(
+                f"caixa do track {pessoa.track_id} tem coordenada não finita; "
+                "a pose não recorta NaN"
+            )
         return pessoa
     if isinstance(pessoa, tuple) and len(pessoa) == 2:
         track_id, bruto = pessoa
         numeros = _quatro_numeros(bruto)
-        if isinstance(track_id, int) and not isinstance(track_id, bool) and numeros is not None:
-            return CaixaPose(track_id, *numeros)
+        if isinstance(track_id, bool) or not isinstance(track_id, numbers.Integral):
+            raise ValueError(f"track_id da pose é um inteiro (não bool); recebi {track_id!r}")
+        if numeros is None:
+            raise ValueError(
+                "cada pessoa da pose é (track_id, (x1, y1, x2, y2)) ou CaixaPose; "
+                f"a caixa de {track_id!r} não tem quatro números"
+            )
+        if not all(math.isfinite(valor) for valor in numeros):
+            raise ValueError(
+                f"caixa do track {int(track_id)} tem coordenada não finita; a pose não recorta NaN"
+            )
+        return CaixaPose(int(track_id), *numeros)
     raise ValueError(
         "cada pessoa da pose é (track_id, (x1, y1, x2, y2)) ou CaixaPose; "
         f"recebi {type(pessoa).__name__}"

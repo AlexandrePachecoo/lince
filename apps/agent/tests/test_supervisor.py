@@ -78,6 +78,45 @@ def test_put_em_fila_fechada_devolve_o_proprio_item():
     assert len(fila) == 0
 
 
+def test_espera_nao_retira_e_acorda_no_put():
+    """`espera` existe para o contador e a retirada serem o mesmo passo. Se ela
+    tirasse o item, o snapshot sairia da fila antes de alguém lançar `em_curso`."""
+    fila: DropOldestQueue[int] = DropOldestQueue(2)
+    liberado = threading.Event()
+    resultado: dict[str, bool] = {}
+
+    def espera() -> None:
+        liberado.set()
+        resultado["tinha"] = fila.espera(timeout=5)
+
+    thread = threading.Thread(target=espera)
+    thread.start()
+    assert liberado.wait(timeout=5)
+    fila.put(7)
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert resultado["tinha"] is True
+    assert fila.get(timeout=0) == 7
+
+
+def test_espera_acorda_no_fechamento_sem_item():
+    fila: DropOldestQueue[int] = DropOldestQueue(1)
+    liberado = threading.Event()
+    resultado: dict[str, bool] = {}
+
+    def espera() -> None:
+        liberado.set()
+        resultado["tinha"] = fila.espera(timeout=5)
+
+    thread = threading.Thread(target=espera)
+    thread.start()
+    assert liberado.wait(timeout=5)
+    fila.close()
+    thread.join(timeout=5)
+    assert resultado["tinha"] is False
+    assert len(fila) == 0
+
+
 def test_get_devolve_none_no_timeout():
     fila: DropOldestQueue[int] = DropOldestQueue(2)
     assert fila.get(timeout=0.01) is None
