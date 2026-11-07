@@ -18,7 +18,13 @@ import pytest
 from lince_agent.config import PixelFormat
 from lince_agent.ffmpeg.rawframe import Frame
 from lince_agent.pose.onnx import NUM_JUNTAS, Junta, PosePessoa
-from lince_agent.pose.worker import CaixaPose, PoseWorker, PoseWorkerStats, ResultadoPose
+from lince_agent.pose.worker import (
+    CaixaPose,
+    ParadaReentrante,
+    PoseWorker,
+    PoseWorkerStats,
+    ResultadoPose,
+)
 
 LARGURA, ALTURA = 8, 6
 SENHA = "s3nha-super-secreta"
@@ -112,8 +118,17 @@ def worker(
 
 
 def assert_particao(stats: PoseWorkerStats) -> None:
-    """Um snapshot aceito está num termo só. Os dois lados têm que ser o mesmo número."""
+    """A conta fecha no total e em cada câmera. O agregado sozinho esconderia
+    um descarte lançado na câmera errada."""
     assert stats.queue_depth == stats.na_fila
+    for camera in stats.cameras:
+        assert camera.aceitos == (
+            camera.processados
+            + camera.descartados
+            + camera.erros
+            + camera.em_curso
+            + camera.na_fila
+        ), camera
     assert stats.aceitos == (
         stats.processados + stats.descartados + stats.erros + stats.em_curso + stats.na_fila
     )
@@ -345,10 +360,15 @@ def test_excecao_na_inferencia_nao_para_o_proximo_nem_vaza_segredo(caplog):
     assert recebidos[0].camera_id == "cam2"
     assert unidade.stats().erros == 1
     assert unidade.stats().processados == 1
-    assert {camera.camera_id: camera.erros for camera in unidade.stats().cameras} == {
-        "cam1": 1,
-        "cam2": 0,
-    }
+    stats = unidade.stats()
+    por_camera = {camera.camera_id: camera for camera in stats.cameras}
+    assert por_camera["cam1"].aceitos == 1
+    assert por_camera["cam1"].erros == 1
+    assert por_camera["cam1"].processados == 0
+    assert por_camera["cam2"].aceitos == 1
+    assert por_camera["cam2"].processados == 1
+    assert por_camera["cam2"].erros == 0
+    assert_particao(stats)
     assert SENHA not in caplog.text
     assert TOKEN not in caplog.text
     assert "operador" not in caplog.text
@@ -378,10 +398,10 @@ def test_consumidor_que_falha_nao_derruba_o_proximo_nem_vaza_segredo(caplog):
     assert stats.aceitos == 2
     assert stats.erros == 1
     assert stats.processados == 1
-    assert (
-        stats.aceitos
-        == stats.processados + stats.descartados + stats.erros + stats.em_curso + stats.na_fila
-    )
+    por_camera = {camera.camera_id: camera for camera in stats.cameras}
+    assert por_camera["cam1"].erros == 1 and por_camera["cam1"].processados == 0
+    assert por_camera["cam2"].processados == 1 and por_camera["cam2"].erros == 0
+    assert_particao(stats)
     assert SENHA not in caplog.text
     assert TOKEN not in caplog.text
     assert "operador" not in caplog.text
@@ -461,9 +481,50 @@ def test_stop_descarta_o_que_ainda_nao_inferiu_sem_callback():
     assert unidade.tick() is False
 
 
+def test_dois_ticks_nao_inferem_juntos():
+    """`_reservar` empilhava um dono por thread. Dois `tick` retiravam
+    snapshots e chamavam `estimar` ao mesmo tempo, na mesma sessão."""
+    pose = _PosePresa()
+    unidade = PoseWorker(pose, queue_size=4)
+    envia(unidade, "cam-a", 1, 1.0)
+    envia(unidade, "cam-b", 2, 2.0)
+    primeiro = threading.Thread(target=unidade.tick)
+    segundo_erro: dict[str, BaseException | None] = {"erro": None}
+
+    def segundo() -> None:
+        try:
+            unidade.tick()
+        except RuntimeError as erro:
+            segundo_erro["erro"] = erro
+
+    primeiro.start()
+    try:
+        assert pose.entrou.wait(timeout=5)
+        outro = threading.Thread(target=segundo)
+        outro.start()
+        outro.join(timeout=5)
+        assert not outro.is_alive()
+        assert segundo_erro["erro"] is not None
+        assert "já está em inferência" in str(segundo_erro["erro"])
+        assert pose.max_dentro == 1
+        assert pose.chamadas == 1
+        pose.solta.set()
+        primeiro.join(timeout=5)
+        assert not primeiro.is_alive()
+        unidade.stop(timeout=5)
+        assert pose.chamadas == 1
+        assert pose.fechamentos == 1
+        assert_particao(unidade.stats())
+    finally:
+        pose.solta.set()
+        primeiro.join(timeout=5)
+        unidade.stop(timeout=5)
+
+
 def test_stop_no_callback_nao_trava_nem_entrega_o_seguinte():
-    """`stop` chamado de dentro do callback não pode dar join na própria
-    thread, e o snapshot que ainda estava na fila não pode sair depois."""
+    """`stop` de dentro do callback não espera a própria thread e não fecha
+    a sessão. A exceção é o que separa essa chamada de um retorno normal, em
+    que a thread já morreu. O snapshot seguinte não sai."""
     travada = PoseTravada()
     recebidos: list[ResultadoPose] = []
     terminou = threading.Event()
@@ -471,7 +532,9 @@ def test_stop_no_callback_nao_trava_nem_entrega_o_seguinte():
 
     def on_result(resultado: ResultadoPose) -> None:
         recebidos.append(resultado)
-        caixa["worker"].stop(timeout=5)
+        with pytest.raises(ParadaReentrante, match="sessão continua aberta"):
+            caixa["worker"].stop(timeout=5)
+        assert travada.fechamentos == 0
         terminou.set()
 
     unidade = worker(travada, on_result=on_result, queue_size=4)
@@ -490,6 +553,8 @@ def test_stop_no_callback_nao_trava_nem_entrega_o_seguinte():
         assert unidade.stats().processados == 1
         assert unidade.stats().descartados == 2
         assert unidade.stats().aceitos == 3
+        assert travada.fechamentos == 1
+        assert_particao(unidade.stats())
         assert not any(
             thread.name == "pose" and thread.is_alive() for thread in threading.enumerate()
         )
@@ -759,6 +824,64 @@ def test_conta_fecha_em_curso_no_descarte_e_na_fila_recusada():
         assert_particao(recusada)
     finally:
         pose.solta.set()
+        unidade.stop(timeout=5)
+
+
+def test_particao_por_camera_enquanto_uma_infere_e_a_outra_cai():
+    """O agregado pode fechar com o descarte na câmera errada. Cada câmera
+    tem a própria conta, no meio da inferência e depois do erro."""
+    pose = _PosePresa()
+    unidade = PoseWorker(pose, queue_size=1)
+    unidade.start()
+    try:
+        envia(unidade, "cam-a", 1, 1.0)
+        assert pose.entrou.wait(timeout=5)
+        envia(unidade, "cam-b", 2, 2.0)
+        envia(unidade, "cam-a", 3, 3.0)
+        stats = unidade.stats()
+        assert_particao(stats)
+        por = {camera.camera_id: camera for camera in stats.cameras}
+        assert por["cam-a"].aceitos == 2
+        assert por["cam-a"].em_curso == 1
+        assert por["cam-a"].na_fila == 1
+        assert por["cam-a"].descartados == 0
+        assert por["cam-b"].aceitos == 1
+        assert por["cam-b"].descartados == 1
+        assert por["cam-b"].na_fila == 0
+        assert por["cam-b"].em_curso == 0
+    finally:
+        pose.solta.set()
+        unidade.stop(timeout=5)
+
+
+def test_stop_durante_o_tick_e_reentrante():
+    """O mesmo contrato do callback na thread de trabalho: `stop` dentro do
+    `tick` não fecha a sessão e não se parece com um retorno normal."""
+    pose = _PosePresa()
+    visto: dict[str, int] = {}
+
+    def on_result(resultado: ResultadoPose) -> None:
+        with pytest.raises(ParadaReentrante, match="sessão continua aberta"):
+            unidade.stop(timeout=5)
+        visto["fechamentos"] = pose.fechamentos
+
+    unidade = PoseWorker(pose, on_result=on_result)
+    envia(unidade, "cam", 1, 1.0)
+    tick = threading.Thread(target=unidade.tick)
+    tick.start()
+    try:
+        assert pose.entrou.wait(timeout=5)
+        pose.solta.set()
+        tick.join(timeout=5)
+        assert not tick.is_alive()
+        assert visto["fechamentos"] == 0
+        assert pose.fechamentos == 0
+        unidade.stop(timeout=5)
+        assert pose.fechamentos == 1
+        assert_particao(unidade.stats())
+    finally:
+        pose.solta.set()
+        tick.join(timeout=5)
         unidade.stop(timeout=5)
 
 

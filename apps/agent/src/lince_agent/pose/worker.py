@@ -34,13 +34,17 @@ Erro de callback não mata o laço: o snapshot vai para `erros` e o próximo
 segue. `aceitos` entra no mesmo lock do `put`, antes de o item poder ser
 retirado; `submit` não segura o lock da sessão.
 
-**Parada.** `stop` que retorna fechou a sessão: a thread morreu, nenhum
-`tick` segue em inferência, e não há callback novo. O que estava só na fila
-é descartado sem inferir. Se o prazo estoura com alguém ainda dentro de
-`estimar` — a thread ou um `tick` — `stop` levanta `TimeoutError` e não
-fecha a sessão. Isso não é parada concluída: a inferência em curso pode
-ainda chamar o callback, e outro `stop`, quando ela puder voltar, é que
-fecha. Para rodar de novo, constrói-se outro worker.
+**Parada.** `stop` que retorna fechou a sessão: quem chamou não era a
+própria inferência, a thread morreu, nenhum `tick` segue, e não há callback
+novo. O que estava só na fila é descartado sem inferir. Se o prazo estoura
+com alguém ainda dentro de `estimar`, `stop` levanta `TimeoutError` e não
+fecha a sessão: a inferência pode ainda chamar o callback, e outro `stop`,
+quando ela puder voltar, é que fecha. Se `stop` é chamado de dentro do
+callback — na thread de trabalho ou num `tick` — levanta `ParadaReentrante`.
+A fila fecha e o que ainda não começou é descartado, mas a sessão fica
+aberta: fechar ali seria fechar embaixo de quem ainda está na pilha da
+inferência. Não há deadlock, porque essa chamada não espera a si mesma.
+Outro `stop`, de fora, depois que o callback voltar, é que fecha.
 """
 
 from __future__ import annotations
@@ -221,6 +225,15 @@ class _Contador:
     na_fila: int = 0
 
 
+class ParadaReentrante(RuntimeError):
+    """`stop` foi chamado por quem ainda está na pilha da inferência.
+
+    A fila já foi fechada e o que não começou foi descartado. A sessão não
+    foi fechada: o callback ainda não voltou. Outro `stop`, de outra thread,
+    depois que esta chamada desempilhar, conclui a parada.
+    """
+
+
 class PoseWorker:
     """Pose em pé: uma fila, uma thread e uma sessão."""
 
@@ -244,10 +257,9 @@ class PoseWorker:
         self._cameras: dict[str, _Contador] = {}
         self._thread: threading.Thread | None = None
         self._subindo = False
-        self._reservas: dict[int, int] = {}
-        """Profundidade de `tick` por thread. A thread de trabalho não entra:
-        `stop` a espera no `join`. Serve para `start` não abrir outra inferência
-        e para `stop` não fechar a sessão com um `tick` ainda dentro."""
+        self._dono: int | None = None
+        """Ident da única thread que pode estar em `estimar`. `tick` e a thread
+        de trabalho passam por aqui: um segundo dono é recusado, não empilhado."""
 
         self._pose_fechada = False
 
@@ -267,7 +279,7 @@ class PoseWorker:
                 self._vida.wait()
             if self._thread is not None and self._thread.is_alive():
                 return
-            if self._reservas:
+            if self._dono is not None:
                 raise RuntimeError("tick em curso; a sessão não admite outra inferência")
             thread = threading.Thread(target=self._run, name="pose", daemon=True)
             self._thread = thread
@@ -288,19 +300,31 @@ class PoseWorker:
     def stop(self, timeout: float = 15.0) -> None:
         """Para e fecha a sessão, ou avisa que não deu.
 
-        Retorno normal: thread morta, nenhum `tick` em inferência, fila
-        restante descartada, sessão fechada, sem callback novo. Pode repetir.
+        Retorno normal — e só ele — quer dizer parada concluída: quem chamou
+        não estava na pilha da inferência, a thread morreu, nenhum `tick`
+        segue, a fila restante foi descartada e a sessão fechou. Pode repetir.
 
-        `TimeoutError`: ainda há inferência em curso. A sessão **continua
-        aberta** — fechá-la por baixo de um `estimar` que não voltou é uso
-        depois do close. O callback dessa inferência pode sair depois da
-        exceção. Outro `stop`, quando ela puder terminar, conclui a parada.
+        `TimeoutError`: ainda há inferência em curso noutra thread. A sessão
+        continua aberta. O callback dela pode sair depois da exceção. Outro
+        `stop`, quando ela puder terminar, conclui.
+
+        `ParadaReentrante`: esta chamada é o próprio callback. A fila fecha e
+        o que não começou é descartado, mas a sessão não fecha e esta chamada
+        não espera a thread em que está. Não é retorno normal.
         """
         if timeout < 0:
             raise ValueError(f"timeout deve ser >= 0, recebi {timeout}")
         prazo = time.monotonic() + timeout
         self._encerrar.set()
         self._fila.close()
+        if self._inferencia_e_desta_thread():
+            # Não dá join em si mesmo, e não fecha a sessão com o callback
+            # ainda na pilha. O `stop` de fora, depois, é que fecha.
+            self._descarta_restante()
+            raise ParadaReentrante(
+                "stop chamado de dentro da inferência; a fila foi fechada e a "
+                "sessão continua aberta até um stop de fora"
+            )
         thread = self._thread_depois_de_subir(prazo, timeout)
         if thread is not None and thread is not threading.current_thread() and thread.is_alive():
             thread.join(max(0.0, prazo - time.monotonic()))
@@ -369,9 +393,8 @@ class PoseWorker:
     def tick(self, timeout: float = 0.0) -> bool:
         """Processa no máximo um snapshot, na thread de quem chama.
 
-        Reserva a sessão até voltar, no mesmo lock que `start` consulta. Sem
-        isso `start` abria a thread entre a checagem e o `estimar`, e `stop`
-        fechava a sessão com este método ainda lá dentro.
+        Há um dono só da sessão. Outro `tick`, noutra thread, é recusado antes
+        de retirar o snapshot — os dois não podem chamar `estimar` juntos.
         """
         if not self._reservar():
             return False
@@ -398,7 +421,17 @@ class PoseWorker:
                         return
                     self._fila.espera(_ESPERA_S)
                     continue
-                self._processa(pedido)
+                if not self._assumir():
+                    # Outro caminho pegou a sessão. Não inferir em paralelo;
+                    # o snapshot volta para `erros` em vez de vazar `em_curso`.
+                    self._fechar_curso(pedido.camera_id, erro=True)
+                    continue
+                try:
+                    self._processa(pedido)
+                except ParadaReentrante:
+                    return
+                finally:
+                    self._abrir_mao()
         finally:
             with self._vida:
                 if self._thread is threading.current_thread():
@@ -411,6 +444,9 @@ class PoseWorker:
                 poses = tuple(
                     self._pose.estimar(pedido.imagem, [caixa.xyxy for caixa in pedido.caixas])
                 )
+            except ParadaReentrante:
+                erro = True
+                raise
             except Exception as exc:  # noqa: BLE001 - falha numa câmera não pode parar as outras
                 erro = True
                 log.error(
@@ -455,6 +491,11 @@ class PoseWorker:
             )
             try:
                 self._on_result(resultado)
+            except ParadaReentrante:
+                # O callback pediu parada. A entrega deste snapshot ocorreu;
+                # a exceção não é falha do consumidor. Sobe para o laço sair
+                # sem processar o próximo, se ninguém a capturou.
+                raise
             except Exception as exc:  # noqa: BLE001 - o callback é o adaptador, que ainda não existe
                 # Não soma em `processados`: o snapshot já vai para `erros`.
                 # O laço segue — o erro é deste snapshot, não da pose da loja.
@@ -518,6 +559,8 @@ class PoseWorker:
         with self._vida:
             if self._encerrar.is_set() or self._pose_fechada:
                 return False
+            if self._dono is not None:
+                raise RuntimeError("a sessão de pose já está em inferência")
             thread = self._thread
             if self._subindo or (
                 thread is not None
@@ -525,19 +568,33 @@ class PoseWorker:
                 and thread is not threading.current_thread()
             ):
                 raise RuntimeError("tick disputa a fila com a thread de pose")
-            ident = threading.get_ident()
-            self._reservas[ident] = self._reservas.get(ident, 0) + 1
+            self._dono = threading.get_ident()
             return True
 
     def _liberar(self) -> None:
+        self._abrir_mao()
+
+    def _assumir(self) -> bool:
+        """A thread de trabalho toma a sessão, ou recusa se alguém já a tem."""
         with self._vida:
-            ident = threading.get_ident()
-            falta = self._reservas.get(ident, 0) - 1
-            if falta <= 0:
-                self._reservas.pop(ident, None)
-            else:
-                self._reservas[ident] = falta
-            self._vida.notify_all()
+            if self._dono is not None:
+                return False
+            self._dono = threading.get_ident()
+            return True
+
+    def _abrir_mao(self) -> None:
+        with self._vida:
+            if self._dono == threading.get_ident():
+                self._dono = None
+                self._vida.notify_all()
+
+    def _inferencia_e_desta_thread(self) -> bool:
+        ident = threading.get_ident()
+        with self._vida:
+            if self._dono == ident:
+                return True
+            thread = self._thread
+        return thread is not None and thread is threading.current_thread()
 
     def _thread_depois_de_subir(self, prazo: float, timeout: float) -> threading.Thread | None:
         with self._vida:
@@ -549,7 +606,7 @@ class PoseWorker:
     def _esperar_ticks(self, prazo: float, timeout: float) -> None:
         ident = threading.get_ident()
         with self._vida:
-            while any(dono != ident for dono in self._reservas):
+            while self._dono is not None and self._dono != ident:
                 if not self._espera_vida(prazo):
                     self._estourou(timeout)
 
