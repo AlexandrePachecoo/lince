@@ -275,3 +275,31 @@ def test_mmcv_so_entra_como_roda_pronta(tmp_path: Path, monkeypatch):
     assert len(mmcv) == 1
     assert "--only-binary" in mmcv[0]
     assert mmcv[0][mmcv[0].index("--only-binary") + 1] == "mmcv"
+
+
+def test_mmpose_entra_sem_o_chumpy(tmp_path: Path, monkeypatch):
+    """O mmpose 1.3.2 lista o `chumpy` como dependência. Ele só existe como
+    código-fonte, e o `setup.py` importa o próprio pip — que não está no
+    ambiente isolado de build do pip atual. O export parava ali, depois de torch
+    e mmcv instalados. O chumpy só serve ao SMPL, que o RTMPose não usa: o
+    mmpose entra com `--no-deps`, e as outras dependências dele entram à mão."""
+    chamadas: list[list[str]] = []
+    _falsifica_rede(monkeypatch, chamadas)
+    monkeypatch.setattr(exporta, "_versao_do_interpretador", lambda: (3, 11))
+    plano = exporta.montar_plano(destino=tmp_path / "rtmpose-s.onnx", cache=tmp_path / "cache")
+
+    with pytest.raises(exporta.ExportaError, match="end2end.onnx"):
+        exporta.executar(plano)
+    pip = [argv for argv in chamadas if argv[1:4] == ["-m", "pip", "install"]]
+    assert not any(item.lower().startswith("chumpy") for argv in pip for item in argv)
+    mmpose = [argv for argv in pip if exporta.MMPOSE in argv]
+    assert len(mmpose) == 1
+    assert "--no-deps" in mmpose[0]
+    # O resto do que o mmpose pede tem que entrar, senão o import falha no deploy.
+    instalados = {item.split("=")[0].split(">")[0].split("<")[0] for argv in pip for item in argv}
+    for dependencia in ("json_tricks", "munkres", "xtcocotools", "scipy", "matplotlib"):
+        assert dependencia in instalados
+    # O mmpose sem dependências vem depois do que ele precisa já estar no venv.
+    assert chamadas.index(mmpose[0]) > chamadas.index(
+        next(argv for argv in pip if "xtcocotools>=1.12" in argv)
+    )

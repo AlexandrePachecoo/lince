@@ -65,8 +65,22 @@ PACOTES_BASE = (
     "opencv-python-headless==4.9.0.80",
     "mmengine==0.10.5",
     "mmdet==3.2.0",
-    "mmpose==1.3.2",
     "mmdeploy==1.3.1",
+)
+MMPOSE = "mmpose==1.3.2"
+# O `requirements/runtime.txt` do mmpose 1.3.2 menos o `chumpy`, o `numpy`, o
+# `opencv-python` e o `torchvision`, que já entraram fixados acima. O chumpy só
+# existe como código-fonte e o `setup.py` dele importa o pip, que não está no
+# ambiente isolado de build: o pip para ali. Ele só serve ao SMPL, que o
+# RTMPose não usa. Por isso o mmpose entra com `--no-deps`, depois disto.
+MMPOSE_DEPENDENCIAS = (
+    "numpy>=1.23,<2",
+    "json_tricks",
+    "matplotlib",
+    "munkres",
+    "pillow",
+    "scipy",
+    "xtcocotools>=1.12",
 )
 TORCH = ("torch==2.1.2", "torchvision==0.16.2")
 TORCH_INDEX = "https://download.pytorch.org/whl/cpu"
@@ -529,7 +543,17 @@ def executar(plano: Plano) -> None:
     _roda(
         [str(python), "-m", "pip", "install", *PACOTES_BASE],
         cwd=None,
-        o_que="instalando mmpose e mmdeploy no venv à parte",
+        o_que="instalando mmdet e mmdeploy no venv à parte",
+    )
+    _roda(
+        [str(python), "-m", "pip", "install", *MMPOSE_DEPENDENCIAS],
+        cwd=None,
+        o_que="instalando o que o mmpose usa, sem o chumpy",
+    )
+    _roda(
+        [str(python), "-m", "pip", "install", "--no-deps", MMPOSE],
+        cwd=None,
+        o_que="instalando o mmpose sem dependências",
     )
 
     work = plano.cache / "work" / plano.variante
