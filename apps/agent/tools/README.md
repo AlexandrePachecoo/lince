@@ -49,6 +49,18 @@ py -3.11 apps\agent\tools\exporta_rtmpose.py `
   --variante body8
 ```
 
+Depois do mmdeploy, o export roda `fixa_formas_rtmpose.py` no venv dele. O
+mmdeploy declara o eixo das juntas como simbólico (`MatMulsimcc_x_dim_1`), e o
+`OnnxPose` recusa isso na subida. O script roda o grafo com um lote de 2, confere
+que as saídas são (2, 17, 384) e (2, 17, 512) e só então grava 17 e os bins no
+arquivo; o lote continua dinâmico. Um `.onnx` exportado antes disso se conserta
+no lugar:
+
+```bash
+~/.cache/lince/rtmpose-export/venv/bin/python apps/agent/tools/fixa_formas_rtmpose.py \
+  ~/lince-modelos/rtmpose-s.onnx ~/lince-modelos/rtmpose-s.onnx
+```
+
 `--dry-run` mostra o plano e não baixa nada. O YOLOX do detector continua
 sendo o de `bash scripts/modelo.sh` (no Windows, o mesmo URL do script, com
 `curl`).

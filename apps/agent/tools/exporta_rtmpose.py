@@ -46,6 +46,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+FIXA_FORMAS = Path(__file__).with_name("fixa_formas_rtmpose.py")
 MMPOSE_GIT = "https://github.com/open-mmlab/mmpose.git"
 MMPOSE_REF = "v1.3.2"
 MMDEPLOY_GIT = "https://github.com/open-mmlab/mmdeploy.git"
@@ -576,7 +577,13 @@ def executar(plano: Plano) -> None:
             "O piloto espera o end2end.onnx com SimCC cru, não um zip do onnx_sdk"
         )
     plano.destino.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(produzido, plano.destino)
+    # O mmdeploy declara o eixo das juntas como simbólico, e `OnnxPose` recusa
+    # isso na subida. O conserto roda o grafo e só grava 17 se for 17.
+    _roda(
+        [str(python), str(FIXA_FORMAS), str(produzido), str(plano.destino)],
+        cwd=None,
+        o_que="conferindo e gravando as formas do SimCC",
+    )
     print(f"onnx em {plano.destino} ({plano.destino.stat().st_size} bytes)", flush=True)
 
 

@@ -303,3 +303,34 @@ def test_mmpose_entra_sem_o_chumpy(tmp_path: Path, monkeypatch):
     assert chamadas.index(mmpose[0]) > chamadas.index(
         next(argv for argv in pip if "xtcocotools>=1.12" in argv)
     )
+
+
+def test_onnx_do_mmdeploy_passa_pelo_conserto_das_formas(tmp_path: Path, monkeypatch):
+    """O `end2end.onnx` do mmdeploy declara as juntas como eixo simbólico, e
+    `OnnxPose` recusa isso. Copiado direto para o destino, o export entregava
+    um arquivo que o benchmark e o agente não abrem."""
+    chamadas: list[list[str]] = []
+    _falsifica_rede(monkeypatch, chamadas)
+    monkeypatch.setattr(exporta, "_versao_do_interpretador", lambda: (3, 11))
+    destino = tmp_path / "modelos" / "rtmpose-s.onnx"
+    plano = exporta.montar_plano(destino=destino, cache=tmp_path / "cache")
+    produzido = tmp_path / "cache" / "work" / "body8" / "end2end.onnx"
+
+    roda_original = exporta._roda
+
+    def roda(argv: list[str], *, cwd, o_que: str) -> None:
+        roda_original(argv, cwd=cwd, o_que=o_que)
+        if "deploy.py" in " ".join(argv):
+            produzido.parent.mkdir(parents=True, exist_ok=True)
+            produzido.write_bytes(b"onnx-com-eixo-simbolico")
+        if argv[1:2] == [str(exporta.FIXA_FORMAS)]:
+            Path(argv[3]).write_bytes(b"conferido")
+
+    monkeypatch.setattr(exporta, "_roda", roda)
+    exporta.executar(plano)
+
+    conserto = chamadas[-1]
+    assert conserto[1:] == [str(exporta.FIXA_FORMAS), str(produzido), str(destino)]
+    assert exporta.FIXA_FORMAS.is_file()
+    # Quem grava o destino é o conserto, depois de conferir; não uma cópia crua.
+    assert destino.read_bytes() == b"conferido"
