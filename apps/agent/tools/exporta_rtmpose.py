@@ -26,7 +26,8 @@ passado em `--sha256`. Esse hash não fica gravado aqui.
 Torch de CPU chega para exportar. A GPU do fundador entra no benchmark, pelo
 ONNX Runtime, não neste venv.
 
-    python tools/exporta_rtmpose.py --destino ~/lince-modelos/rtmpose-s.onnx --variante body8
+    uv run --no-project --python 3.11 python tools/exporta_rtmpose.py \
+        --destino ~/lince-modelos/rtmpose-s.onnx --variante body8
     python tools/exporta_rtmpose.py --destino D:\\lince-modelos\\rtmpose-s.onnx --variante body8
     python tools/exporta_rtmpose.py --destino ~/lince-modelos/rtmpose-s.onnx --dry-run
 """
@@ -51,9 +52,12 @@ MMDEPLOY_GIT = "https://github.com/open-mmlab/mmdeploy.git"
 MMDEPLOY_REF = "v1.3.1"
 DEPLOY_CONFIG = "configs/mmpose/pose-detection_simcc_onnxruntime_dynamic.py"
 
-# Torch 2.2 é o primeiro com roda para Python 3.12, que é o do agente.
-# mmcv 2.1 é o intervalo que o mmpose 1.3.2 aceita (<2.2) e que tem roda
-# de CPU para esse torch. numpy<2 porque essa roda do mmcv não é a do numpy 2.
+# O venv do export não é o do agente e não precisa do Python dele. O que manda
+# é o mmcv: o mmpose 1.3.2 aceita só <2.2, e o mmcv 2.1.0 de CPU só tem roda
+# no índice `torch2.1`, até o Python 3.11. O índice `torch2.2` traz apenas o
+# 2.2.0; com ele o pip cai no código-fonte e quebra no `pkg_resources`. Por
+# isso o torch é o 2.1 e o Python do export é o 3.11. numpy<2 porque essa roda
+# do mmcv não é a do numpy 2.
 PACOTES_BASE = (
     "numpy>=1.23,<2",
     "onnx==1.16.2",
@@ -64,10 +68,13 @@ PACOTES_BASE = (
     "mmpose==1.3.2",
     "mmdeploy==1.3.1",
 )
-TORCH = ("torch==2.2.2", "torchvision==0.17.2")
+TORCH = ("torch==2.1.2", "torchvision==0.16.2")
 TORCH_INDEX = "https://download.pytorch.org/whl/cpu"
 MMCV = "mmcv==2.1.0"
-MMCV_INDEX = "https://download.openmmlab.com/mmcv/dist/cpu/torch2.2/index.html"
+MMCV_INDEX = "https://download.openmmlab.com/mmcv/dist/cpu/torch2.1/index.html"
+PYTHON_MINIMO = (3, 8)
+PYTHON_MAXIMO = (3, 11)
+"""As versões do Python com roda do mmcv 2.1.0 no índice acima."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +244,37 @@ def comando_deploy(
         "--device",
         "cpu",
     ]
+
+
+def _versao_do_interpretador() -> tuple[int, int]:
+    return (sys.version_info.major, sys.version_info.minor)
+
+
+def versao_do_venv(venv: Path) -> tuple[int, int] | None:
+    """A versão gravada no `pyvenv.cfg`, sem executar o interpretador do venv."""
+    try:
+        linhas = (venv / "pyvenv.cfg").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for linha in linhas:
+        chave, _, valor = linha.partition("=")
+        if chave.strip() in {"version", "version_info"}:
+            partes = valor.strip().split(".")
+            if len(partes) >= 2 and partes[0].isdigit() and partes[1].isdigit():
+                return (int(partes[0]), int(partes[1]))
+    return None
+
+
+def confere_python_do_export(versao: tuple[int, int]) -> None:
+    if PYTHON_MINIMO <= versao <= PYTHON_MAXIMO:
+        return
+    raise ExportaError(
+        f"o export precisa de Python {PYTHON_MINIMO[0]}.{PYTHON_MINIMO[1]} a "
+        f"{PYTHON_MAXIMO[0]}.{PYTHON_MAXIMO[1]}, e este é {versao[0]}.{versao[1]}. "
+        f"O {MMCV} só tem roda de CPU até o 3.11. O venv do export é separado do "
+        "agente: rode com `uv run --no-project --python 3.11 python "
+        "apps/agent/tools/exporta_rtmpose.py ...`"
+    )
 
 
 def escreve_bmp(caminho: Path, largura: int = 64, altura: int = 64) -> None:
@@ -440,6 +478,20 @@ def executar(plano: Plano) -> None:
         print("passe --forcar para exportar de novo", flush=True)
         return
 
+    # Antes de clonar e baixar: o Python errado só aparecia no mmcv, depois do
+    # torch inteiro.
+    if plano.venv.exists():
+        versao = versao_do_venv(plano.venv)
+        if versao is None or not PYTHON_MINIMO <= versao <= PYTHON_MAXIMO:
+            achada = "desconhecida" if versao is None else f"{versao[0]}.{versao[1]}"
+            raise ExportaError(
+                f"o venv em {plano.venv} é de Python {achada}, e o {MMCV} só tem roda "
+                "até o 3.11. Apague essa pasta (ou passe outro --venv) e rode de novo "
+                "com `uv run --no-project --python 3.11 python ...`"
+            )
+    else:
+        confere_python_do_export(_versao_do_interpretador())
+
     _clone(MMPOSE_GIT, MMPOSE_REF, plano.cache / "mmpose")
     _clone(MMDEPLOY_GIT, MMDEPLOY_REF, plano.cache / "mmdeploy")
     checkpoint = plano.cache / "checkpoints" / nome_do_url(plano.checkpoint_url)
@@ -468,9 +520,11 @@ def executar(plano: Plano) -> None:
         o_que="instalando torch de CPU (a GPU não entra no export)",
     )
     _roda(
-        [str(python), "-m", "pip", "install", MMCV, "-f", MMCV_INDEX],
+        # Só roda pronta: sem ela o pip compila o C++ do mmcv por minutos e
+        # falha com um erro de build que não diz que faltou a roda.
+        [str(python), "-m", "pip", "install", MMCV, "--only-binary", "mmcv", "-f", MMCV_INDEX],
         cwd=None,
-        o_que="instalando mmcv de CPU para torch 2.2",
+        o_que="instalando mmcv de CPU para torch 2.1",
     )
     _roda(
         [str(python), "-m", "pip", "install", *PACOTES_BASE],
