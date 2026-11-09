@@ -126,6 +126,8 @@ def test_tabela_traz_os_tres_estagios():
     assert "2.000" in texto
     assert relatorio["unidade"] == "ms"
     assert relatorio["pose"]["lote_dinamico"] is True
+
+
 def _video(caminho: Path, largura: int, altura: int, frames: int = 3) -> Path:
     import shutil
     import subprocess
