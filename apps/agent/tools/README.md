@@ -25,20 +25,40 @@ O ONNX sai com lote dinâmico e SimCC cru. A normalização continua no agente
 (`pose/preprocess.py`), não no grafo. Torch de CPU chega: a placa não entra
 nesta etapa.
 
+**O export roda em Python 3.11**, não no 3.12 do agente. O mmpose 1.3.2 só
+aceita mmcv < 2.2, e o mmcv 2.1.0 de CPU só tem roda no índice do torch 2.1, até
+o 3.11. O script recusa outro Python antes de baixar qualquer coisa. Com o uv, ele
+mesmo baixa o 3.11 (`uv python install 3.11`):
+
 Linux:
 
 ```bash
-python3 apps/agent/tools/exporta_rtmpose.py \
+uv run --no-project --python 3.11 python apps/agent/tools/exporta_rtmpose.py \
   --destino "$HOME/lince-modelos/rtmpose-s.onnx" \
   --variante body8
 ```
 
+Um venv de export criado antes desta correção (Python 3.12) é recusado com o
+caminho dele na mensagem: apague a pasta `venv` do cache e rode de novo.
+
 Windows (PowerShell):
 
 ```powershell
-py -3.12 apps\agent\tools\exporta_rtmpose.py `
+py -3.11 apps\agent\tools\exporta_rtmpose.py `
   --destino D:\lince-modelos\rtmpose-s.onnx `
   --variante body8
+```
+
+Depois do mmdeploy, o export roda `fixa_formas_rtmpose.py` no venv dele. O
+mmdeploy declara o eixo das juntas como simbólico (`MatMulsimcc_x_dim_1`), e o
+`OnnxPose` recusa isso na subida. O script roda o grafo com um lote de 2, confere
+que as saídas são (2, 17, 384) e (2, 17, 512) e só então grava 17 e os bins no
+arquivo; o lote continua dinâmico. Um `.onnx` exportado antes disso se conserta
+no lugar:
+
+```bash
+~/.cache/lince/rtmpose-export/venv/bin/python apps/agent/tools/fixa_formas_rtmpose.py \
+  ~/lince-modelos/rtmpose-s.onnx ~/lince-modelos/rtmpose-s.onnx
 ```
 
 `--dry-run` mostra o plano e não baixa nada. O YOLOX do detector continua

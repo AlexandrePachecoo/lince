@@ -331,6 +331,23 @@ def _dimensoes(caminho: Path) -> tuple[int, int]:
     return int(largura_s), int(altura_s)
 
 
+def dimensoes_para(largura: int, altura: int, lado_maior: int) -> tuple[int, int]:
+    """O tamanho que o agente pediria ao ffmpeg: lado maior igual ao do
+    detector, proporção mantida, lados pares.
+
+    O letterbox do YOLOX recusa frame cujo lado maior não é o do modelo (§3.1):
+    no agente quem ajusta é o filtro `scale` que já existe na ingestão, e o
+    benchmark tem que medir sobre o mesmo frame que a loja vai ver.
+    """
+
+    def par(valor: float) -> int:
+        return max(2, int(round(valor / 2)) * 2)
+
+    if largura >= altura:
+        return lado_maior, par(altura * lado_maior / largura)
+    return par(largura * lado_maior / altura), lado_maior
+
+
 def _decodifica(caminho: Path, largura: int, altura: int, max_frames: int) -> list[np.ndarray]:
     ffmpeg = _binario("ffmpeg")
     resultado = subprocess.run(  # noqa: S603
@@ -340,6 +357,8 @@ def _decodifica(caminho: Path, largura: int, altura: int, max_frames: int) -> li
             "error",
             "-i",
             str(caminho),
+            "-vf",
+            f"scale={largura}:{altura}",
             "-frames:v",
             str(max_frames),
             "-f",
@@ -366,19 +385,19 @@ def _decodifica(caminho: Path, largura: int, altura: int, max_frames: int) -> li
     ]
 
 
-def le_frames(fonte: Path, max_frames: int) -> list[np.ndarray]:
+def le_frames(fonte: Path, max_frames: int, *, lado_maior: int) -> list[np.ndarray]:
     if fonte.is_dir():
         arquivos = sorted(p for p in fonte.iterdir() if p.suffix.lower() in EXTENSOES)
         if not arquivos:
             raise BenchError(f"nenhuma imagem em {fonte}")
         frames = []
         for arquivo in arquivos[:max_frames]:
-            largura, altura = _dimensoes(arquivo)
+            largura, altura = dimensoes_para(*_dimensoes(arquivo), lado_maior)
             frames.extend(_decodifica(arquivo, largura, altura, 1))
         return frames
     if not fonte.is_file():
         raise BenchError(f"não encontrei vídeo nem pasta em {fonte}")
-    largura, altura = _dimensoes(fonte)
+    largura, altura = dimensoes_para(*_dimensoes(fonte), lado_maior)
     return _decodifica(fonte, largura, altura, max_frames)
 
 
@@ -422,7 +441,6 @@ def roda(
     aquecimento: int,
 ) -> dict[str, Any]:
     providers = providers_de(provider)
-    frames = le_frames(fonte, max_frames)
     opcoes = DetectionOptions(
         enabled=True,
         model_path=detector,
@@ -432,6 +450,9 @@ def roda(
     yolox = OnnxDetector(detector, opcoes)
     pose: OnnxPose | None = None
     try:
+        info = yolox.info()
+        assert info is not None
+        frames = le_frames(fonte, max_frames, lado_maior=info.input_size)
         pose = OnnxPose(pose_caminho, providers=providers)
         com_pessoa: list[tuple[np.ndarray, list[tuple[float, float, float, float]]]] = []
         for indice, imagem in enumerate(frames):
