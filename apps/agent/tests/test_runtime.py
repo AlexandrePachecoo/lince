@@ -175,6 +175,8 @@ class Agente:
         on_tracking=None,
         tracking: bool = True,
         regras=None,
+        pose=None,
+        on_pose=None,
     ):
         self.relogio = RelogioFalso()
         self.parede = RelogioFalso(1_700_000_000.0)
@@ -228,6 +230,8 @@ class Agente:
             recorder=self.recorder,
             detector=detector,
             on_tracking=on_tracking,
+            pose=pose,
+            on_pose=on_pose,
         )
         # O recorder foi construído com o `on_result` do teste, então encadeamos: o
         # runtime precisa continuar recebendo o resultado, senão nada é enfileirado.
@@ -946,5 +950,154 @@ def test_health_separa_as_regras_por_camera(tmp_path):
         por_camera = {c.camera_id: c for c in montado.runtime.health().rules.cameras}
         assert set(por_camera) == {"cam1", "cam2"}
         assert all(not c.configurada for c in por_camera.values())
+    finally:
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+# --- pose (desligada por padrão) -------------------------------------------------
+
+
+class PoseFalsa:
+    """Uma pose por caixa, sem peso nenhum. Registra o frame e as caixas que viu.
+
+    `trava` segura a inferência dentro de `estimar` até o teste soltar: é como se
+    simula um snapshot da sessão antiga ainda na GPU quando a câmera reconecta.
+    """
+
+    def __init__(self, *, travada: bool = False) -> None:
+        self.vistos: list[tuple[object, tuple]] = []
+        self.fechada = False
+        self.entrou = threading.Event()
+        self.solta = threading.Event()
+        if not travada:
+            self.solta.set()
+
+    def estimar(self, imagem, caixas):
+        self.vistos.append((imagem, tuple(caixas)))
+        self.entrou.set()
+        assert self.solta.wait(PRAZO_S), "o teste não soltou a pose"
+        return tuple(object() for _ in caixas)
+
+    def close(self) -> None:
+        self.fechada = True
+
+
+def test_sem_pose_nada_de_pose_existe(tmp_path):
+    """Desligada por padrão: sem `pose` não há thread, fila nem sessão, e o
+    heartbeat não ganha uma seção vazia que pareça ligada."""
+    detector = DetectorFalso((pessoa(),))
+    montado = Agente(tmp_path, detector=detector)
+    montado.runtime.start()
+    try:
+        montado.alimenta_frame("cam1", quadro(1))
+        assert detector.chamou.wait(PRAZO_S)
+        assert _ate(lambda: montado.runtime.health().tracker.criados == 1)
+        assert montado.runtime.health().pose is None
+        assert not any(t.name.startswith("pose") for t in threading.enumerate())
+    finally:
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+def test_pose_recebe_o_frame_do_tracking_e_devolve_o_track(tmp_path):
+    """O caminho novo: frame → detector → tracker → pose, com a junta voltando
+    amarrada à câmera, ao frame e ao track que a originaram."""
+    entregues: list = []
+    pose = PoseFalsa()
+    detector = DetectorFalso((pessoa(),))
+    montado = Agente(tmp_path, detector=detector, pose=pose, on_pose=entregues.append)
+    montado.runtime.start()
+    try:
+        for sequencia in (1, 2):
+            detector.chamou.clear()
+            montado.alimenta_frame("cam1", quadro(sequencia, received_at=sequencia / 3))
+            assert detector.chamou.wait(PRAZO_S)
+        assert _ate(lambda: len(entregues) == 2)
+
+        assert [r.sequence for r in entregues] == [1, 2]
+        assert {r.camera_id for r in entregues} == {"cam1"}
+        assert [p.track_id for r in entregues for p in r.pessoas] == [1, 1]
+        assert entregues[1].received_at == pytest.approx(2 / 3)
+        # O recorte foi feito no frame que o detector viu, não em outro.
+        assert [imagem.sequence for imagem, _ in pose.vistos] == [1, 2]
+
+        saude = montado.runtime.health().pose
+        assert saude is not None
+        assert saude.adaptador.submetidos == 2
+        assert saude.worker.processados == 2
+    finally:
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+def test_pose_travada_nao_segura_a_deteccao(tmp_path):
+    """A sessão da pose é uma só. Se ela travar, a detecção segue: o snapshot
+    novo empurra o mais antigo para fora da fila, e o tracking continua."""
+    pose = PoseFalsa(travada=True)
+    detector = DetectorFalso((pessoa(),))
+    montado = Agente(tmp_path, detector=detector, pose=pose)
+    montado.runtime.start()
+    try:
+        for sequencia in range(1, 7):
+            detector.chamou.clear()
+            montado.alimenta_frame("cam1", quadro(sequencia))
+            assert detector.chamou.wait(PRAZO_S)
+        assert _ate(lambda: montado.runtime.health().detector.frames_inferred == 6)
+        assert _ate(lambda: montado.runtime.health().pose.worker.descartados > 0)
+    finally:
+        pose.solta.set()
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+def test_pose_da_sessao_anterior_e_descartada_na_reconexao(tmp_path):
+    """Snapshot da sessão antiga ainda na inferência quando a câmera reconecta. A
+    sequência recomeça e o tracker recria o "track 1", que agora é outra pessoa —
+    a junta antiga não pode chegar ao consumidor com esse ID."""
+    entregues: list = []
+    pose = PoseFalsa(travada=True)
+    detector = DetectorFalso((pessoa(),))
+    montado = Agente(tmp_path, detector=detector, pose=pose, on_pose=entregues.append)
+    montado.runtime.start()
+    try:
+        montado.alimenta_frame("cam1", quadro(40, received_at=40.0))
+        assert pose.entrou.wait(PRAZO_S)
+
+        detector.chamou.clear()
+        montado.alimenta_frame("cam1", quadro(1, received_at=50.0))
+        assert detector.chamou.wait(PRAZO_S)
+        assert _ate(lambda: montado.runtime.health().pose.adaptador.reconexoes == 1)
+
+        pose.solta.set()
+        assert _ate(lambda: montado.runtime.health().pose.adaptador.descartados_reconexao == 1)
+        assert _ate(lambda: len(entregues) == 1)
+        assert entregues[0].sequence == 1
+    finally:
+        pose.solta.set()
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+def test_stop_fecha_a_sessao_da_pose(tmp_path):
+    pose = PoseFalsa()
+    montado = Agente(tmp_path, detector=DetectorFalso((pessoa(),)), pose=pose)
+    montado.runtime.start()
+    montado.runtime.stop(timeout=PRAZO_S)
+    assert pose.fechada
+
+
+def test_camera_inelegivel_nao_gasta_pose(tmp_path):
+    """R-3: câmera sem IA não detecta, não rastreia — e não estima pose."""
+    pose = PoseFalsa()
+    detector = DetectorFalso((pessoa(),))
+    montado = Agente(
+        tmp_path,
+        cameras=("cam1", "cam2"),
+        inelegiveis=("cam2",),
+        detector=detector,
+        pose=pose,
+    )
+    montado.runtime.start()
+    try:
+        montado.alimenta_frame("cam2", quadro(1))
+        montado.alimenta_frame("cam1", quadro(1))
+        assert _ate(lambda: montado.runtime.health().pose.worker.processados == 1)
+        assert {c.camera_id for c in montado.runtime.health().pose.worker.cameras} == {"cam1"}
     finally:
         montado.runtime.stop(timeout=PRAZO_S)

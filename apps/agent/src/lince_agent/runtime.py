@@ -61,6 +61,8 @@ from lince_agent.outbox.http import CloudClient
 from lince_agent.outbox.sender import OutboxSender
 from lince_agent.outbox.state import ClipState, ItemKind, OutboxStats, QueueItem, SenderStats
 from lince_agent.outbox.store import OutboxStore
+from lince_agent.pose.adaptador import PoseAdapter, PoseAdapterStats
+from lince_agent.pose.worker import Pose, PoseWorker, PoseWorkerStats, ResultadoPose
 from lince_agent.rules.engine import RuleEnginePool
 from lince_agent.rules.state import RuleStats
 from lince_agent.track.pool import TrackerPool
@@ -104,6 +106,19 @@ class ConfigHealth:
 
 
 @dataclass(frozen=True, slots=True)
+class PoseHealth:
+    """A pose em pé: a fila e a thread do worker, e o que o adaptador filtrou.
+
+    São duas contas de propósito. O worker sabe o que entrou na fila e o que a
+    saturação jogou fora; o adaptador sabe quantos frames não tinham ninguém
+    elegível e quantas poses chegaram atrasadas de uma sessão que já acabou.
+    """
+
+    worker: PoseWorkerStats
+    adaptador: PoseAdapterStats
+
+
+@dataclass(frozen=True, slots=True)
 class AgentHealth:
     """Tudo que o agente sabe sobre si. É o corpo do heartbeat do §5.3 antes de existir
     heartbeat: os mesmos campos, coletados no mesmo lugar, esperando só o transporte."""
@@ -117,6 +132,10 @@ class AgentHealth:
     outbox: OutboxStats = field(default_factory=OutboxStats)
     sender: SenderStats = field(default_factory=SenderStats)
     config: ConfigHealth = field(default_factory=ConfigHealth)
+    pose: PoseHealth | None = None
+    """`None` é a pose desligada, que é o padrão: sem `pose` no construtor não há
+    thread, fila nem sessão."""
+
     uptime_s: float = 0.0
     frames_ingested: int = 0
     """Frames que chegaram da ingestão, contando os das câmeras que o R-3 marcou como
@@ -151,6 +170,9 @@ class AgentRuntime:
         detector: Detector | None = None,
         rules: RuleEnginePool | None = None,
         on_tracking: Callable[[TrackingResult], None] | None = None,
+        pose: Pose | None = None,
+        pose_queue_size: int | None = None,
+        on_pose: Callable[[ResultadoPose], None] | None = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -197,6 +219,21 @@ class AgentRuntime:
         self._tracking = TrackerPool(config.tracking, clock=clock)
         self._regras = rules or RuleEnginePool(clock=clock)
         self._on_tracking = on_tracking
+
+        # Desligada por padrão: sem `pose`, nada abaixo existe. Ligada, ela pendura no
+        # tracking e não toca em mais nada — nem regra, nem evento, nem heartbeat da
+        # nuvem. É o microescopo do plano: estimar e entregar, sem decidir.
+        self._pose: PoseWorker | None = None
+        self._pose_adaptador: PoseAdapter | None = None
+        if pose is not None:
+            if not config.tracking.enabled:
+                log.warning(
+                    "pose ligada com o tracking desligado: sem tracks confirmados, "
+                    "nenhum frame vai para a pose"
+                )
+            opcoes = {} if pose_queue_size is None else {"queue_size": pose_queue_size}
+            self._pose = PoseWorker(pose, on_result=self._ao_estimar_pose, **opcoes)
+            self._pose_adaptador = PoseAdapter(self._pose, on_pose=on_pose)
 
         self._lock = threading.Lock()
         self._detecta = {camera.camera_id: camera.detect for camera in config.cameras}
@@ -252,6 +289,8 @@ class AgentRuntime:
         # ficaria esperando o próximo poll ocioso, e o NFR-1 já gastou 10 s no pós-roll.
         self._sender.start()
         self._recorder.start()
+        if self._pose is not None:
+            self._pose.start()
         self._deteccao.start()
         for supervisor in self._supervisores.values():
             supervisor.start()
@@ -269,6 +308,15 @@ class AgentRuntime:
         for supervisor in self._supervisores.values():
             supervisor.stop(timeout=timeout)
         self._deteccao.stop(timeout=timeout)
+        # Depois da detecção, que é quem submete: parar a pose antes deixaria a thread
+        # de detecção empurrando snapshot para uma fila fechada.
+        if self._pose is not None:
+            try:
+                self._pose.stop(timeout=timeout)
+            except TimeoutError:
+                # Uma inferência presa não pode impedir o clipe já cortado de subir.
+                # A sessão fica aberta (o worker não fecha embaixo de quem está nela).
+                log.error("pose não parou em %.0f s; seguindo com o encerramento", timeout)
         self._recorder.stop(timeout=timeout)
         self._sender.stop(timeout=timeout)
         self._iniciado_em = None
@@ -412,7 +460,12 @@ class AgentRuntime:
         """
         if not self._config.tracking.enabled:
             return
-        self._ao_rastrear(self._tracking.update(resultado))
+        rastreio = self._tracking.update(resultado)
+        # Antes das regras, e sem esperar: `submete` só copia a caixa e empurra. Uma
+        # regra que levanta não pode levar junto a pose do mesmo frame.
+        if self._pose_adaptador is not None and resultado.frame is not None:
+            self._pose_adaptador.submete(rastreio, resultado.frame)
+        self._ao_rastrear(rastreio)
 
     def _ao_rastrear(self, resultado: TrackingResult) -> None:
         """Recebe os tracks de um frame e deixa o estágio 4 (§3.4) decidir.
@@ -436,6 +489,15 @@ class AgentRuntime:
 
         if self._on_tracking is not None:
             self._on_tracking(resultado)
+
+    def _ao_estimar_pose(self, resultado: ResultadoPose) -> None:
+        """O `on_result` do `PoseWorker`. Roda na thread da pose.
+
+        Passa pelo adaptador, que descarta a pose de uma sessão de câmera que já
+        acabou. Erro do consumidor sobe para o worker, que é quem conta.
+        """
+        if self._pose_adaptador is not None:
+            self._pose_adaptador.entrega(resultado)
 
     def _guarda_rascunho(self, rascunho: EventDraft) -> None:
         with self._lock:
@@ -556,8 +618,12 @@ class AgentRuntime:
                 aplicacoes=self._config_aplicacoes,
                 recusas_estruturais=self._config_recusas,
             )
+        pose = None
+        if self._pose is not None and self._pose_adaptador is not None:
+            pose = PoseHealth(worker=self._pose.stats(), adaptador=self._pose_adaptador.stats())
         return AgentHealth(
             config=config,
+            pose=pose,
             cameras=tuple(sup.health() for sup in self._supervisores.values()),
             buffers=tuple(buffer.stats() for buffer in self._buffers.values()),
             detector=self._deteccao.stats(),

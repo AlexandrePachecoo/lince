@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from lince_agent.ffmpeg.rawframe import Frame
+
 
 @dataclass(frozen=True, slots=True)
 class Detection:
@@ -70,6 +72,13 @@ class DetectionResult:
 
     detections: tuple[Detection, ...]
     inference_ms: float
+
+    frame: Frame | None = field(default=None, compare=False, repr=False)
+    """O frame em que estas caixas foram detectadas. É o que a pose recorta: com a
+    fila do §3.2 descartando, "o último frame da câmera" já pode ser outro, e recortar
+    as caixas deste em cima dele poria o recorte em outra cena. Fica fora do `==` e do
+    `repr` — a identidade do resultado é câmera, sequência e detecções, não 900 KB de
+    pixel. Só vive enquanto o resultado vive: o tracking não o guarda."""
 
 
 @dataclass(frozen=True, slots=True)

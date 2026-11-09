@@ -46,7 +46,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-import cv2
 import numpy as np
 
 from lince_agent.config import PixelFormat
@@ -332,6 +331,10 @@ def _warp_affine(image: np.ndarray, crop: Crop) -> np.ndarray:
     treino e a junta continua parecendo certa. `pyproject.toml` fixa `<5`, e
     `tests/test_pose_referencia.py` compara o tensor com o do MMPose pelo sha256.
     """
+    # Import adiado: o runtime importa a pose mesmo com ela desligada, que é o padrão,
+    # e um agente sem pose não deve depender de o OpenCV carregar para subir.
+    import cv2
+
     largura = crop.input_width
     altura = crop.input_height
     escala_x = crop.scale_w / largura

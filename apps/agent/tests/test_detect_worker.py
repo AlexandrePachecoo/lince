@@ -174,6 +174,37 @@ def test_resultado_carrega_o_instante_do_frame_nao_o_da_inferencia():
     assert recebidos[0].inference_ms == pytest.approx(50.0)
 
 
+def test_resultado_leva_o_proprio_frame_que_foi_inferido():
+    """A pose recorta as caixas do tracking em cima de um frame. Tem que ser o
+    frame em que essas caixas foram detectadas: com a fila do §3.2 descartando, o
+    "último frame da câmera" já pode ser outro, e o recorte cairia em outra cena."""
+    recebidos: list[DetectionResult] = []
+    unidade = worker(on_result=recebidos.append)
+    quadro = frame(7)
+
+    unidade.submit("cam1", quadro)
+    unidade.tick()
+
+    assert recebidos[0].frame is quadro
+
+
+def test_frame_nao_entra_na_comparacao_do_resultado():
+    """O frame viaja junto, mas a identidade do resultado continua sendo câmera,
+    sequência e detecções — comparar 900 KB de pixel a cada `==` seria custo sem
+    significado."""
+    recebidos: list[DetectionResult] = []
+    unidade = worker(on_result=recebidos.append)
+    unidade.submit("cam1", frame(7))
+    unidade.tick()
+    assert recebidos[0] == DetectionResult(
+        camera_id="cam1",
+        sequence=7,
+        received_at=recebidos[0].received_at,
+        detections=recebidos[0].detections,
+        inference_ms=recebidos[0].inference_ms,
+    )
+
+
 def test_deteccoes_chegam_ao_consumidor():
     recebidos: list[DetectionResult] = []
     unidade = worker(DetectorFalso((pessoa(), pessoa(x1=300.0))), on_result=recebidos.append)
