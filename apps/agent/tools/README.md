@@ -105,10 +105,10 @@ uv run python tools\bench_pose.py D:\videos\pessoas.mp4 `
 a sessão cai para CPU e o JSON grava o provider que rodou.
 
 A tabela traz p50/p95 em ms, por pessoa e por frame, com 1, 3 e 6 pessoas:
-recorte NumPy, inferência e decode. Um frame com menos gente repete as caixas
-até N — o número é o do lote. O `cv2.warpAffine` só aparece se o opencv já
-estiver instalado nesse ambiente; se não estiver, o script avisa e segue. Não
-instale opencv no `pyproject.toml` do agente por causa desta coluna.
+recorte, inferência e decode. Um frame com menos gente repete as caixas até N
+— o número é o do lote. O recorte é o `cv2.warpAffine` do agente: a primeira
+medição na RTX 3060 comparou com o recorte NumPy do piloto (6,5 ms contra
+1,1 ms por pessoa) e decidiu a troca.
 
 ffmpeg e ffprobe precisam estar no PATH (é o que lê o vídeo). O JSON não deve
 voltar para o git.

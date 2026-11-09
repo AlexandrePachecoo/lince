@@ -2,9 +2,9 @@
 
 Roda o YOLOX que o agente já usa e o RTMPose-s carregado por `OnnxPose`.
 O tempo sai em ms, p50 e p95, por pessoa e por frame, com 1, 3 e 6 pessoas.
-O recorte NumPy é o de `crop_bbox`. O `cv2.warpAffine` só entra se o opencv
-já estiver instalado neste ambiente — não é dependência do agente. Sem ele,
-o estágio é pulado com um aviso e o resto da tabela segue.
+O recorte é o de `crop_bbox`, o mesmo `cv2.warpAffine` que o agente usa. A
+comparação com o recorte NumPy do piloto já foi feita (6,5 ms contra 1,1 ms por
+pessoa, RTX 3060) e decidiu a troca; não há mais duas curvas para medir.
 
 Funciona com CUDAExecutionProvider e com CPU. `--provider cuda` pede a placa
 e cai para CPU se ela não subir, que é o mesmo fallback do detector (§10.10).
@@ -42,7 +42,7 @@ from lince_agent.detect.state import Detection
 from lince_agent.ffmpeg.rawframe import Frame
 from lince_agent.pose.onnx import ModelError as PoseModelError
 from lince_agent.pose.onnx import OnnxPose, decode_simcc
-from lince_agent.pose.preprocess import RTMPOSE, crop_bbox, plano_crop
+from lince_agent.pose.preprocess import crop_bbox
 
 PESSOAS_PADRAO = (1, 3, 6)
 EXTENSOES = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".ppm"}
@@ -97,60 +97,10 @@ def percentis(amostras: list[float]) -> dict[str, float | int]:
     }
 
 
-def opencv_disponivel() -> bool:
-    try:
-        import cv2
-    except ImportError:
-        return False
-    return hasattr(cv2, "warpAffine")
-
-
-def recorte_warp_affine(imagem: np.ndarray, caixa: tuple[float, float, float, float]) -> np.ndarray:
-    """O mesmo plano do recorte NumPy, amostrado pelo `cv2.warpAffine`.
-
-    Fica neste script de propósito. Puxar opencv para `pose/preprocess.py`
-    faria o agente da loja depender de uma biblioteca que o ffmpeg já substitui
-    na leitura, só para comparar um warp.
-    """
-    import cv2
-
-    crop = plano_crop(imagem, caixa, spec=RTMPOSE)
-    largura = crop.input_width
-    altura = crop.input_height
-    escala_x = crop.scale_w / largura
-    escala_y = crop.scale_h / altura
-    matriz = np.array(
-        [
-            [escala_x, 0.0, crop.center_x - (largura / 2.0) * escala_x],
-            [0.0, escala_y, crop.center_y - (altura / 2.0) * escala_y],
-        ],
-        dtype=np.float64,
-    )
-    # A matriz leva o pixel do recorte ao pixel do frame — o mesmo mapa do
-    # `_warp_bilinear`. Sem WARP_INVERSE_MAP o OpenCV inverte de novo e amostra
-    # outro retângulo; o tensor normalizado diverge em unidades e o benchmark
-    # cronometra um recorte que não é o da pose.
-    recortado = cv2.warpAffine(
-        imagem,
-        matriz,
-        (largura, altura),
-        flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(0, 0, 0),
-    )
-    rgb = recortado[:, :, ::-1]
-    media = np.asarray(RTMPOSE.mean_rgb, dtype=np.float32).reshape(1, 1, 3)
-    desvio = np.asarray(RTMPOSE.std_rgb, dtype=np.float32).reshape(1, 1, 3)
-    normalizado = (rgb.astype(np.float32) - media) / desvio
-    return np.ascontiguousarray(normalizado.transpose(2, 0, 1)[np.newaxis, ...])
-
-
 def mede_caixas(
     imagem: np.ndarray,
     caixas: list[tuple[float, float, float, float]],
     pose: Any,
-    *,
-    usar_opencv: bool,
 ) -> dict[str, Any]:
     """Tempos em ms. Pessoa é cada caixa; frame é o wall clock das caixas juntas.
 
@@ -158,28 +108,17 @@ def mede_caixas(
     o do frame dividido por N. No lote fixo, cada chamada é uma pessoa e o
     frame é a soma. Os dois números estão no JSON para não misturar.
     """
-    pessoa_numpy: list[float] = []
+    pessoa_recorte: list[float] = []
     tensores = []
     crops = []
     inicio = time.perf_counter()
     for caixa in caixas:
         t0 = time.perf_counter()
         tensor, crop = crop_bbox(imagem, caixa)
-        pessoa_numpy.append((time.perf_counter() - t0) * 1000)
+        pessoa_recorte.append((time.perf_counter() - t0) * 1000)
         tensores.append(tensor)
         crops.append(crop)
-    frame_numpy = (time.perf_counter() - inicio) * 1000
-
-    pessoa_warp: list[float] | None = None
-    frame_warp: float | None = None
-    if usar_opencv:
-        pessoa_warp = []
-        inicio = time.perf_counter()
-        for caixa in caixas:
-            t0 = time.perf_counter()
-            recorte_warp_affine(imagem, caixa)
-            pessoa_warp.append((time.perf_counter() - t0) * 1000)
-        frame_warp = (time.perf_counter() - inicio) * 1000
+    frame_recorte = (time.perf_counter() - inicio) * 1000
 
     pessoa_inf: list[float] = []
     inicio = time.perf_counter()
@@ -210,10 +149,8 @@ def mede_caixas(
     frame_dec = (time.perf_counter() - inicio) * 1000
 
     return {
-        "recorte_numpy_pessoa": pessoa_numpy,
-        "recorte_numpy_frame": frame_numpy,
-        "recorte_warp_pessoa": pessoa_warp,
-        "recorte_warp_frame": frame_warp,
+        "recorte_pessoa": pessoa_recorte,
+        "recorte_frame": frame_recorte,
         "inferencia_pessoa": pessoa_inf,
         "inferencia_frame": frame_inf,
         "decode_pessoa": pessoa_dec,
@@ -238,8 +175,6 @@ def monta_relatorio(
     pose_versao: str,
     pose_provider: str,
     lote_dinamico: bool,
-    opencv: bool,
-    nota_opencv: str | None,
     estagios: dict[int, dict[str, Any]],
 ) -> dict[str, Any]:
     return {
@@ -257,8 +192,6 @@ def monta_relatorio(
             "provider": pose_provider,
             "lote_dinamico": lote_dinamico,
         },
-        "opencv": opencv,
-        "nota_opencv": nota_opencv,
         "estagios_ms": {str(n): bloco for n, bloco in estagios.items()},
     }
 
@@ -268,25 +201,19 @@ def formata_tabela(relatorio: dict[str, Any]) -> str:
         f"{'pessoas':>7}  {'estágio':<18}  {'p50/pessoa':>10}  {'p95/pessoa':>10}  "
         f"{'p50/frame':>10}  {'p95/frame':>10}",
     ]
-    if not relatorio["opencv"]:
-        linhas.append(relatorio["nota_opencv"] or "cv2.warpAffine pulado")
     for n, bloco in relatorio["estagios_ms"].items():
         for rotulo, chave in (
-            ("recorte NumPy", "recorte_numpy_ms"),
-            ("warpAffine", "recorte_warp_affine_ms"),
+            ("recorte", "recorte_ms"),
             ("inferência", "inferencia_ms"),
             ("decode", "decode_ms"),
         ):
             estagio = bloco[chave]
-            if estagio is None:
-                celulas = ("pulado",) * 4
-            else:
-                celulas = (
-                    f"{estagio['por_pessoa']['p50']:10.3f}",
-                    f"{estagio['por_pessoa']['p95']:10.3f}",
-                    f"{estagio['por_frame']['p50']:10.3f}",
-                    f"{estagio['por_frame']['p95']:10.3f}",
-                )
+            celulas = (
+                f"{estagio['por_pessoa']['p50']:10.3f}",
+                f"{estagio['por_pessoa']['p95']:10.3f}",
+                f"{estagio['por_frame']['p50']:10.3f}",
+                f"{estagio['por_frame']['p95']:10.3f}",
+            )
             linhas.append(
                 f"{n:>7}  {rotulo:<18}  {celulas[0]:>10}  {celulas[1]:>10}  "
                 f"{celulas[2]:>10}  {celulas[3]:>10}"
@@ -299,7 +226,7 @@ def _binario(nome: str) -> str:
     if caminho is None:
         raise BenchError(
             f"{nome} não está no PATH. O benchmark lê o vídeo por ele, "
-            "sem acrescentar opencv ao agente"
+            "sem depender de outro leitor de vídeo"
         )
     return caminho
 
@@ -465,15 +392,6 @@ def roda(
                 "`bash scripts/modelo.sh` ou desça --limiar (o piso do detector é 0,10)"
             )
 
-        usar_opencv = opencv_disponivel()
-        nota = None
-        if not usar_opencv:
-            nota = (
-                "opencv não está neste ambiente; cv2.warpAffine foi pulado. "
-                "O recorte NumPy segue na tabela"
-            )
-            print(f"aviso: {nota}", file=sys.stderr)
-
         info_pose = pose.info()
         info_det = yolox.info()
         if info_pose is None or info_det is None:
@@ -481,31 +399,27 @@ def roda(
 
         for _ in range(aquecimento):
             imagem, caixas = com_pessoa[0]
-            mede_caixas(imagem, escolhe_caixas(caixas, pessoas[0]), pose, usar_opencv=usar_opencv)
+            mede_caixas(imagem, escolhe_caixas(caixas, pessoas[0]), pose)
 
         estagios: dict[int, dict[str, Any]] = {}
         for n in pessoas:
             baldes: dict[str, list[float]] = {
-                "numpy_pessoa": [],
-                "numpy_frame": [],
-                "warp_pessoa": [],
-                "warp_frame": [],
+                "recorte_pessoa": [],
+                "recorte_frame": [],
                 "inf_pessoa": [],
                 "inf_frame": [],
                 "dec_pessoa": [],
                 "dec_frame": [],
             }
             for imagem, caixas in com_pessoa:
-                medida = mede_caixas(
-                    imagem, escolhe_caixas(caixas, n), pose, usar_opencv=usar_opencv
-                )
+                medida = mede_caixas(imagem, escolhe_caixas(caixas, n), pose)
                 _acumula(
                     baldes,
-                    "numpy_pessoa",
-                    "numpy_frame",
+                    "recorte_pessoa",
+                    "recorte_frame",
                     medida,
-                    "recorte_numpy_pessoa",
-                    "recorte_numpy_frame",
+                    "recorte_pessoa",
+                    "recorte_frame",
                 )
                 _acumula(
                     baldes,
@@ -523,21 +437,9 @@ def roda(
                     "decode_pessoa",
                     "decode_frame",
                 )
-                if medida["recorte_warp_pessoa"] is not None:
-                    _acumula(
-                        baldes,
-                        "warp_pessoa",
-                        "warp_frame",
-                        medida,
-                        "recorte_warp_pessoa",
-                        "recorte_warp_frame",
-                    )
             estagios[n] = {
                 "amostras_frame": len(com_pessoa),
-                "recorte_numpy_ms": _bloco(baldes["numpy_pessoa"], baldes["numpy_frame"]),
-                "recorte_warp_affine_ms": (
-                    None if not usar_opencv else _bloco(baldes["warp_pessoa"], baldes["warp_frame"])
-                ),
+                "recorte_ms": _bloco(baldes["recorte_pessoa"], baldes["recorte_frame"]),
                 "inferencia_ms": _bloco(baldes["inf_pessoa"], baldes["inf_frame"]),
                 "decode_ms": _bloco(baldes["dec_pessoa"], baldes["dec_frame"]),
             }
@@ -553,8 +455,6 @@ def roda(
             pose_versao=info_pose.model_version,
             pose_provider=info_pose.provider,
             lote_dinamico=pose.lote_dinamico,
-            opencv=usar_opencv,
-            nota_opencv=nota,
             estagios=estagios,
         )
     finally:

@@ -1,8 +1,8 @@
 """O benchmark da pose, sem vídeo e sem modelo.
 
 O que se mede aqui é a separação dos tempos e o lote, não o percentil de uma
-GPU. Um `inferir` que empilha quando o modelo é de lote 1, ou um warpAffine
-obrigatório, quebraria o número que decide se o recorte NumPy cabe no box.
+GPU. Um `inferir` que empilha quando o modelo é de lote 1 quebraria o número
+que decide quantas pessoas por frame cabem no box.
 """
 
 from __future__ import annotations
@@ -49,17 +49,16 @@ def test_lote_dinamico_empilha_e_o_fixo_repete():
     imagem = np.zeros((120, 160, 3), dtype=np.uint8)
     caixas = [(20.0, 10.0, 80.0, 100.0), (40.0, 30.0, 90.0, 110.0), (10.0, 10.0, 40.0, 80.0)]
     dinamica = _Pose(True)
-    medida = bench.mede_caixas(imagem, caixas, dinamica, usar_opencv=False)
+    medida = bench.mede_caixas(imagem, caixas, dinamica)
     assert dinamica.chamadas == [3]
-    assert medida["recorte_warp_pessoa"] is None
-    assert len(medida["recorte_numpy_pessoa"]) == 3
+    assert len(medida["recorte_pessoa"]) == 3
     assert len(medida["inferencia_pessoa"]) == 3
     # O tempo por pessoa no lote é o do frame dividido por N. O relógio de
     # fora inclui umas instruções a mais; a folga é isso, não outro estágio.
     assert sum(medida["inferencia_pessoa"]) == pytest.approx(medida["inferencia_frame"], abs=5.0)
 
     estatica = _Pose(False)
-    medida_fixa = bench.mede_caixas(imagem, caixas, estatica, usar_opencv=False)
+    medida_fixa = bench.mede_caixas(imagem, caixas, estatica)
     assert estatica.chamadas == [1, 1, 1]
     assert len(medida_fixa["decode_pessoa"]) == 3
 
@@ -87,8 +86,8 @@ def test_percentis_e_providers():
         bench.interpreta_pessoas("0,3")
 
 
-def test_tabela_marca_warp_pulado():
-    numpy_ms = {
+def test_tabela_traz_os_tres_estagios():
+    recorte_ms = {
         "por_pessoa": bench.percentis([1.0, 2.0, 3.0]),
         "por_frame": bench.percentis([3.0, 4.0]),
     }
@@ -112,44 +111,21 @@ def test_tabela_marca_warp_pulado():
         pose_versao="rtmpose-s@def",
         pose_provider="CPUExecutionProvider",
         lote_dinamico=True,
-        opencv=False,
-        nota_opencv="cv2.warpAffine foi pulado",
         estagios={
             1: {
                 "amostras_frame": 2,
-                "recorte_numpy_ms": numpy_ms,
-                "recorte_warp_affine_ms": None,
+                "recorte_ms": recorte_ms,
                 "inferencia_ms": inferencia,
                 "decode_ms": decode,
             }
         },
     )
     texto = bench.formata_tabela(relatorio)
-    assert "pulado" in texto
-    assert "warpAffine" in texto
+    for estagio in ("recorte", "inferência", "decode"):
+        assert estagio in texto
     assert "2.000" in texto
     assert relatorio["unidade"] == "ms"
     assert relatorio["pose"]["lote_dinamico"] is True
-
-
-def test_warp_affine_amostra_o_mesmo_recorte_que_o_numpy():
-    """A matriz leva o pixel do recorte ao pixel do frame, que é o mapa do
-    `_warp_bilinear`. Sem `WARP_INVERSE_MAP` o OpenCV inverte de novo e amostra
-    outro retângulo: o tensor normalizado diverge em unidades, e o benchmark
-    passa a cronometrar um recorte que não é o da pose."""
-    pytest.importorskip("cv2")
-    from lince_agent.pose.preprocess import crop_bbox
-
-    imagem = np.random.default_rng(0).integers(0, 256, size=(120, 160, 3), dtype=np.uint8)
-    caixa = (20.0, 10.0, 80.0, 100.0)
-    esperado, _ = crop_bbox(imagem, caixa)
-    obtido = bench.recorte_warp_affine(imagem, caixa)
-
-    assert obtido.shape == esperado.shape
-    assert obtido.dtype == esperado.dtype
-    assert np.max(np.abs(obtido - esperado)) < 0.15
-
-
 def _video(caminho: Path, largura: int, altura: int, frames: int = 3) -> Path:
     import shutil
     import subprocess
