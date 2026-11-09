@@ -148,3 +148,73 @@ def test_warp_affine_amostra_o_mesmo_recorte_que_o_numpy():
     assert obtido.shape == esperado.shape
     assert obtido.dtype == esperado.dtype
     assert np.max(np.abs(obtido - esperado)) < 0.15
+
+
+def _video(caminho: Path, largura: int, altura: int, frames: int = 3) -> Path:
+    import shutil
+    import subprocess
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg não está no PATH")
+    subprocess.run(  # noqa: S603
+        [
+            ffmpeg,
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc2=size={largura}x{altura}:rate=3",
+            "-frames:v",
+            str(frames),
+            "-pix_fmt",
+            "yuv420p",
+            str(caminho),
+        ],
+        check=True,
+    )
+    return caminho
+
+
+def test_video_maior_que_o_detector_chega_com_o_lado_maior_igual_a_ele(tmp_path: Path):
+    """O `pessoas.mp4` do `scripts/modelo.sh` é 768×432, e o letterbox do YOLOX
+    recusa frame cujo lado maior não é o do modelo — no agente quem ajusta é o
+    filtro do ffmpeg (§3.1). O benchmark lia o vídeo cru e parava no primeiro
+    frame, sem medir nada. Escalando como o agente escala, 768×432 vira 640×360."""
+    frames = bench.le_frames(_video(tmp_path / "v.mp4", 768, 432), 2, lado_maior=640)
+    assert len(frames) == 2
+    assert {f.shape for f in frames} == {(360, 640, 3)}
+
+
+def test_video_em_pe_escala_pela_altura(tmp_path: Path):
+    frames = bench.le_frames(_video(tmp_path / "v.mp4", 432, 768), 1, lado_maior=640)
+    assert frames[0].shape == (640, 360, 3)
+
+
+def test_video_menor_que_o_detector_tambem_e_ajustado(tmp_path: Path):
+    """O letterbox recusa nos dois sentidos: 320×240 também não é 640."""
+    frames = bench.le_frames(_video(tmp_path / "v.mp4", 320, 240), 1, lado_maior=640)
+    assert frames[0].shape == (480, 640, 3)
+
+
+def test_pasta_de_imagens_tambem_e_ajustada(tmp_path: Path):
+    import shutil
+    import subprocess
+
+    pasta = tmp_path / "frames"
+    pasta.mkdir()
+    _video(tmp_path / "v.mp4", 768, 432, frames=1)
+    subprocess.run(  # noqa: S603
+        [
+            shutil.which("ffmpeg"),
+            "-v",
+            "error",
+            "-i",
+            str(tmp_path / "v.mp4"),
+            str(pasta / "a.png"),
+        ],
+        check=True,
+    )
+    frames = bench.le_frames(pasta, 5, lado_maior=640)
+    assert frames[0].shape == (360, 640, 3)
