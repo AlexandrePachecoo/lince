@@ -371,6 +371,13 @@ uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 \
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 \
   --outbox redis --dry-run --trigger-every 20 --stats
 
+# pose (piloto do gesto, desligada por padrão): estima as juntas dos tracks confirmados
+# e só entrega — sem gesto, evento nem notificação. O .onnx sai de
+# tools/exporta_rtmpose.py e fica fora do git; a linha [pose] do --stats mostra fila e
+# descartes:
+uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 \
+  --model models/yolox_s.onnx --pose-model ~/lince-modelos/rtmpose-s.onnx --stats
+
 # estágio 4: a borda decidindo sozinha, sem andaime de gatilho. A linha é orientada —
 # desenhada da esquerda para a direita, o lado de dentro da loja fica embaixo (y maior):
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 --camera-id cam3 \
@@ -681,6 +688,15 @@ Não reintroduza nenhuma destas — cada uma custou depuração e tem teste guar
 - **`${VAR:-padrão}` no compose tem `:` dentro.** Um `split(":")` numa montagem
   `${LINCE_MODELOS_DIR:-./modelos}:/modelos:ro` lê a origem errada e o teste passa a
   conferir outra coisa. `tests/test_box.py` remove a interpolação antes de quebrar.
+- **O OpenCV 5 não recorta como o 4.x.** O `cv2.warpAffine` do 5.0 amostra diferente em
+  até 7 níveis de cinza num terço dos pixels: o tensor da pose deixa de ser o do treino e
+  a junta continua parecendo certa. O agente fixa `opencv-python-headless<5`, e
+  `test_pose_referencia.py` compara o tensor com o do MMPose pelo sha256.
+- **A pose recorta o frame do tracking, não o último da câmera.** Com a fila do §3.2
+  descartando, o último frame já pode ser outro; por isso o `DetectionResult` carrega o
+  próprio `frame`. E na reconexão a pose que ainda estava na fila é da sessão anterior —
+  o adaptador a descarta pelo `received_at`, senão a junta do "track 1" antigo cai no
+  "track 1" novo.
 - **Ordenar a triagem vigente por `criadoEm` é cara ou coroa.** Duas decisões no mesmo
   milissegundo empatam, e "a última" passa a depender de como o Postgres devolveu a
   linha. Por isso existe `Triagem.seq`: a sequência não empata.

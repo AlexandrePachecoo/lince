@@ -868,3 +868,130 @@ def test_linha_do_heartbeat_distingue_skew_zero_de_skew_nao_medido():
     assert "skew=-45.0s" in cli._format_heartbeat(
         HeartbeatStats(clock_skew_s=-45.0, skew_medido=True)
     )
+
+
+# --- pose (piloto, desligada por padrão) ---------------------------------------
+
+
+def _config_de(args):
+    config, _ = cli._monta_config(cli.build_parser(), args)
+    return config
+
+
+def test_sem_pose_model_a_pose_fica_desligada(tmp_path):
+    args = cli.build_parser().parse_args(
+        ["--camera", "rtsp://x/y", "--model", str(tmp_path / "yolox_s.onnx")]
+    )
+    assert cli._monta_pose(args, _config_de(args)) is None
+
+
+def test_pose_sem_deteccao_e_recusada_e_nao_ignorada(tmp_path):
+    """Sem detecção não há track. Uma pose "ligada" que nunca recebe ninguém
+    pareceria saudável no `--stats`."""
+    args = cli.build_parser().parse_args(
+        ["--camera", "rtsp://x/y", "--pose-model", str(tmp_path / "rtmpose-s.onnx")]
+    )
+    with pytest.raises(ValueError, match="--model"):
+        cli._monta_pose(args, _config_de(args))
+
+
+def test_pose_sem_tracking_e_recusada(tmp_path):
+    args = cli.build_parser().parse_args(
+        [
+            "--camera",
+            "rtsp://x/y",
+            "--model",
+            str(tmp_path / "yolox_s.onnx"),
+            "--no-track",
+            "--pose-model",
+            str(tmp_path / "rtmpose-s.onnx"),
+        ]
+    )
+    with pytest.raises(ValueError, match="tracking"):
+        cli._monta_pose(args, _config_de(args))
+
+
+def test_pose_model_abre_a_sessao_com_os_providers_da_deteccao(tmp_path):
+    """Um RTMPose mínimo de verdade, sem peso treinado: o que se confere é a
+    sessão subir com a mesma ordem de providers da detecção."""
+    from test_pose_sessao import grava_modelo
+
+    modelo = grava_modelo(tmp_path / "rtmpose-s.onnx")
+    args = cli.build_parser().parse_args(
+        [
+            "--camera",
+            "rtsp://x/y",
+            "--model",
+            str(tmp_path / "yolox_s.onnx"),
+            "--provider",
+            "CPUExecutionProvider",
+            "--pose-model",
+            str(modelo),
+        ]
+    )
+    pose = cli._monta_pose(args, _config_de(args))
+    try:
+        assert pose is not None
+        info = pose.info()
+        assert info is not None and info.provider == "CPUExecutionProvider"
+    finally:
+        if pose is not None:
+            pose.close()
+
+
+def test_pose_model_fora_do_piloto_derruba_a_subida(tmp_path, monkeypatch, caplog):
+    """Um WholeBody renomeado ou um peso AGPL não pode virar pose ligada em
+    silêncio: o agente não sobe e diz por quê."""
+    monkeypatch.setattr(cli, "probe_stream", lambda *_a, **_k: pytest.fail("subiu"))
+    with caplog.at_level("ERROR"):
+        codigo = cli.main(
+            [
+                "--camera",
+                "rtsp://x/y",
+                "--model",
+                str(tmp_path / "yolox_s.onnx"),
+                "--pose-model",
+                str(tmp_path / "rtmpose-wholebody.onnx"),
+                "--dry-run",
+            ]
+        )
+    assert codigo == 2
+    assert "pose:" in caplog.text
+
+
+def test_pose_model_pode_vir_do_ambiente(tmp_path, monkeypatch):
+    monkeypatch.setenv("LINCE_POSE_MODEL_PATH", str(tmp_path / "rtmpose-s.onnx"))
+    import importlib
+
+    importlib.reload(cli)
+    try:
+        args = cli.build_parser().parse_args(["--camera", "rtsp://x/y"])
+        assert args.pose_model == tmp_path / "rtmpose-s.onnx"
+    finally:
+        monkeypatch.delenv("LINCE_POSE_MODEL_PATH")
+        importlib.reload(cli)
+
+
+def test_linha_da_pose_mostra_fila_descartes_e_reconexoes():
+    from lince_agent.pose.adaptador import PoseAdapterStats
+    from lince_agent.pose.worker import CameraPoseStats, PoseWorkerStats
+    from lince_agent.runtime import PoseHealth
+
+    saude = PoseHealth(
+        worker=PoseWorkerStats(
+            queue_depth=1,
+            queue_size=2,
+            cameras=(CameraPoseStats("corredor", aceitos=10, processados=7, descartados=3),),
+        ),
+        adaptador=PoseAdapterStats(sem_pessoa=40, reconexoes=1, descartados_reconexao=1),
+    )
+    linha = cli._format_pose(saude)
+    for pedaço in (
+        "[pose]",
+        "1/2",
+        "processados=7",
+        "descartados=3",
+        "sem gente=40",
+        "reconexões=1",
+    ):
+        assert pedaço in linha

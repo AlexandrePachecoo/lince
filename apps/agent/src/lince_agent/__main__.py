@@ -35,6 +35,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -65,11 +66,15 @@ from lince_agent.outbox.http import CloudResponse, HttpCloudClient, NetworkError
 from lince_agent.outbox.policy import ConfigOutcome, classify_config_response
 from lince_agent.outbox.state import OutboxStats
 from lince_agent.outbox.store import MemoryOutbox, OutboxStore
+from lince_agent.pose.onnx import ModelError as PoseModelError
 from lince_agent.rules.geometry import LinhaOrientada, Poligono
 from lince_agent.rules.state import RuleStats
-from lince_agent.runtime import AgentHealth, AgentRuntime, ConfigHealth
+from lince_agent.runtime import AgentHealth, AgentRuntime, ConfigHealth, PoseHealth
 from lince_agent.track.draw import Rastros, desenha
 from lince_agent.track.state import TrackerStats, TrackingResult
+
+if TYPE_CHECKING:
+    from lince_agent.pose.onnx import OnnxPose
 
 log = logging.getLogger("lince_agent")
 
@@ -222,6 +227,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="ignora o modelo e roda com NullDetector, como uma câmera inelegível (R-3)",
     )
 
+    pose = parser.add_argument_group("pose — piloto do gesto, desligada por padrão")
+    pose.add_argument(
+        "--pose-model",
+        type=Path,
+        default=_env_path("LINCE_POSE_MODEL_PATH"),
+        metavar="ONNX",
+        help="RTMPose-s COCO-17 .onnx (tools/exporta_rtmpose.py). Sem ele não há pose. "
+        "Exige --model: a pose só estima quem o tracking confirmou. Usa os mesmos "
+        "--provider da detecção",
+    )
+
     estagio3 = parser.add_argument_group("estágio 3 — tracking (§3.3)")
     estagio3.add_argument(
         "--no-track",
@@ -357,6 +373,34 @@ def _monta_deteccao(args: argparse.Namespace) -> DetectionOptions:
         score_threshold=args.score_threshold,
         iou_threshold=args.iou_threshold,
     )
+
+
+def _monta_pose(args: argparse.Namespace, config: AgentConfig) -> OnnxPose | None:
+    """Abre a sessão da pose, ou `None` — que é o padrão.
+
+    Desligada por padrão porque ainda não decide nada: estima juntas e entrega, sem
+    gesto, evento ou notificação. Ligá-la num box sem `--pose-model` seria pagar GPU
+    por um resultado que ninguém consome.
+
+    Exige a detecção ligada, e recusa em vez de ignorar: sem detecção não há track, e
+    uma pose "ligada" que nunca recebe ninguém pareceria saudável no `--stats`.
+    """
+    if args.pose_model is None:
+        return None
+    if not config.detection.enabled:
+        raise ValueError(
+            "--pose-model exige a detecção ligada (--model): a pose só estima tracks "
+            "confirmados, e sem detecção não há track"
+        )
+    if not config.tracking.enabled:
+        raise ValueError(
+            "--pose-model exige o tracking ligado: a pose só estima tracks confirmados"
+        )
+    # Import adiado pelo mesmo motivo do detector: onnxruntime e opencv custam
+    # subida, e o agente sem pose não deve pagar.
+    from lince_agent.pose.onnx import OnnxPose
+
+    return OnnxPose(args.pose_model, providers=config.detection.providers)
 
 
 def _monta_regras(args: argparse.Namespace) -> RuleOptions:
@@ -745,6 +789,23 @@ def _format_regras(stats: RuleStats) -> str:
     return f"[regras] eventos={stats.eventos}  {por_camera}"
 
 
+def _format_pose(saude: PoseHealth) -> str:
+    """A linha da pose. O número a vigiar é `descartados` contra `processados`.
+
+    Descarte subindo é a pose não acompanhando a soma das câmeras — a fila de dois
+    snapshots joga o mais antigo fora, de propósito. `sem gente` alto é normal num
+    corredor vazio; `desencontrados` diferente de zero é fiação errada, não carga.
+    """
+    w = saude.worker
+    a = saude.adaptador
+    return (
+        f"[pose] fila {w.queue_depth}/{w.queue_size}  processados={w.processados} "
+        f"descartados={w.descartados} erros={w.erros}  sem gente={a.sem_pessoa} "
+        f"reconexões={a.reconexoes} (descartadas {a.descartados_reconexao}) "
+        f"desencontrados={a.desencontrados}"
+    )
+
+
 class _TrackDumper:
     """Grava um MP4 por câmera com os tracks desenhados.
 
@@ -889,6 +950,15 @@ def main(argv: list[str] | None = None) -> int:
         log.error("configuração inválida: %s", erro)
         return 2
 
+    try:
+        pose = _monta_pose(args, config)
+    except (ValueError, PoseModelError) as erro:
+        # Nome fora do piloto, arquivo ausente, forma que não é a do RTMPose-s
+        # COCO-17, ou pose sem detecção. Melhor não subir que subir com uma pose que
+        # parece ligada e não estima ninguém.
+        log.error("pose: %s", erro)
+        return 2
+
     for camera in config.cameras:
         # Uma câmera por vez, e falhar em qualquer uma para o agente inteiro. Subir com
         # sete de oito câmeras seria pior: a loja acha que está coberta, e o corredor
@@ -930,6 +1000,7 @@ def main(argv: list[str] | None = None) -> int:
         if dumper or tracks_dumper
         else None,
         on_tracking=tracks_dumper.on_tracking if tracks_dumper else None,
+        pose=pose,
     )
 
     finished = threading.Event()
@@ -1004,6 +1075,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(_format_deteccao(saude.detector), flush=True)  # noqa: T201
                 print(_format_tracking(saude.tracker), flush=True)  # noqa: T201
                 print(_format_regras(saude.rules), flush=True)  # noqa: T201
+                if saude.pose is not None:
+                    print(_format_pose(saude.pose), flush=True)  # noqa: T201
                 print(_format_outbox(saude.outbox, saude), flush=True)  # noqa: T201
                 if poller is not None:
                     print(_format_config(saude.config, poller.stats()), flush=True)  # noqa: T201

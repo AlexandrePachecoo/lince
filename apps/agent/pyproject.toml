@@ -7,6 +7,12 @@ dependencies = [
     "numpy>=2.1",
     # Fila local durável do §3.6 (ADR-004). Em Python 3.12 não puxa dependência
     # transitiva nenhuma, o que mantém a imagem do box enxuta.
+    # Só pelo `cv2.warpAffine` do recorte da pose (pose/preprocess.py): 6x mais rápido
+    # que o equivalente em NumPy, medido na RTX 3060. `headless` porque o box não tem
+    # tela e a variante com GUI puxa Qt. O teto não é cautela genérica: o 5.0 amostra
+    # diferente do 4.x e o tensor deixa de bater com o do MMPose (test_pose_referencia).
+    # O 4.9 é compilado contra NumPy 1.
+    "opencv-python-headless>=4.10,<5",
     "redis>=5.0",
     # O ONNX Runtime (ADR-009) NÃO está aqui: ele mora nos grupos `cpu` e `gpu` abaixo,
     # porque `onnxruntime` e `onnxruntime-gpu` instalam o mesmo módulo e não convivem.

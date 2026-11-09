@@ -179,6 +179,7 @@ class DetectorWorker:
             received_at=pedido.frame.received_at,
             detections=deteccoes,
             inference_ms=(fim - inicio) * 1000.0,
+            frame=pedido.frame,
         )
         try:
             self._on_result(resultado)

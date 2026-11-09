@@ -98,9 +98,9 @@ def test_caixa_de_referencia_tem_padding_e_razao_do_rtmpose():
 
 
 def test_plano_do_recorte_e_o_mesmo_crop_do_tensor():
-    """O benchmark mede `cv2.warpAffine` em cima de `plano_crop`. Se o centro
-    divergir do que `crop_bbox` usou, a curva do OpenCV deixa de ser a
-    alternativa do recorte NumPy — e a mais rápida parece ganhar."""
+    """`undo_crop` desfaz o plano que `crop_bbox` amostrou. Se o centro
+    divergir entre os dois, a junta volta para um retângulo que não foi o
+    recortado: pulso fora do corpo, sem erro."""
     _, recorte = crop_bbox(imagem(), CAIXA)
     assert plano_crop(imagem(), CAIXA) == recorte
 

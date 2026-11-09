@@ -138,9 +138,9 @@ def plano_crop(
 ) -> Crop:
     """Centro e escala do recorte, sem amostrar pixel.
 
-    O benchmark compara o warp NumPy com `cv2.warpAffine` em cima deste plano.
-    Recalcular o centro lá fora é como o deslocamento entra: as duas curvas
-    deixam de medir o mesmo recorte, e a mais rápida parece ganhar.
+    `crop_bbox` amostra em cima deste plano, e `undo_crop` desfaz o mesmo
+    plano. Recalcular o centro em outro lugar é como o deslocamento entra: a
+    junta volta para um retângulo que não foi o recortado.
     """
     _valida_spec(spec)
     _valida_imagem(image)
@@ -184,7 +184,7 @@ def crop_bbox(
 
     # `image` pode ser a vista somente leitura do pipe (`Frame.as_array`).
     # O warp aloca o destino; escrever no frame estouraria na primeira câmera.
-    recortado = _warp_bilinear(image, crop)
+    recortado = _warp_affine(image, crop)
     rgb = recortado[:, :, ::-1]
     media = np.asarray(spec.mean_rgb, dtype=np.float32).reshape(1, 1, 3)
     desvio = np.asarray(spec.std_rgb, dtype=np.float32).reshape(1, 1, 3)
@@ -312,68 +312,45 @@ def _pontos(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return copiados[:, 0], copiados[:, 1]
 
 
-# `cv::warpAffine` INTER_LINEAR quantiza a fração do pixel em 5 bits (passos
-# de 1/32) e arredonda a soma inteira. Um bilinear em float discorda disso em
-# até alguns níveis de cinza — o bastante para o tensor não ser o que o
-# TopdownAffine entrega, com a junta ainda parecendo certa.
-_PESO_BITS = 5
-_PESO_PASSOS = 1 << _PESO_BITS
-
-
-def _warp_bilinear(image: np.ndarray, crop: Crop) -> np.ndarray:
+def _warp_affine(image: np.ndarray, crop: Crop) -> np.ndarray:
     """Amostra o frame no retângulo do recorte, com borda constante 0.
 
-    É o `warpAffine` do `TopdownAffine` (INTER_LINEAR, borderValue 0) sem
-    OpenCV: rotação zero e razão já corrigida viram escala em torno do centro.
-    A borda 0 é uint8, **antes** da troca de canal e da normalização.
+    É o `cv2.warpAffine` do `TopdownAffine` (INTER_LINEAR, borderValue 0), a
+    mesma chamada que gerou os pesos. O piloto amostrava em NumPy, imitando a
+    quantização do OpenCV, e o benchmark na RTX 3060 mediu o preço: 6,5 ms por
+    pessoa contra 1,1 ms, e com 3 pessoas o recorte era 80% do frame. Com 15
+    câmeras a 3 fps, uma thread de pose não fechava a conta.
+
+    A matriz leva o pixel do recorte ao pixel do frame, por isso
+    `WARP_INVERSE_MAP`: sem ele o OpenCV inverte de novo e amostra outro
+    retângulo. Dá o mesmo resultado que a matriz direta do `get_warp_matrix`
+    do MMPose, sem a inversão a cada chamada.
+
+    **A versão do OpenCV é parte do contrato.** O 5.0 amostra diferente do 4.x
+    em até 7 níveis de cinza num terço dos pixels: o tensor deixa de ser o do
+    treino e a junta continua parecendo certa. `pyproject.toml` fixa `<5`, e
+    `tests/test_pose_referencia.py` compara o tensor com o do MMPose pelo sha256.
     """
-    u = np.arange(crop.input_width, dtype=np.float64)
-    v = np.arange(crop.input_height, dtype=np.float64)
-    grade_u, grade_v = np.meshgrid(u, v)
-    mapa_x = crop.center_x + (grade_u - crop.input_width / 2.0) * (crop.scale_w / crop.input_width)
-    mapa_y = crop.center_y + (grade_v - crop.input_height / 2.0) * (
-        crop.scale_h / crop.input_height
+    # Import adiado: o runtime importa a pose mesmo com ela desligada, que é o padrão,
+    # e um agente sem pose não deve depender de o OpenCV carregar para subir.
+    import cv2
+
+    largura = crop.input_width
+    altura = crop.input_height
+    escala_x = crop.scale_w / largura
+    escala_y = crop.scale_h / altura
+    matriz = np.array(
+        [
+            [escala_x, 0.0, crop.center_x - (largura / 2.0) * escala_x],
+            [0.0, escala_y, crop.center_y - (altura / 2.0) * escala_y],
+        ],
+        dtype=np.float64,
     )
-    return _bilinear(image, mapa_x, mapa_y)
-
-
-def _bilinear(image: np.ndarray, mapa_x: np.ndarray, mapa_y: np.ndarray) -> np.ndarray:
-    altura, largura = image.shape[:2]
-    x0 = np.floor(mapa_x).astype(np.int32)
-    y0 = np.floor(mapa_y).astype(np.int32)
-    # O mesmo arredondamento do INTER_LINEAR: floor(fração * 32 + 0.5). Peso
-    # 32 significa "o pixel seguinte inteiro", senão a borda do frame — onde
-    # o vizinho não existe — diverge do warpAffine.
-    ax = np.floor((mapa_x - x0) * _PESO_PASSOS + 0.5).astype(np.int32)
-    ay = np.floor((mapa_y - y0) * _PESO_PASSOS + 0.5).astype(np.int32)
-    carrega_x = ax >= _PESO_PASSOS
-    carrega_y = ay >= _PESO_PASSOS
-    x0 = x0 + carrega_x.astype(np.int32)
-    y0 = y0 + carrega_y.astype(np.int32)
-    ax = np.where(carrega_x, np.int32(0), ax)
-    ay = np.where(carrega_y, np.int32(0), ay)
-
-    def pixels(xx: np.ndarray, yy: np.ndarray) -> np.ndarray:
-        # Fora do frame pesa zero, sem renormalizar o vizinho que existe: é o
-        # que o BORDER_CONSTANT faz. Renormalizar clarearia a borda e a pessoa
-        # encostada no quadro entraria diferente do treino.
-        valido = (xx >= 0) & (xx < largura) & (yy >= 0) & (yy < altura)
-        xx_c = np.clip(xx, 0, largura - 1)
-        yy_c = np.clip(yy, 0, altura - 1)
-        amostra = image[yy_c, xx_c].astype(np.int32)
-        amostra[~valido] = 0
-        return amostra
-
-    peso_00 = (_PESO_PASSOS - ax) * (_PESO_PASSOS - ay)
-    peso_10 = ax * (_PESO_PASSOS - ay)
-    peso_01 = (_PESO_PASSOS - ax) * ay
-    peso_11 = ax * ay
-    # + 2^(2*bits - 1) antes do deslocamento é o arredondamento do OpenCV.
-    acumulado = (
-        pixels(x0, y0) * peso_00[..., None]
-        + pixels(x0 + 1, y0) * peso_10[..., None]
-        + pixels(x0, y0 + 1) * peso_01[..., None]
-        + pixels(x0 + 1, y0 + 1) * peso_11[..., None]
-        + (1 << (_PESO_BITS * 2 - 1))
+    return cv2.warpAffine(
+        image,
+        matriz,
+        (largura, altura),
+        flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0),
     )
-    return (acumulado >> (_PESO_BITS * 2)).astype(np.uint8)
