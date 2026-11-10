@@ -25,6 +25,15 @@ O alcance antes é o que separa a mão na bolsa da mão apoiada na cintura de qu
 O risco conhecido, que a avaliação existe para quantificar: quem pega um produto e o
 segura junto ao quadril faz o mesmo movimento. A regra não sabe para onde a mão foi,
 só onde o pulso parou.
+
+**Medida no dataset (182 vídeos, 8 fps): não separa.** Disparou em 8% dos furtos e
+6% dos normais. 150 dos 182 vídeos nunca chegam a `longe`: a prateleira está à
+frente da pessoa, o braço estica na profundidade e encurta na imagem, e em 2D o
+alcance quase não aparece. A melhor das 108 combinações da varredura dá 18% contra
+9%. O pulso também some *mais* nos normais (17% das amostras) que nos furtos (7%).
+A regra fica como gatilho provisório para fechar o caminho do evento; afinar estes
+números não é o caminho — o que separa as classes, se algo separa, está no
+movimento inteiro, que é trabalho do classificador.
 """
 
 from __future__ import annotations
