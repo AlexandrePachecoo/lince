@@ -173,3 +173,36 @@ Numa pasta, a estrutura de subpastas é espelhada na saída, e `--max-por-pasta`
 amostra mantendo todas as classes. A saída não pode ficar dentro da fonte. O vídeo sai em
 H.264, à taxa medida (8 fps), no tamanho do frame original. É mídia de gente: fica fora do
 git.
+
+## Medir a regra do gesto
+
+`avalia_gesto.py` passa as poses de cada vídeo pelo `MotorGesto`
+(`src/lince_agent/gesto/`), a linha de base em regra do piloto: **alcançar** (pulso a
+mais de 1,2 tronco do centro) e, em até 2 s, levar o pulso à **lateral do quadril**,
+onde a bolsa a tiracolo fica, e **parar ali** (≥ 0,25 s) ou **sumir ali**. A régua é o
+próprio tronco, do meio dos ombros ao meio dos quadris, então a regra não depende de quão
+perto da câmera a pessoa está.
+
+O relatório conta, por subpasta, quantos vídeos tiveram pelo menos um disparo. Num dataset
+com `Shoplifting/` e `Normal/`, a primeira fração é a sensibilidade e a segunda é o alerta
+falso por vídeo. Só os dois números juntos dizem se a regra presta.
+
+```bash
+cd apps/agent
+.venv/bin/python tools/avalia_gesto.py ~/lince-dados/shoplifting2022 \
+  --cache ~/lince-dados/cache-poses \
+  --detector models/yolox_s.onnx --pose ~/lince-modelos/rtmpose-s.onnx \
+  --saida ~/lince-dados/avaliacao-gesto.json
+```
+
+A pose de cada frame fica em `--cache`. Da segunda vez em diante, ajustar a regra não
+precisa de GPU nem dos `.onnx`, e leva segundos:
+
+```bash
+.venv/bin/python tools/avalia_gesto.py ~/lince-dados/shoplifting2022 \
+  --cache ~/lince-dados/cache-poses --permanencia 0.5 --zona-y-max 1.2
+```
+
+O cache é refeito quando muda a taxa de amostragem, a largura ou o tamanho do vídeo. O JSON
+traz cada disparo (vídeo, instante, track, lado, motivo), para conferir no vídeo de
+`desenha_pose.py` o que a regra viu.
