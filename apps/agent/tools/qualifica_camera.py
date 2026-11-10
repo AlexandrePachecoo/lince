@@ -54,7 +54,9 @@ from lince_agent.ffmpeg.rawframe import Frame
 from lince_agent.pose.adaptador import caixas_para_pose
 from lince_agent.pose.onnx import JUNTAS_COCO17, OnnxPose, PosePessoa
 from lince_agent.pose.onnx import ModelError as PoseModelError
+from lince_agent.pose.worker import CaixaPose
 from lince_agent.track.pool import TrackerPool
+from lince_agent.track.state import TrackingResult
 
 FPS_PADRAO = 8.0
 """A amostra do piloto do gesto (seção 2 do plano). O gesto dura 0,5 a 2 s: a
@@ -363,13 +365,16 @@ class Pose(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class VideoMedido:
-    resolucao: tuple[int, int]
-    frames: int
-    tracks: list[TrackMedido]
+class Amostra:
+    """Um frame percorrido: a imagem, o que o tracker viu e a pose de quem entrou."""
+
+    instante: float
+    imagem: np.ndarray
+    rastreio: TrackingResult
+    pessoas: tuple[tuple[CaixaPose, PosePessoa], ...]
 
 
-def processa_video(
+def percorre(
     video: Path,
     detector: Detector,
     pose: Pose,
@@ -377,23 +382,19 @@ def processa_video(
     fps: float,
     lado_detector: int,
     largura: int | None = None,
-    criterios: Criterios | None = None,
     tracking: TrackingOptions | None = None,
-) -> VideoMedido:
+) -> Iterator[Amostra]:
     """Detecção, tracking e pose sobre o vídeo, como o runtime faria com a pose ligada.
 
-    Só entra na conta track confirmado com detecção no frame — `caixas_para_pose`,
-    a mesma regra do adaptador do agente. Medir a altura de uma caixa prevista pelo
-    Kalman mediria um lugar onde a pessoa não está.
+    Só vai para a pose track confirmado com detecção no frame — `caixas_para_pose`,
+    a mesma regra do adaptador do agente. Medir ou desenhar a caixa prevista pelo
+    Kalman mostraria um lugar onde a pessoa não está.
+
+    É o mesmo percurso para medir (`processa_video`) e para desenhar
+    (`desenha_pose.py`): o que se confere a olho tem que ser o que se mediu.
     """
-    criterios = criterios or Criterios()
     rastreio = TrackerPool(tracking or TrackingOptions())
-    medidor = Medidor()
-    resolucao = (0, 0)
-    frames = 0
     for sequencia, (instante, imagem) in enumerate(frames_de(video, fps=fps, largura=largura)):
-        frames += 1
-        resolucao = (int(imagem.shape[1]), int(imagem.shape[0]))
         reduzida, escala_x, escala_y = _reduz_para_o_detector(imagem, lado_detector)
         deteccoes = tuple(
             Detection(
@@ -416,11 +417,51 @@ def processa_video(
             )
         )
         caixas = caixas_para_pose(resultado)
-        if not caixas:
-            continue
-        poses = pose.estimar(imagem, [caixa.xyxy for caixa in caixas])
-        for caixa, estimada in zip(caixas, poses, strict=True):
-            medidor.observa(caixa.track_id, instante, caixa.y2 - caixa.y1, estimada)
+        poses = pose.estimar(imagem, [caixa.xyxy for caixa in caixas]) if caixas else ()
+        yield Amostra(
+            instante=instante,
+            imagem=imagem,
+            rastreio=resultado,
+            pessoas=tuple(zip(caixas, poses, strict=True)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class VideoMedido:
+    resolucao: tuple[int, int]
+    frames: int
+    tracks: list[TrackMedido]
+
+
+def processa_video(
+    video: Path,
+    detector: Detector,
+    pose: Pose,
+    *,
+    fps: float,
+    lado_detector: int,
+    largura: int | None = None,
+    criterios: Criterios | None = None,
+    tracking: TrackingOptions | None = None,
+) -> VideoMedido:
+    """Mede a régua da Fase 0 em cima de `percorre`."""
+    criterios = criterios or Criterios()
+    medidor = Medidor()
+    resolucao = (0, 0)
+    frames = 0
+    for amostra in percorre(
+        video,
+        detector,
+        pose,
+        fps=fps,
+        lado_detector=lado_detector,
+        largura=largura,
+        tracking=tracking,
+    ):
+        frames += 1
+        resolucao = (int(amostra.imagem.shape[1]), int(amostra.imagem.shape[0]))
+        for caixa, estimada in amostra.pessoas:
+            medidor.observa(caixa.track_id, amostra.instante, caixa.y2 - caixa.y1, estimada)
     return VideoMedido(resolucao=resolucao, frames=frames, tracks=medidor.tracks_longos(criterios))
 
 
