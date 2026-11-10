@@ -49,13 +49,13 @@ avalia = _carrega("avalia_gesto")
 LONGE, MEIO, BOLSA = (1.6, -0.1), (0.7, 0.0), (0.6, 0.7)
 
 
-def _quadros(trajeto, fps=8.0):
+def _quadros(trajeto, fps=8.0, **kwargs):
     """Frames cacheados de uma pessoa com o pulso direito seguindo `trajeto`."""
     return [
         avalia.QuadroCacheado(
             instante=i / fps,
             sequence=i,
-            pessoas=((1, (0.0, 0.0, 10.0, 10.0), pose_com(pulso_direito=p)),),
+            pessoas=((1, (0.0, 0.0, 10.0, 10.0), pose_com(pulso_direito=p, **kwargs)),),
         )
         for i, p in enumerate(trajeto)
     ]
@@ -143,6 +143,91 @@ def test_relatorio_conta_videos_com_disparo_por_pasta():
     assert relatorio["por_pasta"]["Normal"]["fracao_com_disparo"] == pytest.approx(1 / 3)
     texto = avalia.formata(relatorio)
     assert "Shoplifting" in texto and "Normal" in texto and "50%" in texto and "33%" in texto
+
+
+# --- onde a regra parou --------------------------------------------------------------
+
+
+def _etapa(quadros, **parametros):
+    from lince_agent.gesto.motor import ParametrosGesto
+
+    p = ParametrosGesto(**parametros)
+    disparou = bool(avalia.disparos_do_video("v.mp4", quadros, p))
+    return avalia.diagnostica_video(quadros, p, disparou=disparou)[0]
+
+
+@pytest.mark.parametrize(
+    ("quadros", "esperada"),
+    [
+        ([avalia.QuadroCacheado(instante=0.0, sequence=0, pessoas=())], "sem_pessoa"),
+        (_quadros([BOLSA] * 8, tronco=False), "sem_tronco"),
+        (_quadros(PARADO), "sem_alcance"),
+        (_quadros([LONGE, MEIO] * 4), "sem_zona"),
+        (_quadros([LONGE] + [MEIO] * 20 + [BOLSA] * 4), "zona_sem_alcance_antes"),
+        (_quadros([LONGE, MEIO, BOLSA, MEIO, MEIO]), "alcance_e_zona_sem_disparo"),
+        (_quadros(GESTO), "disparou"),
+    ],
+)
+def test_diagnostico_diz_ate_onde_o_video_chegou(quadros, esperada):
+    """Fração de furtos pegos baixa não diz o que mexer; a etapa diz. Furto parado
+    antes do alcance pede outro `alcance_min`; parado antes da zona, outra zona.
+    Uma etapa errada aqui manda ajustar o limiar que não tem culpa."""
+    assert _etapa(quadros) == esperada
+
+
+def test_diagnostico_conta_os_estados_das_amostras():
+    _etapa_, contagem = avalia.diagnostica_video(
+        _quadros(GESTO), avalia.ParametrosGesto(), disparou=True
+    )
+    # Pulso esquerdo não é visto em nenhum frame; o direito passa por longe, meio e zona.
+    assert contagem["sumido"] == len(GESTO)
+    assert (contagem["longe"], contagem["meio"], contagem["zona"]) == (2, 2, 4)
+
+
+def test_diagnostico_por_pasta_soma_etapas_e_estados():
+    """Normal chegando às mesmas etapas que Shoplifting é a resposta de que nenhum
+    limiar separa as classes — a tabela precisa pôr as duas lado a lado."""
+    p = avalia.ParametrosGesto()
+    por_video = {
+        "Shoplifting/a.mp4": avalia.diagnostica_video(_quadros(GESTO), p, disparou=True),
+        "Shoplifting/b.mp4": avalia.diagnostica_video(_quadros(PARADO), p, disparou=False),
+        "Normal/c.mp4": avalia.diagnostica_video(_quadros(PARADO), p, disparou=False),
+    }
+    d = avalia.monta_diagnostico(por_video)
+    assert d["Shoplifting"]["etapas"]["disparou"] == 1
+    assert d["Shoplifting"]["etapas"]["sem_alcance"] == 1
+    assert d["Normal"]["etapas"]["sem_alcance"] == 1
+    assert sum(d["Normal"]["fracao_estados"].values()) == pytest.approx(1.0)
+    texto = avalia.formata_diagnostico(d)
+    assert "sem_alcance" in texto and "Normal" in texto
+
+
+# --- varredura -----------------------------------------------------------------------
+
+
+def test_varredura_poe_primeiro_o_que_separa_as_pastas():
+    """O furto alcança de 1,3 troncos; o normal, de 1,0. Com `alcance_min` 1,2 só o
+    furto dispara; com 0,8 os dois. A primeira linha tem que ser a que separa."""
+    furto = [(1.3, -0.1), (1.3, -0.1), MEIO] + [BOLSA] * 4
+    normal = [(1.0, -0.1), (1.0, -0.1), MEIO] + [BOLSA] * 4
+    linhas = avalia.varre(
+        {"Shoplifting/a.mp4": _quadros(furto), "Normal/b.mp4": _quadros(normal)},
+        avalia.ParametrosGesto(),
+        {"alcance_min": (0.8, 1.2)},
+    )
+    assert [linha["parametros"]["alcance_min"] for linha in linhas] == [1.2, 0.8]
+    assert linhas[0]["fracoes"] == {"Normal": 0.0, "Shoplifting": 1.0}
+    assert "alcance_min" in avalia.formata_varredura(linhas)
+
+
+def test_varredura_pula_combinacao_invalida():
+    """Zona com y mínimo acima do máximo é recusada pelo motor; a grade segue."""
+    linhas = avalia.varre(
+        {"Normal/b.mp4": _quadros(PARADO)},
+        avalia.ParametrosGesto(),
+        {"zona_y_max": (0.1, 1.4)},
+    )
+    assert [linha["parametros"]["zona_y_max"] for linha in linhas] == [1.4]
 
 
 # --- a linha de comando, com vídeo de verdade e modelos dublês -------------------
@@ -251,6 +336,22 @@ def test_cache_completo_dispensa_os_modelos(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(avalia, "OnnxDetector", explode)
     monkeypatch.setattr(avalia, "OnnxPose", explode)
     assert avalia.main([str(fonte), "--cache", str(cache), "--alcance-min", "1.5"]) == 0
+
+
+def test_cli_mostra_o_diagnostico_e_varre_sem_modelo(tmp_path: Path, capsys):
+    fonte = tmp_path / "dataset"
+    video = _video(fonte / "Shoplifting" / "a.mp4")
+    cache = tmp_path / "cache"
+    chave = {"fps": 8.0, "largura": None, "bytes": video.stat().st_size}
+    avalia.grava_cache(cache / "Shoplifting" / "a.mp4.json", _quadros(GESTO), chave=chave)
+    saida = tmp_path / "r.json"
+    argv = [str(fonte), "--cache", str(cache), "--varredura", "--saida", str(saida)]
+    assert avalia.main(argv) == 0
+    texto = capsys.readouterr().out
+    assert "onde parou" in texto and "varredura" in texto
+    relatorio = json.loads(saida.read_text())
+    assert relatorio["videos"]["Shoplifting/a.mp4"]["etapa"] == "disparou"
+    assert len(relatorio["varredura"]) > 1
 
 
 def test_sem_cache_e_sem_modelo_e_erro_claro(tmp_path: Path, capsys):

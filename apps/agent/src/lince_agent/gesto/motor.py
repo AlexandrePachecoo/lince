@@ -133,6 +133,38 @@ class _Track:
     ultimo_disparo: float | None = None
 
 
+def estados_dos_pulsos(pose: PosePessoa, parametros: ParametrosGesto) -> list[tuple[Lado, Estado]]:
+    """O estado de cada pulso numa amostra. É o que o motor vê, exposto para quem mede.
+
+    `tools/avalia_gesto.py` usa a mesma função para dizer **onde** a regra parou num
+    vídeo sem disparo; uma segunda classificação lá divergiria desta no primeiro
+    limiar ajustado, e o diagnóstico passaria a explicar outra regra.
+    """
+    p = parametros
+    ref = referencia_do_tronco(pose, limiar=p.limiar_junta)
+    if ref is None:
+        return [(lado, "sem_tronco") for lado, _ in _PULSOS]
+    estados: list[tuple[Lado, Estado]] = []
+    for lado, indice in _PULSOS:
+        junta = pose.juntas[indice]
+        if not (
+            math.isfinite(junta.confianca)
+            and math.isfinite(junta.x)
+            and math.isfinite(junta.y)
+            and junta.confianca >= p.limiar_junta
+        ):
+            estados.append((lado, "sumido"))
+            continue
+        x, y = normaliza(junta.x, junta.y, ref)
+        if abs(x) <= p.zona_x_max and p.zona_y_min <= y <= p.zona_y_max:
+            estados.append((lado, "zona"))
+        elif math.hypot(x, y) >= p.alcance_min:
+            estados.append((lado, "longe"))
+        else:
+            estados.append((lado, "meio"))
+    return estados
+
+
 class MotorGesto:
     """A janela de cada pessoa e a regra sobre ela. Uma thread só: a de quem entrega a pose."""
 
@@ -188,30 +220,10 @@ class MotorGesto:
         return disparos
 
     def _estados(self, pose: PosePessoa) -> list[tuple[Lado, Estado]]:
-        p = self.parametros
-        ref = referencia_do_tronco(pose, limiar=p.limiar_junta)
-        if ref is None:
+        estados = estados_dos_pulsos(pose, self.parametros)
+        if estados[0][1] == "sem_tronco":
             self._sem_tronco += 1
-            return [(lado, "sem_tronco") for lado, _ in _PULSOS]
-        estados: list[tuple[Lado, Estado]] = []
-        for lado, indice in _PULSOS:
-            junta = pose.juntas[indice]
-            if not (
-                math.isfinite(junta.confianca)
-                and math.isfinite(junta.x)
-                and math.isfinite(junta.y)
-                and junta.confianca >= p.limiar_junta
-            ):
-                self._pulso_nao_visto += 1
-                estados.append((lado, "sumido"))
-                continue
-            x, y = normaliza(junta.x, junta.y, ref)
-            if abs(x) <= p.zona_x_max and p.zona_y_min <= y <= p.zona_y_max:
-                estados.append((lado, "zona"))
-            elif math.hypot(x, y) >= p.alcance_min:
-                estados.append((lado, "longe"))
-            else:
-                estados.append((lado, "meio"))
+        self._pulso_nao_visto += sum(1 for _, estado in estados if estado == "sumido")
         return estados
 
     def _avalia(

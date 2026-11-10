@@ -23,7 +23,7 @@ import pytest
 from gesto_util import pose_com, resultado, sequencia
 
 from lince_agent.gesto.corpo import normaliza, referencia_do_tronco
-from lince_agent.gesto.motor import MotorGesto, ParametrosGesto
+from lince_agent.gesto.motor import MotorGesto, ParametrosGesto, estados_dos_pulsos
 
 LONGE = (1.6, -0.1)  # braço esticado para a prateleira
 MEIO = (0.7, 0.0)  # voltando
@@ -224,3 +224,21 @@ def test_parametros_sao_validados():
         ParametrosGesto(zona_y_min=1.0, zona_y_max=0.5)
     with pytest.raises(ValueError, match="janela"):
         ParametrosGesto(janela_s=0.0)
+
+
+def test_estados_dos_pulsos_e_o_que_o_motor_ve():
+    """A ferramenta de medida explica o vídeo sem disparo com esta função. Se ela
+    divergisse do motor, o diagnóstico descreveria uma regra que não é a que rodou."""
+    p = ParametrosGesto()
+    assert estados_dos_pulsos(pose_com(pulso_esquerdo=LONGE, pulso_direito=BOLSA), p) == [
+        ("esquerdo", "longe"),
+        ("direito", "zona"),
+    ]
+    assert estados_dos_pulsos(pose_com(pulso_direito=MEIO), p) == [
+        ("esquerdo", "sumido"),
+        ("direito", "meio"),
+    ]
+    assert estados_dos_pulsos(pose_com(pulso_direito=BOLSA, tronco=False), p) == [
+        ("esquerdo", "sem_tronco"),
+        ("direito", "sem_tronco"),
+    ]
