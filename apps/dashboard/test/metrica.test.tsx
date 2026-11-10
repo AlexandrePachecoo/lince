@@ -57,6 +57,29 @@ describe("a tela de falso positivo por câmera", () => {
     expect(screen.getByText(/o limite é 3/)).toBeInTheDocument();
   });
 
+  test("a mesma câmera com saída e gesto vem em duas linhas, cada uma rotulada", async () => {
+    // Sem o rótulo as duas linhas pareceriam a câmera repetida, e os alertas falsos do
+    // gesto seriam lidos como da zona da porta — que seria recalibrada sem culpa.
+    montaRede(
+      metrica([
+        cameraMetrica({ camera_id: "cam3", source: "gesture", falso_positivo: 6 }),
+        cameraMetrica({
+          camera_id: "cam3",
+          source: "rule",
+          falso_positivo: 0,
+          acima_do_limite: false,
+          pior_dia: null,
+        }),
+      ]),
+    );
+    abre();
+
+    const linhas = await screen.findAllByRole("article");
+    expect(linhas).toHaveLength(2);
+    expect(within(linhas[0] as HTMLElement).getByText("gesto")).toBeInTheDocument();
+    expect(within(linhas[1] as HTMLElement).getByText("saída")).toBeInTheDocument();
+  });
+
   test("uma câmera dentro do limite não vira alarme", async () => {
     // Se toda câmera aparecesse marcada, a marca deixaria de significar alguma coisa e a
     // tela viraria ruído — que é como um painel morre.

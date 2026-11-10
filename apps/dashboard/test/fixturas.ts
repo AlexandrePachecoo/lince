@@ -32,6 +32,23 @@ export function evento(sobrescreve: Partial<Evento> = {}): Evento {
   };
 }
 
+/** Um evento de gesto como a regra da bolsa manda (common.v1.json, `gesture`). */
+export function eventoDeGesto(sobrescreve: Partial<Evento> = {}): Evento {
+  return evento({
+    source: "gesture",
+    rule: null,
+    gesture: {
+      method: { id: "regra-bolsa", version: "1" },
+      track_id: 7,
+      hand: "right",
+      started_s_before: 1.25,
+      score: null,
+    },
+    clip: { status: "ok", duration_s: 15, size_bytes: 1_200_000, pre_roll_s: 5.0 },
+    ...sobrescreve,
+  });
+}
+
 export function fila(eventos: Evento[], proximoCursor: string | null = null): Fila {
   return { schema_version: 1, eventos, proximo_cursor: proximoCursor };
 }

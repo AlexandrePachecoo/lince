@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { ErroHttp, buscaClipeUrl, buscaEvento, decide } from "../api/cliente.js";
 import type { Decisao, Evento as EventoDoContrato } from "../api/tipos.js";
 import { apresentacaoDoClipe, valeReconsultar } from "./estado-clipe.js";
+import { descreveGatilho } from "./gatilho.js";
 import { instanteCurto } from "./tempo.js";
 
 // A tela onde a decisão acontece — o segundo dos dois toques da NFR-9.
@@ -173,11 +174,9 @@ export function Evento({ token, aoDecidir }: Props) {
           </div>
           <div>
             <dt>Origem</dt>
-            <dd>
-              {evento.source === "manual"
-                ? "teste de instalação"
-                : (evento.rule?.id ?? "regra da câmera")}
-            </dd>
+            {/* O que olhar no vídeo: a saída se confere no fim do clipe, o gesto no meio,
+                e é o segundo em que ele começa que poupa o triador de assistir tudo. */}
+            <dd>{descreveGatilho(evento).detalhe}</dd>
           </div>
         </dl>
 
