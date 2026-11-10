@@ -16,11 +16,17 @@ from lince_agent.ffmpeg.rawframe import Frame
 LARGURA, ALTURA = 640, 480
 
 
-def frame(sequence: int = 1, *, received_at: float | None = None) -> Frame:
+def frame(
+    sequence: int = 1,
+    *,
+    received_at: float | None = None,
+    width: int = LARGURA,
+    height: int = ALTURA,
+) -> Frame:
     return Frame(
-        data=bytes(PixelFormat.BGR24.frame_bytes(LARGURA, ALTURA)),
-        width=LARGURA,
-        height=ALTURA,
+        data=bytes(PixelFormat.BGR24.frame_bytes(width, height)),
+        width=width,
+        height=height,
         pixel_format=PixelFormat.BGR24,
         sequence=sequence,
         received_at=float(sequence) if received_at is None else received_at,

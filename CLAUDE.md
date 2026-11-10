@@ -378,6 +378,12 @@ uv run python -m lince_agent --camera rtsp://localhost:8554/cam1 \
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 \
   --model models/yolox_s.onnx --pose-model ~/lince-modelos/rtmpose-s.onnx --stats
 
+# o piloto do gesto pede 720p a 8 fps: a pose recorta o punho do frame cheio, e o
+# detector reduz por dentro, no letterbox, como o `preproc` do YOLOX (INTER_LINEAR):
+uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 \
+  --width 1280 --height 720 --fps 8 \
+  --model models/yolox_s.onnx --pose-model ~/lince-modelos/rtmpose-s.onnx --stats
+
 # estágio 4: a borda decidindo sozinha, sem andaime de gatilho. A linha é orientada —
 # desenhada da esquerda para a direita, o lado de dentro da loja fica embaixo (y maior):
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 --camera-id cam3 \
@@ -545,6 +551,10 @@ Não reintroduza nenhuma destas — cada uma custou depuração e tem teste guar
 - **Teste de fila com a nuvem aceitando é corrida.** O sender drena entre o gatilho e
   a asserção. Nos testes de fila o link fica caído por padrão; quem quer o caminho
   completo pede o cliente que aceita, explicitamente.
+- **Frame maior que o modelo é reduzido como o YOLOX treinou, nunca de outro jeito.**
+  `cv2.resize` INTER_LINEAR para `int(w*r) x int(h*r)`, encostado no canto superior
+  esquerdo. INTER_AREA ou `round()` dão uma imagem que o modelo nunca viu, e o recall cai
+  sem sintoma. Ampliar continua recusado: frame menor que a entrada vira borrão.
 - **Cada família de modelo tem sua própria convenção de entrada.** YOLOX preenche o
   letterbox no canto **superior esquerdo**, consome **BGR** e recebe **0..255**; a
   linhagem YOLOv5/v8 centraliza, quer RGB e 0..1. Errar qualquer uma das três não dá

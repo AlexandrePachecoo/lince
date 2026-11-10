@@ -237,12 +237,12 @@ class PoseFalsa:
 
 def test_video_desenhado_tem_os_frames_e_a_resolucao_do_que_foi_medido(tmp_path: Path):
     """Um frame por amostra de `percorre`, no tamanho do frame original: o vídeo
-    mostra o que a pose recortou, não a cópia reduzida que o detector viu."""
+    mostra o frame que a pose recortou, no tamanho em que foi medido."""
     entrada = _video(tmp_path / "v.mp4", 1280, 720, segundos=2)
     saida = tmp_path / "saida" / "v.mp4"
 
     frames = desenha.desenha_video(
-        entrada, saida, DetectorFalso(), PoseFalsa(), fps=8.0, lado_detector=640, limiar=0.3
+        entrada, saida, DetectorFalso(), PoseFalsa(), fps=8.0, limiar=0.3
     )
 
     assert frames == 16

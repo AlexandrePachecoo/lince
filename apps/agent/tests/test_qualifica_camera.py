@@ -253,17 +253,18 @@ class PoseFalsa:
         return tuple(pose(0.8, 0.0) for _ in caixas)
 
 
-def test_detector_ve_640_e_a_pose_recorta_o_frame_inteiro(tmp_path: Path):
-    """O YOLOX-s só aceita frame com lado maior 640. Num vídeo 1280×720 o
-    detector recebe uma cópia reduzida; a pose recorta do frame original, onde o
-    punho tem o dobro de pixels — e a altura medida é a do frame original."""
+def test_detector_e_pose_recebem_o_frame_cheio(tmp_path: Path):
+    """Num vídeo 1280×720 o detector recebe o frame cheio e reduz por dentro, no
+    letterbox, como no agente: uma redução só, para a ferramenta e para a loja.
+    A pose recorta do mesmo frame, onde o punho tem o dobro de pixels, e a altura
+    medida é a do frame original."""
     video = _video(tmp_path / "v.mp4", 1280, 720, segundos=2)
     detector = DetectorFalso()
     pose_falsa = PoseFalsa()
 
-    medido = qualifica.processa_video(video, detector, pose_falsa, fps=8.0, lado_detector=640)
+    medido = qualifica.processa_video(video, detector, pose_falsa, fps=8.0)
 
-    assert set(detector.tamanhos) == {(640, 360)}
+    assert set(detector.tamanhos) == {(1280, 720)}
     assert set(pose_falsa.imagens) == {(720, 1280, 3)}
     (track,) = medido.tracks
     assert track.altura_mediana_px == pytest.approx(720 * 0.5, abs=2.0)

@@ -180,17 +180,58 @@ def test_tensor_sai_nchw_contiguo_e_float32():
 # --- as recusas -----------------------------------------------------------------
 
 
-def test_frame_maior_que_o_modelo_e_recusado_com_o_conserto():
-    """1280x720 precisaria de redimensionamento. O conserto é no filtro do ffmpeg,
-    que já tem um `scale` na cadeia e faz isso de graça (§3.1)."""
-    with pytest.raises(PreprocessError, match="DecodeOptions"):
-        letterbox(imagem(1280, 720), size=LADO)
+def test_frame_maior_e_reduzido_como_o_yolox_treinou():
+    """O piloto do gesto pede 1280x720: a pose recorta o punho do frame cheio, e
+    o detector só precisa achar a pessoa. A redução segue o `preproc` do YOLOX —
+    `cv2.resize` INTER_LINEAR para `int(w*r) x int(h*r)`, encostado no canto
+    superior esquerdo, o resto cinza 114. Outra interpolação ou outro
+    arredondamento entregaria ao modelo uma imagem que ele nunca viu no treino,
+    e o recall cairia sem sintoma."""
+    import cv2
+
+    original = imagem(1280, 720)
+    tensor, caixa = letterbox(original, size=LADO)
+
+    assert caixa.scale == pytest.approx(0.5)
+    assert (caixa.source_width, caixa.source_height) == (1280, 720)
+    esperado = cv2.resize(original, (640, 360), interpolation=cv2.INTER_LINEAR)
+    no_tensor = tensor[0].transpose(1, 2, 0)
+    assert np.array_equal(no_tensor[:360, :640], esperado.astype(np.float32))
+    assert (no_tensor[360:] == PAD_VALUE).all()
 
 
-def test_frame_menor_que_o_modelo_tambem_e_recusado():
+def test_reducao_trunca_o_lado_menor_como_o_yolox():
+    """1366x768: `768 * 640/1366` dá 359,8. O YOLOX usa `int()`, não `round()`:
+    uma linha a mais é uma faixa cinza a menos, e todas as caixas descem meio
+    pixel — pouco, mas é o tipo de erro que este módulo existe para não ter."""
+    tensor, caixa = letterbox(imagem(1366, 768), size=LADO)
+    no_tensor = tensor[0].transpose(1, 2, 0)
+    assert (no_tensor[359:] == PAD_VALUE).all()
+    assert not (no_tensor[358] == PAD_VALUE).all()
+    assert caixa.scale == pytest.approx(640 / 1366)
+
+
+def test_frame_do_tamanho_do_modelo_nao_passa_pelo_opencv(monkeypatch):
+    """O caso de 640x480 continua sem redimensionamento nenhum: o agente sem o
+    piloto do gesto não paga a redução, nem depende de o OpenCV importar."""
+    import builtins
+
+    original = builtins.__import__
+
+    def sem_cv2(nome, *args, **kwargs):
+        if nome == "cv2":
+            raise AssertionError("o caminho de 640 não deveria importar o OpenCV")
+        return original(nome, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", sem_cv2)
+    _, caixa = letterbox(imagem(), size=LADO)
+    assert caixa.scale == 1.0
+
+
+def test_frame_menor_que_o_modelo_continua_recusado():
     """Ampliar em silêncio entregaria ao modelo uma imagem borrada e um recall pior
-    sem nenhum sinal de que foi isso."""
-    with pytest.raises(PreprocessError, match="não cabe"):
+    sem nenhum sinal de que foi isso. Reduzir é o `preproc` do YOLOX; ampliar não."""
+    with pytest.raises(PreprocessError, match="menor que a entrada"):
         letterbox(imagem(320, 240), size=LADO)
 
 
@@ -210,13 +251,14 @@ def test_size_nao_positivo_e_recusado():
 @pytest.mark.parametrize(
     "spec", [YOLOX, PreprocessSpec(centered=True)], ids=["yolox", "centralizado"]
 )
-def test_ida_e_volta_devolve_a_caixa_original(spec: PreprocessSpec):
+@pytest.mark.parametrize("tamanho", [(640, 480), (1280, 720)], ids=["640", "720p"])
+def test_ida_e_volta_devolve_a_caixa_original(spec: PreprocessSpec, tamanho: tuple[int, int]):
     """O teste que guarda o módulo inteiro: uma caixa conhecida no frame da câmera,
     levada para o espaço do modelo e trazida de volta, tem que ser a mesma caixa.
 
     O caso centralizado existe pelo `pad_y`: no YOLOX ele é zero, e um `undo_letterbox`
     que esquecesse de descontá-lo passaria só com o YOLOX."""
-    _, caixa = letterbox(imagem(), size=LADO, spec=spec)
+    _, caixa = letterbox(imagem(*tamanho), size=LADO, spec=spec)
     original = np.array([[100.0, 50.0, 300.0, 400.0]], dtype=np.float32)
 
     no_modelo = original * caixa.scale

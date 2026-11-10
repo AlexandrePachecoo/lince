@@ -11,11 +11,20 @@ Por isso a convenção de cada modelo é dado explícito (`PreprocessSpec`) em v
 constante embutida, e por isso o teste de ida e volta existe: caixa conhecida →
 letterbox → `undo_letterbox` → a mesma caixa.
 
-**Nenhum redimensionamento acontece aqui.** O ffmpeg do estágio 1 já tem um filtro
-`scale` na cadeia (§3.1), então escalar de novo em Python seria pagar duas vezes por
-um trabalho que a fonte faz melhor. O que sobra é preenchimento, e no caso de
-referência — 640x480 para um modelo de 640 — a escala dá exatamente 1.0: são 160
-linhas de cinza e mais nada.
+**Ampliar, nunca; reduzir, só como o YOLOX treinou.** No caso de referência —
+640x480 para um modelo de 640 — a escala dá exatamente 1.0: são 160 linhas de cinza e
+mais nada, e o OpenCV nem é importado. Até o piloto do gesto, frame de outro tamanho
+era recusado e o conserto era o `scale` do ffmpeg (§3.1).
+
+O piloto mudou isso. A pose recorta o punho do frame **cheio** — em 1280x720 o punho
+tem o dobro de pixels — e o detector só precisa achar a pessoa. Pedir ao ffmpeg duas
+saídas, uma para cada, dobraria a banda do pipe e a superfície de erro do §3.1; a
+redução de 1280x720 para 640x360 aqui custa cerca de 0,2 ms por frame na CPU. Ela segue o `preproc` do YOLOX ao
+pé da letra (`cv2.resize` INTER_LINEAR para `int(w*r) x int(h*r)`), porque outra
+interpolação ou outro arredondamento é uma imagem que o modelo nunca viu no treino.
+
+Ampliar continua recusado: um frame menor que a entrada viraria um borrão e um recall
+pior sem sinal nenhum.
 """
 
 from __future__ import annotations
@@ -108,8 +117,8 @@ def letterbox(
     """Encaixa a imagem num quadrado `size × size` preservando a proporção.
 
     Devolve o tensor NCHW float32 pronto para a sessão ONNX e a `Letterbox` que desfaz
-    a conta. Recusa qualquer entrada que exigiria redimensionamento — ver o docstring
-    do módulo.
+    a conta, inclusive a redução. Recusa entrada que exigiria ampliar — ver o
+    docstring do módulo.
     """
     if image.ndim != 3 or image.shape[2] != 3:
         raise PreprocessError(f"esperava uma imagem (altura, largura, 3), recebi {image.shape}")
@@ -118,16 +127,26 @@ def letterbox(
 
     height, width = image.shape[0], image.shape[1]
     scale = size / max(width, height)
-    if scale != 1.0:
+    if scale > 1.0:
         raise PreprocessError(
-            f"frame {width}x{height} não cabe num modelo de {size} sem redimensionar "
-            f"(escala {scale:.4f}). O maior lado do frame tem que ser exatamente {size}: "
-            f"ajuste DecodeOptions.width/height, que o ffmpeg escala de graça no filtro "
-            f"que já existe (§3.1)"
+            f"frame {width}x{height} é menor que a entrada de {size} do modelo; ampliar "
+            f"daria um borrão e um recall pior sem sinal. Ajuste DecodeOptions.width/"
+            f"height para o maior lado ser pelo menos {size} (§3.1)"
         )
 
-    pad_total_x = size - width
-    pad_total_y = size - height
+    conteudo = image
+    if scale < 1.0:
+        # Import adiado: no caso de referência (escala 1.0) o OpenCV não é carregado.
+        import cv2
+
+        # `int()`, não `round()`, e INTER_LINEAR: é o `preproc` do YOLOX. Uma linha a
+        # mais ou outra interpolação é uma imagem que o modelo nunca viu no treino.
+        destino = (int(width * scale), int(height * scale))
+        conteudo = cv2.resize(image, destino, interpolation=cv2.INTER_LINEAR)
+    altura_modelo, largura_modelo = conteudo.shape[0], conteudo.shape[1]
+
+    pad_total_x = size - largura_modelo
+    pad_total_y = size - altura_modelo
     pad_x = pad_total_x // 2 if spec.centered else 0
     pad_y = pad_total_y // 2 if spec.centered else 0
 
@@ -135,7 +154,7 @@ def letterbox(
     # então o destino é sempre alocado. Preencher primeiro e copiar depois é o que
     # deixa a borda com PAD_VALUE sem uma segunda passada.
     canvas = np.full((size, size, 3), PAD_VALUE, dtype=np.uint8)
-    canvas[pad_y : pad_y + height, pad_x : pad_x + width] = image
+    canvas[pad_y : pad_y + altura_modelo, pad_x : pad_x + largura_modelo] = conteudo
 
     if spec.to_rgb:
         canvas = canvas[:, :, ::-1]

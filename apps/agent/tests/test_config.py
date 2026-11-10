@@ -154,12 +154,26 @@ def agente(tmp_path, **kwargs) -> AgentConfig:
     )
 
 
-def test_resolucao_que_nao_bate_com_o_modelo_derruba_a_subida(tmp_path):
-    """Sem esta recusa o agente subiria, ingeriria, gravaria clipe e falharia uma vez
-    por frame no letterbox — num log que ninguém lê. O conserto é no filtro do ffmpeg,
-    que já escala de graça (§3.1)."""
+def test_frame_maior_que_o_modelo_sobe(tmp_path):
+    """720p é a resolução do piloto do gesto: a pose recorta o frame cheio, e o
+    detector recebe a cópia reduzida que o próprio letterbox faz."""
     camera = CameraConfig(
         camera_id="cam1", url="rtsp://x", decode=DecodeOptions(width=1280, height=720)
+    )
+    config = agente(
+        tmp_path,
+        cameras=(camera,),
+        detection=DetectionOptions(enabled=True, model_path=tmp_path / "m.onnx"),
+    )
+    assert config.cameras[0].decode.width == 1280
+
+
+def test_frame_menor_que_o_modelo_derruba_a_subida(tmp_path):
+    """Sem esta recusa o agente subiria, ingeriria, gravaria clipe e falharia uma vez
+    por frame no letterbox — num log que ninguém lê. Ampliar não é conserto: o
+    modelo veria um borrão e o recall cairia sem sinal."""
+    camera = CameraConfig(
+        camera_id="cam1", url="rtsp://x", decode=DecodeOptions(width=320, height=240)
     )
     with pytest.raises(ValueError, match="maior lado"):
         agente(
