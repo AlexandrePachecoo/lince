@@ -137,6 +137,9 @@ function ItemDaFila({ evento }: { evento: Evento }) {
         {evento.source === "manual" && (
           <span className="etiqueta etiqueta--teste">teste de instalação</span>
         )}
+        {/* O gesto se confere no meio do clipe, e não no fim como a saída: quem abre o
+            evento precisa saber o que procurar antes de o vídeo começar. */}
+        {evento.source === "gesture" && <span className="etiqueta etiqueta--gesto">gesto</span>}
         {evento.clip_state === "pendente" && (
           <span className="etiqueta etiqueta--espera">vídeo subindo</span>
         )}

@@ -180,6 +180,18 @@ body {
   color: var(--espera);
 }
 
+.etiqueta--gesto {
+  background: transparent;
+  border: 1px solid var(--texto);
+  color: var(--texto);
+}
+
+.etiqueta--saida {
+  background: transparent;
+  border: 1px solid var(--texto-fraco);
+  color: var(--texto-fraco);
+}
+
 .etiqueta--ausente {
   background: transparent;
   border: 1px solid var(--texto-fraco);

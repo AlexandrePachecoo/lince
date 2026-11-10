@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { buscaMetrica } from "../api/cliente.js";
 import type { CameraMetrica, MetricaFalsoPositivo } from "../api/tipos.js";
+import { rotuloDaOrigem } from "./gatilho.js";
 
 // Falso positivo por câmera (R-1). A pergunta que esta tela responde é única e
 // operacional: **em qual câmera mexer**. Por isso é uma lista ordenada da pior para a
@@ -123,6 +124,12 @@ function LinhaDaCamera({
     <article className={`cartao${camera.acima_do_limite ? " cartao--alerta" : ""}`}>
       <div className="cartao__linha">
         <span className="cartao__camera">{camera.camera_id}</span>
+        {/* Uma câmera com os dois gatilhos vem em duas linhas. Sem o rótulo, as duas
+            pareceriam a mesma câmera repetida, e o falso positivo do gesto seria lido como
+            da zona da porta — que alguém recalibraria sem culpa nenhuma. */}
+        <span className={`etiqueta etiqueta--${camera.source === "gesture" ? "gesto" : "saida"}`}>
+          {rotuloDaOrigem(camera.source)}
+        </span>
         <span className="cartao__loja">{camera.store_id}</span>
       </div>
 

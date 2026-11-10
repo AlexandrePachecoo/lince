@@ -47,6 +47,7 @@ const casos: Array<[string, ReturnType<typeof fixturas.evento>]> = [
     }),
   ],
   ["andaime de instalação", fixturas.evento({ source: "manual", rule: null })],
+  ["gesto de esconder", fixturas.eventoDeGesto()],
   [
     "já triado, e corrigido",
     fixturas.evento({
@@ -87,6 +88,10 @@ describe("as fixturas da suíte batem com packages/shared", () => {
       fixturas.metrica(),
       fixturas.metrica([fixturas.cameraMetrica({ pior_dia: null, acima_do_limite: false })]),
       fixturas.metrica([]),
+      fixturas.metrica([
+        fixturas.cameraMetrica({ source: "rule" }),
+        fixturas.cameraMetrica({ source: "gesture" }),
+      ]),
     ];
 
     for (const documento of casos) {
