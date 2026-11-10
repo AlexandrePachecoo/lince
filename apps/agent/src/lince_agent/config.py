@@ -718,11 +718,11 @@ class AgentConfig:
     def _valida_deteccao(self) -> None:
         """Recusa na subida o que o estágio 2 recusaria a cada frame.
 
-        As duas exigências saem do `preprocess`: o maior lado do frame tem que bater com
-        a entrada do modelo (nenhum redimensionamento acontece em Python) e o formato
-        tem que ser BGR24. Descobrir isso em produção significaria um agente que ingere,
-        grava clipe, e nunca detecta nada — falhando uma vez por frame, num log que
-        ninguém lê. O conserto é no filtro do ffmpeg, e é de graça.
+        As duas exigências saem do `preprocess`: o maior lado do frame não pode ser
+        menor que a entrada do modelo (reduzir é o `preproc` do YOLOX; ampliar daria um
+        borrão) e o formato tem que ser BGR24. Descobrir isso em produção significaria
+        um agente que ingere, grava clipe, e nunca detecta nada — falhando uma vez por
+        frame, num log que ninguém lê. O conserto é no filtro do ffmpeg.
         """
         if not self.detection.enabled:
             return
@@ -732,11 +732,11 @@ class AgentConfig:
             if not camera.detect:
                 continue
             maior = max(camera.decode.width, camera.decode.height)
-            if maior != lado:
+            if maior < lado:
                 raise ValueError(
                     f"câmera {camera.camera_id} decodifica em "
                     f"{camera.decode.width}x{camera.decode.height}, e o modelo consome {lado}: "
-                    f"o maior lado precisa ser exatamente {lado}. Ajuste DecodeOptions.width/"
+                    f"o maior lado precisa ser pelo menos {lado}. Ajuste DecodeOptions.width/"
                     f"height — o ffmpeg já escala no filtro que existe (§3.1)"
                 )
             if camera.decode.pixel_format is not PixelFormat.BGR24:

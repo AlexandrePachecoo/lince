@@ -13,9 +13,9 @@ devolve os números da régua:
   câmera não entra.
 
 Mede **no frame que o agente realmente vê**. Sem `--largura`, é o do arquivo;
-com ela, o ffmpeg escala como o `scale` da ingestão faria. O YOLOX-s só aceita
-lado maior 640, então o detector recebe uma cópia reduzida e as caixas voltam
-para o frame original — onde a pose recorta e onde a altura é medida.
+com ela, o ffmpeg escala como o `scale` da ingestão faria. O detector recebe o
+frame cheio e reduz por dentro, no letterbox, como no agente; as caixas saem no
+frame original — onde a pose recorta e onde a altura é medida.
 
 Serve a uma gravação do corredor de uma loja, que é o que decide a Fase 0, e a
 datasets públicos, que **não** decidem nada: medem se a régua e o pipeline
@@ -340,22 +340,6 @@ def _como_frame(imagem: np.ndarray, sequence: int) -> Frame:
     )
 
 
-def _reduz_para_o_detector(imagem: np.ndarray, lado: int) -> tuple[np.ndarray, float, float]:
-    """Cópia com o lado maior igual ao do detector, e as escalas para voltar."""
-    altura, largura = imagem.shape[:2]
-    if max(largura, altura) == lado:
-        return imagem, 1.0, 1.0
-    import cv2
-
-    if largura >= altura:
-        destino = (lado, max(1, round(altura * lado / largura)))
-    else:
-        destino = (max(1, round(largura * lado / altura)), lado)
-    # INTER_AREA ao reduzir: o bilinear pula pixels e a pessoa ao fundo vira aliasing.
-    reduzida = cv2.resize(imagem, destino, interpolation=cv2.INTER_AREA)
-    return reduzida, largura / destino[0], altura / destino[1]
-
-
 class Detector(Protocol):
     def detect(self, frame: Frame) -> tuple[Detection, ...]: ...
 
@@ -380,7 +364,6 @@ def percorre(
     pose: Pose,
     *,
     fps: float,
-    lado_detector: int,
     largura: int | None = None,
     tracking: TrackingOptions | None = None,
 ) -> Iterator[Amostra]:
@@ -395,18 +378,9 @@ def percorre(
     """
     rastreio = TrackerPool(tracking or TrackingOptions())
     for sequencia, (instante, imagem) in enumerate(frames_de(video, fps=fps, largura=largura)):
-        reduzida, escala_x, escala_y = _reduz_para_o_detector(imagem, lado_detector)
-        deteccoes = tuple(
-            Detection(
-                class_id=d.class_id,
-                score=d.score,
-                x1=d.x1 * escala_x,
-                y1=d.y1 * escala_y,
-                x2=d.x2 * escala_x,
-                y2=d.y2 * escala_y,
-            )
-            for d in detector.detect(_como_frame(reduzida, sequencia))
-        )
+        # O frame cheio, como o agente entrega: a redução para a entrada do modelo
+        # mora no letterbox do detector, uma só para a ferramenta e para a loja.
+        deteccoes = detector.detect(_como_frame(imagem, sequencia))
         resultado = rastreio.update(
             DetectionResult(
                 camera_id=video.name,
@@ -439,7 +413,6 @@ def processa_video(
     pose: Pose,
     *,
     fps: float,
-    lado_detector: int,
     largura: int | None = None,
     criterios: Criterios | None = None,
     tracking: TrackingOptions | None = None,
@@ -454,7 +427,6 @@ def processa_video(
         detector,
         pose,
         fps=fps,
-        lado_detector=lado_detector,
         largura=largura,
         tracking=tracking,
     ):
@@ -597,7 +569,6 @@ def main(argv: list[str] | None = None) -> int:
                     detector,
                     pose,
                     fps=args.fps,
-                    lado_detector=info.input_size,
                     largura=args.largura,
                     criterios=criterios,
                 )

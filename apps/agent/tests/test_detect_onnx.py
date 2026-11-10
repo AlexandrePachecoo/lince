@@ -240,6 +240,18 @@ def test_caixa_sai_nas_coordenadas_do_frame_da_camera(tmp_path: Path):
     )
 
 
+def test_frame_720p_devolve_a_caixa_no_frame_cheio(tmp_path: Path):
+    """No piloto do gesto o detector vê a cópia reduzida e a pose recorta o frame
+    original. A caixa tem que sair no espaço do original: (0, 0, 16, 16) no modelo
+    é (0, 0, 32, 32) num frame 1280x720. Sair no espaço reduzido mandaria a pose
+    recortar o canto errado, com junta plausível e sem erro."""
+    unidade = detector(tmp_path, SessaoFalsa(saida_com_pessoa(81)))
+    (deteccao,) = unidade.detect(frame(1, width=1280, height=720))
+    assert (deteccao.x1, deteccao.y1, deteccao.x2, deteccao.y2) == pytest.approx(
+        (0.0, 0.0, 32.0, 32.0)
+    )
+
+
 def test_caixa_na_faixa_cinza_e_recortada_no_frame(tmp_path: Path):
     """As 160 linhas de preenchimento não existem no frame da câmera. Uma detecção ali
     é ruído do modelo, e deixá-la sair com y = 504 entregaria ao §3.4 um ponto fora do

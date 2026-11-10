@@ -242,14 +242,11 @@ def desenha_video(
     pose: qc.Pose,
     *,
     fps: float,
-    lado_detector: int,
     limiar: float,
     largura: int | None = None,
 ) -> int:
     """Percorre o vídeo como a régua e grava o desenhado. Devolve quantos frames."""
-    amostras = qc.percorre(
-        video, detector, pose, fps=fps, lado_detector=lado_detector, largura=largura
-    )
+    amostras = qc.percorre(video, detector, pose, fps=fps, largura=largura)
     return _grava(saida, (desenha(a, limiar=limiar) for a in amostras), fps=fps)
 
 
@@ -326,7 +323,6 @@ def main(argv: list[str] | None = None) -> int:
                     detector,
                     pose,
                     fps=args.fps,
-                    lado_detector=info.input_size,
                     limiar=args.limiar_punho,
                     largura=args.largura,
                 )
