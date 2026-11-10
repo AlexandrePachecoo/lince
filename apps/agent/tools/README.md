@@ -146,3 +146,30 @@ O que decide a Fase 0 é uma gravação de 10 minutos do corredor real, com gent
 na luz das 18h. Dataset público serve para conferir que a régua e o pipeline funcionam
 — e quão longe a resolução dele está da exigida —, não para aprovar câmera de loja.
 Vídeo e JSON ficam fora do git.
+
+## Conferir a pose a olho
+
+`qualifica_camera.py` diz se o modelo estava **confiante** sobre o punho; só a imagem diz
+se ele **acertou**. `desenha_pose.py` percorre o vídeo pelo mesmo caminho da régua e grava
+um `.mp4` com:
+
+- a caixa e o `#ID` de cada track com pose, numa cor fixa por ID (cor trocando no meio do
+  percurso é troca de ID, R-2);
+- os ossos entre juntas acima do limiar, e só esses;
+- os dois pulsos em destaque: **verde** quando a régua os conta, **vermelho** quando a
+  confiança ficou abaixo do limiar, com o número ao lado;
+- em cinza, os tracks que não foram para a pose (provisório, perdido, sem detecção
+  naquele frame).
+
+```bash
+cd apps/agent
+.venv/bin/python tools/desenha_pose.py ~/lince-dados/shoplifting2022 \
+  --saida ~/lince-dados/desenhados \
+  --detector models/yolox_s.onnx --pose ~/lince-modelos/rtmpose-s.onnx \
+  --max-por-pasta 5
+```
+
+Numa pasta, a estrutura de subpastas é espelhada na saída, e `--max-por-pasta` limita a
+amostra mantendo todas as classes. A saída não pode ficar dentro da fonte. O vídeo sai em
+H.264, à taxa medida (8 fps), no tamanho do frame original. É mídia de gente: fica fora do
+git.
