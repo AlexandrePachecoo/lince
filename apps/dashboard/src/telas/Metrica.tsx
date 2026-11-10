@@ -101,7 +101,7 @@ export function Metrica({ token }: Props) {
 
       <ul className="lista">
         {dados?.cameras.map((camera) => (
-          <li key={`${camera.store_id} ${camera.camera_id}`}>
+          <li key={`${camera.store_id} ${camera.camera_id} ${camera.source}`}>
             <LinhaDaCamera camera={camera} limite={dados.limite_diario} dias={dados.periodo.dias} />
           </li>
         ))}

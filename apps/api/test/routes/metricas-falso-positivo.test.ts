@@ -147,6 +147,39 @@ test("evento de instalação não entra na métrica", async () => {
   assert.deepEqual(corpo.cameras, [], "nem como evento, nem como falso positivo");
 });
 
+test("travessia e gesto da mesma câmera são duas linhas, cada uma com o seu gatilho", async () => {
+  // Somados, o falso positivo do gesto seria cobrado da regra de travessia, e quem abrisse
+  // a tela recalibraria a zona da porta de uma câmera que estava certa.
+  const { loja, usuario } = await lojaComGerente();
+  const token = tokenDe(usuario);
+
+  const travessia = await criaEvento(app, loja, { cameraId: "cam3", ocorridoEm: hojeAs(14) });
+  const gesto1 = await criaEvento(app, loja, {
+    cameraId: "cam3",
+    source: "gesture",
+    ocorridoEm: hojeAs(15),
+  });
+  const gesto2 = await criaEvento(app, loja, {
+    cameraId: "cam3",
+    source: "gesture",
+    ocorridoEm: hojeAs(16),
+  });
+  await decide(token, travessia, "confirmado");
+  await decide(token, gesto1, "falso_positivo");
+  await decide(token, gesto2, "falso_positivo");
+
+  const corpo = (await metrica(token)).json();
+  const linhas = corpo.cameras.filter((c: { camera_id: string }) => c.camera_id === "cam3");
+  const porGatilho = Object.fromEntries(linhas.map((c: { source: string }) => [c.source, c]));
+
+  assert.equal(linhas.length, 2);
+  assert.equal(porGatilho.gesture.falso_positivo, 2);
+  assert.equal(porGatilho.gesture.eventos, 2);
+  assert.equal(porGatilho.rule.falso_positivo, 0);
+  assert.equal(porGatilho.rule.confirmado, 1);
+  assert.equal(corpo.cameras[0].source, "gesture", "a pior linha vem primeiro");
+});
+
 test("a noite da loja não é partida em dois dias", async () => {
   // O motivo da coluna de fuso. Dois eventos da mesma noite em São Paulo -- 22h e 23h --
   // caem em dias UTC **diferentes**, porque a meia-noite de Greenwich passa no meio deles.

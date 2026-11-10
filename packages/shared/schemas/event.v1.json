@@ -32,8 +32,8 @@
       "description": "Relógio de parede da borda no momento de enfileirar. Comparado com occurred_at, deixa a nuvem medir a deriva da âncora do agente sem que ele precise adivinhar nada."
     },
     "source": {
-      "enum": ["rule", "manual"],
-      "description": "`manual` é gatilho humano — teste de câmera na instalação, hoje o andaime da CLI. A nuvem precisa distinguir para não contaminar a métrica de falso positivo por câmera (NFR-2, R-1)."
+      "enum": ["rule", "manual", "gesture"],
+      "description": "`rule` é o motor de travessia do §3.4, `gesture` é o gesto de ocultação a partir da pose, e `manual` é gatilho humano — teste de câmera na instalação, hoje o andaime da CLI. A nuvem precisa distinguir os três: `manual` fica fora da métrica de falso positivo por câmera, e `rule` e `gesture` são contados separados, porque um alerta falso de cada um pede uma ação diferente (NFR-2, R-1)."
     },
     "rule": {
       "type": ["object", "null"],
@@ -48,6 +48,13 @@
         }
       }
     },
+    "gesture": {
+      "anyOf": [
+        { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/gesture" },
+        { "type": "null" }
+      ],
+      "description": "Preenchido se e somente se `source` = `gesture`."
+    },
     "versions": {
       "type": "object",
       "additionalProperties": false,
@@ -55,9 +62,17 @@
       "properties": {
         "agent": { "type": "string", "maxLength": 64 },
         "model": { "type": ["string", "null"], "maxLength": 64 },
-        "config": { "type": ["string", "null"], "maxLength": 64 }
+        "config": { "type": ["string", "null"], "maxLength": 64 },
+        "pose": {
+          "type": ["string", "null"],
+          "maxLength": 64,
+          "description": "Modelo de pose vigente. Um evento de gesto depende dele tanto quanto do detector."
+        }
       }
     },
     "clip": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/clip" }
-  }
+  },
+  "if": { "properties": { "source": { "const": "gesture" } }, "required": ["source"] },
+  "then": { "required": ["gesture"], "properties": { "gesture": { "type": "object" } } },
+  "else": { "properties": { "gesture": { "type": "null" } } }
 }

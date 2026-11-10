@@ -41,6 +41,7 @@ export interface EventoDocumento {
   received_at: string;
   source: EventoOrigem;
   rule: { id: string; version: number } | null;
+  gesture: unknown;
   versions: unknown;
   clip_state: ClipeEstado;
   clip_error: string | null;
@@ -66,6 +67,9 @@ export function documentoDoEvento(evento: EventoDaFila): EventoDocumento {
       evento.regraId !== null && evento.regraVersao !== null
         ? { id: evento.regraId, version: evento.regraVersao }
         : null,
+    // O bloco como o agente mandou: é o schema do contrato que o descreve, e uma
+    // remontagem campo a campo aqui seria a segunda definição que diverge da primeira.
+    gesture: evento.gesto ?? null,
     versions: evento.versions ?? null,
     // Dois campos com nomes parecidos e significados diferentes, e é de propósito que
     // eles não se parecem mais do que isso: `clip_state` é o desfecho do **upload**

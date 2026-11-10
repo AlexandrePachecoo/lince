@@ -22,6 +22,7 @@ export function evento(sobrescreve: Partial<Evento> = {}): Evento {
     received_at: "2026-08-29T14:00:04.000Z",
     source: "rule",
     rule: { id: "saida-sem-passar-no-caixa", version: 3 },
+    gesture: null,
     versions: { agent: "0.1.0", model: "yolox_s-abc123", config: "v7" },
     clip_state: "disponivel",
     clip_error: null,
@@ -56,6 +57,7 @@ export function cameraMetrica(sobrescreve: Partial<CameraMetrica> = {}): CameraM
   return {
     store_id: "loja-centro",
     camera_id: "cam3",
+    source: "rule",
     eventos: 10,
     confirmado: 2,
     falso_positivo: 5,

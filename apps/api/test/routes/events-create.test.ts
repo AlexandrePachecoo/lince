@@ -142,6 +142,68 @@ test("source manual não pode virar regra: regraId/regraVersao ficam nulos", asy
   assert.equal(evento?.regraVersao, null);
 });
 
+test("evento de gesto grava o método em colunas e o bloco como veio", async () => {
+  // É por (método, versão) que se compara o falso positivo da regra da bolsa com o do
+  // classificador que vai substituí-la. Dentro de um JSON a comparação viraria varredura.
+  const loja = await semeiaLoja();
+  const gesture = {
+    method: { id: "regra-bolsa", version: "1" },
+    track_id: 7,
+    hand: "right",
+    started_s_before: 1.25,
+    score: null,
+  };
+  const corpo = corpoEvento(loja, { source: "gesture", rule: null, gesture });
+
+  const resposta = await postaEvento(loja.token, corpo);
+
+  assert.equal(resposta.statusCode, 201, resposta.body);
+  assert.ok(resposta.json().clip_upload_url, "o gesto também tem clipe para subir");
+  const evento = await prismaTeste.evento.findUnique({ where: { eventId: corpo.event_id } });
+  assert.equal(evento?.source, "gesture");
+  assert.equal(evento?.gestoMetodo, "regra-bolsa");
+  assert.equal(evento?.gestoMetodoVersao, "1");
+  assert.deepEqual(evento?.gesto, gesture);
+  assert.equal(evento?.regraId, null);
+});
+
+test("evento de regra não carrega gesto: as colunas do gesto ficam nulas", async () => {
+  const loja = await semeiaLoja();
+  const corpo = corpoEvento(loja);
+
+  await postaEvento(loja.token, corpo);
+
+  const evento = await prismaTeste.evento.findUnique({ where: { eventId: corpo.event_id } });
+  assert.equal(evento?.gestoMetodo, null);
+  assert.equal(evento?.gestoMetodoVersao, null);
+  assert.equal(evento?.gesto, null);
+});
+
+test("source gesture sem o bloco do gesto -> 400, e nada é gravado", async () => {
+  // Um gesto sem método não entra em métrica nenhuma: não se sabe se foi a regra ou o
+  // classificador, e a comparação entre os dois é o motivo de o bloco existir.
+  const loja = await semeiaLoja();
+  const corpo = corpoEvento(loja, { source: "gesture", rule: null });
+
+  const resposta = await postaEvento(loja.token, corpo);
+
+  assert.equal(resposta.statusCode, 400);
+  assert.equal(await prismaTeste.evento.count(), 0);
+});
+
+test("bloco de gesto num evento de regra -> 400", async () => {
+  // Meio a meio, o evento seria contado como travessia com um gesto pendurado, e quem
+  // investigasse a câmera não saberia qual dos dois gatilhos disparou.
+  const loja = await semeiaLoja();
+  const corpo = corpoEvento(loja, {
+    gesture: { method: { id: "regra-bolsa", version: "1" }, track_id: 7 },
+  });
+
+  const resposta = await postaEvento(loja.token, corpo);
+
+  assert.equal(resposta.statusCode, 400);
+});
+
 test("reenvio -> 200, mesma chave e URL de upload nova", async () => {
   // O caminho de renovação do §5.4: a URL venceu, o agente reposta o evento só para
   // ganhar outra. Um 200 sem clip_upload_url deixaria o clipe preso na fila para

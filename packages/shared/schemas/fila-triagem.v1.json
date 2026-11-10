@@ -77,8 +77,15 @@
           "description": "Relógio da nuvem. A distância até reported_at é o que denuncia link caído da loja, e é por isso que os três instantes vão para a tela em vez de um só."
         },
         "source": {
-          "enum": ["rule", "manual"],
-          "description": "`manual` é o andaime de gatilho da instalação. Vai para a fila igual, e separado: um instalador testando 40 vezes numa tarde não pode afundar a estatística de falso positivo da câmera (R-1)."
+          "enum": ["rule", "manual", "gesture"],
+          "description": "`manual` é o andaime de gatilho da instalação. Vai para a fila igual, e separado: um instalador testando 40 vezes numa tarde não pode afundar a estatística de falso positivo da câmera (R-1). `gesture` é o gesto de ocultação, e o triador precisa saber qual gatilho trouxe o evento: a saída pela porta se confere no fim do clipe, o gesto no meio dele."
+        },
+        "gesture": {
+          "anyOf": [
+            { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/gesture" },
+            { "type": "null" }
+          ],
+          "description": "O bloco que o agente mandou, nulo fora de `source: gesture`."
         },
         "rule": {
           "type": ["object", "null"],

@@ -25,6 +25,17 @@ export interface Triagem {
   revisada: boolean;
 }
 
+/** O que disparou um evento de gesto (common.v1.json, `gesture`). */
+export interface Gesto {
+  method: { id: string; version: string };
+  track_id: number;
+  hand?: "left" | "right" | null;
+  /** Segundos antes de `occurred_at` em que o gesto começou. */
+  started_s_before?: number | null;
+  /** Confiança do classificador; nula para regra. */
+  score?: number | null;
+}
+
 export interface Evento {
   event_id: string;
   tenant_id: string;
@@ -34,8 +45,10 @@ export interface Evento {
   reported_at: string;
   received_at: string;
   /** `manual` é o andaime de gatilho da instalação, e vai marcado na tela (R-1). */
-  source: "rule" | "manual";
+  source: "rule" | "manual" | "gesture";
   rule: { id: string; version: number } | null;
+  /** O bloco que o agente mandou; nulo fora de `source: gesture`. */
+  gesture: Gesto | null;
   versions: Record<string, unknown> | null;
   clip_state: ClipState;
   clip_error: string | null;
@@ -67,6 +80,8 @@ export interface ClipeUrl {
 export interface CameraMetrica {
   store_id: string;
   camera_id: string;
+  /** Uma câmera com os dois gatilhos ligados vem em duas linhas, uma por gatilho. */
+  source: "rule" | "gesture";
   eventos: number;
   confirmado: number;
   falso_positivo: number;

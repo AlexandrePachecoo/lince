@@ -11,9 +11,13 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 /** O teto da NFR-2: 3 alertas falsos por câmera por dia. */
 export const LIMITE_DIARIO = 3;
 
+/** Os gatilhos que a métrica conta. `manual` fica de fora (ver a consulta). */
+export type OrigemMedida = "rule" | "gesture";
+
 export interface LinhaPorDia {
   lojaId: string;
   cameraId: string;
+  source: OrigemMedida;
   /** Data civil no fuso da loja, `YYYY-MM-DD`. */
   dia: string;
   confirmado: number;
@@ -49,6 +53,7 @@ export async function contaPorCameraEDia(
     Array<{
       loja_id: string;
       camera_id: string;
+      source: OrigemMedida;
       dia: string;
       confirmado: bigint;
       falso_positivo: bigint;
@@ -59,6 +64,7 @@ export async function contaPorCameraEDia(
     SELECT
       e.loja_id,
       e.camera_id,
+      e.source::text AS source,
       -- Os DOIS "AT TIME ZONE" são necessários, e não é redundância. A coluna é
       -- 'timestamp without time zone' guardando UTC (o Prisma grava assim): o primeiro
       -- **rotula** esse valor como UTC, o segundo **converte** para o fuso da loja.
@@ -87,11 +93,11 @@ export async function contaPorCameraEDia(
       AND e.loja_id IN (${Prisma.join(janela.lojas)})
       -- O andaime de gatilho da instalação fica fora da métrica inteira: um instalador
       -- testando 40 vezes numa tarde afundaria a estatística da câmera que ele estava
-      -- justamente calibrando (R-1).
-      AND e.source = 'rule'
+      -- justamente calibrando (R-1). Travessia e gesto entram, cada um na sua linha.
+      AND e.source IN ('rule', 'gesture')
       AND e.ocorrido_em >= ${janela.desde}
       AND e.ocorrido_em < ${janela.ate}
-    GROUP BY e.loja_id, e.camera_id, dia
+    GROUP BY e.loja_id, e.camera_id, e.source, dia
   `;
 
   // COUNT devolve bigint, que o JSON não serializa. A conversão acontece aqui, na
@@ -100,6 +106,7 @@ export async function contaPorCameraEDia(
   return linhas.map((linha) => ({
     lojaId: linha.loja_id,
     cameraId: linha.camera_id,
+    source: linha.source,
     dia: linha.dia,
     confirmado: Number(linha.confirmado),
     falsoPositivo: Number(linha.falso_positivo),
