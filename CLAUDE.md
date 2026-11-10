@@ -62,8 +62,8 @@ cd apps/agent && uv run ruff check src tests tools && uv run ruff format --check
 | Componente | Situação |
 |---|---|
 | `apps/agent` | Estágios 1 a 6 (§3.1 a §3.6) ligados por `runtime.py`. N câmeras com zonas próprias, vindas do `GET /v1/agents/config` com `ETag`/`304`, poll de 30 s, cache local e troca a quente. Heartbeat da §5.3 sobe a cada 30 s |
-| `apps/api` | As três rotas de agente (`config`, `register`, `heartbeat`), o caminho do evento (`POST /v1/events` com URL pré-assinada e `PATCH /v1/events/{event_id}`) e o lado humano da §4.5: login, fila de triagem, evento avulso por `GET /v1/events/{event_id}`, decisão, URL de leitura do clipe com auditoria e cadastro de usuário. Mais a métrica de falso positivo por câmera/dia do R-1 (`GET /v1/metricas/falso-positivo`). Falta download de modelo, notificação e WebSocket |
-| `apps/dashboard` | O ciclo de triagem da §4.5 em Vite + React: login, fila por cursor, evento com o clipe rodando e a decisão em três botões — os dois toques da NFR-9 —, mais a tela de falso positivo por câmera (R-1). Falta WebSocket, service worker e as telas de usuário |
+| `apps/api` | As três rotas de agente (`config`, `register`, `heartbeat`), o caminho do evento (`POST /v1/events` com URL pré-assinada e `PATCH /v1/events/{event_id}`) e o lado humano da §4.5: login, fila de triagem, evento avulso por `GET /v1/events/{event_id}`, decisão, URL de leitura do clipe com auditoria e cadastro de usuário. Mais a métrica de falso positivo por câmera/dia do R-1 (`GET /v1/metricas/falso-positivo`) e o aviso no celular por Web Push, com agrupamento por câmera e teto diário por loja (§4.6, R-12). Falta download de modelo e WebSocket |
+| `apps/dashboard` | O ciclo de triagem da §4.5 em Vite + React: login, fila por cursor, evento com o clipe rodando e a decisão em três botões — os dois toques da NFR-9 —, mais a tela de falso positivo por câmera (R-1) e o botão de avisos no celular (service worker + manifesto instalável). Falta WebSocket e as telas de usuário |
 | `packages/shared` | JSON Schema dos dois contratos: agente ↔ nuvem (§5) e dashboard ↔ nuvem (§4.5) |
 | `infra/box` | O box da loja (§3.8): imagem do agente em `apps/agent/Dockerfile` (CUDA 13 + cuDNN 9 + ffmpeg com NVDEC + `onnxruntime-gpu`), compose com agente e Redis local, override de desenvolvimento, e o passo a passo em `docs/box.md`. O CI constrói a imagem, roda a suíte dentro dela e publica no GHCR a cada tag `agente-vX.Y.Z`. Falta atualização automática com rollback (R-7) |
 
@@ -279,23 +279,50 @@ O que sustenta o número:
   dia" passaria a significar duas coisas na mesma resposta, e o número não teria como ser
   auditado depois. Com uma loja por fuso o caso nunca aparece.
 
+O aviso no celular (§4.5) é Web Push, e não WhatsApp: grátis, sem aprovação de terceiro,
+e o toque abre `/eventos/:id` com o vídeo rodando — o primeiro dos dois toques da NFR-9. O
+que se vigia nele não é se chegou, é **quantas vezes o celular toca**, porque é isso que faz
+o gerente desligar a notificação (R-1):
+
+- **A decisão é gravada antes do envio** (`alerta`, uma linha por evento) e é por loja, sob
+  `pg_advisory_xact_lock`. A borda drenando a fila depois de o link voltar manda vários
+  eventos de uma vez; sem a trava, todos leriam "nada notificado na janela" e todos
+  tocariam.
+- **Agrupa por câmera e gatilho, nunca por loja.** Agrupar por loja esconderia o corredor 2
+  atrás do alarme do corredor 1; juntar saída e gesto deixaria o falso positivo de um calar
+  o outro.
+- **O teto é por dia da loja** (o mesmo fuso da métrica) e, quando bate, manda **um** aviso
+  de teto e depois silêncio. Sem o aviso, o silêncio pareceria loja tranquila.
+- **Evento que chega mais de 30 min depois de acontecer não toca.** É a fila da borda
+  drenando; tocar às 15h por um furto das 11h manda o gerente correr atrás de ninguém.
+- **Quem recebe é decidido no envio**, pelos vínculos de agora: tirar alguém de uma loja
+  corta o aviso no evento seguinte, sem ninguém lembrar de apagar inscrição.
+- **O endpoint da inscrição passa por lista de origens** (`ORIGENS_PUSH_PADRAO`). A API faz
+  um POST para ele a cada alerta; sem a lista, um usuário logado a apontaria para dentro da
+  rede dela.
+- **O conteúdo não leva clipe nem URL** (R-9): atravessa o serviço de push do fabricante.
+  E o service worker só navega para caminhos do próprio app.
+- **O envio fica fora da resposta ao agente** e é em processo (R-11). O custo, assumido:
+  uma notificação em voo quando a API cai se perde — o evento continua na fila.
+
 Onde encostar em cada coisa:
 
 - **WebSocket (§4.5)** é o que falta para a fila parar de depender de recarga: hoje ela
   puxa, e um evento novo só aparece quando alguém volta à lista. Canal por loja, com a
   autorização conferida na conexão **e** na inscrição — o token do dashboard alcança as
   lojas do vínculo, não as do tenant.
-- **Notificação (§4.5)** é o que tira o produto de "o gerente lembra de abrir o app". O
-  endereço já existe: `/eventos/:id` no dashboard e o `GET /v1/events/{event_id}` por trás
-  dele. R-12 manda agrupar e pôr teto diário por loja antes de mandar a primeira.
+- **WhatsApp (§4.3)**, se um dia vier, entra como segundo canal do mesmo `Notificador`:
+  a decisão de notificar (`alerta`) já é independente do canal. É aí que o envio em
+  processo vira job durável (BullMQ), porque WhatsApp cobra e precisa de retry.
 - **Registro do agente no lado do agente (§5.1)** é o outro lado do
   `POST /v1/agents/register`, que já existe na API: trocar um token de bootstrap por
   credencial na subida, em vez do `--api-token` semeado.
 - **Download de modelo (§5.2)** substitui o caminho local em `DetectionOptions.model_path`.
   O `model_version` já é nome + checksum, no formato que o ADR-006 quer.
-- **Supressão de duplicados (§4.6)** é o que falta para uma câmera mal calibrada produzir
-  um alerta agrupado em vez de trinta. A métrica do R-1 agora diz **quais** câmeras
-  precisam disso, que era a informação que faltava para escolher a janela por câmera.
+- **Supressão de duplicados (§4.6)** já vale para o aviso no celular (`alerta`), mas não
+  para a fila: uma rajada ainda aparece como trinta linhas para triar. A janela é uma só
+  para todas as câmeras (`ALERTA_JANELA_S`); a métrica do R-1 diz **quais** câmeras
+  precisariam de uma janela própria.
 
 O heartbeat (§5.3) é `heartbeat.py`, e o que ele tem de particular não é o envio — é o
 que ele **não** faz. Não há fila: um envio que falhou não deixa nada para trás, porque a
@@ -483,6 +510,12 @@ pnpm lint
 pnpm build                    # `tsc -b` mora aqui: o vitest transpila sem checar tipo
 pnpm dev                      # :5173, com /v1 por proxy para a API em :3000
 ```
+
+Os avisos no celular precisam das chaves VAPID na API (`cd apps/api && pnpm --silent vapid
+>> .env`, uma vez por ambiente: trocar a chave desliga o aviso de todo aparelho inscrito).
+Web Push só existe em origem segura: no computador, `localhost` vale; no celular, só por
+HTTPS — em desenvolvimento, `cloudflared tunnel --url http://localhost:5173`. No iPhone o
+aviso só chega com o app adicionado à tela de início (iOS 16.4+).
 
 Com `pnpm seed` rodado, entra-se com o mesmo usuário do bloco acima. Há duas telas: a fila
 de triagem em `/fila` e o falso positivo por câmera em `/metrica`. A régua é a NFR-9, e

@@ -15,6 +15,11 @@ export default defineConfig({
     proxy: {
       "/v1": { target: "http://localhost:3000", changeOrigin: true },
     },
+    // Web Push só existe em origem segura: no computador o localhost vale, no celular
+    // não. Para testar o aviso num celular de verdade em desenvolvimento, o caminho é um
+    // túnel HTTPS descartável (`cloudflared tunnel --url http://localhost:5173`), e o Vite
+    // recusa por padrão qualquer Host que não conhece.
+    allowedHosts: [".trycloudflare.com"],
   },
   plugins: [react()],
   test: {

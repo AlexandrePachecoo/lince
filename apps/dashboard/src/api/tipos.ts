@@ -122,3 +122,21 @@ export interface Sessao {
   expires_in_s: number;
   usuario: Usuario;
 }
+
+/** `PushSubscription.toJSON()` no formato de push-inscricao.v1.json. */
+export interface InscricaoPushJson {
+  endpoint: string;
+  expirationTime?: number | null;
+  keys: { p256dh: string; auth: string };
+}
+
+/** O que a API cifra e o service worker mostra (notificacao.v1.json). */
+export interface ConteudoNotificacao {
+  schema_version: 1;
+  tipo: "alerta" | "teto";
+  event_id?: string | null;
+  titulo: string;
+  corpo: string;
+  url: string;
+  tag: string;
+}
