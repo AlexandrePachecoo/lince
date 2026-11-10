@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/notificacao/v1.json",
+  "title": "Conteúdo de uma notificação Web Push",
+  "description": "O que a API cifra e o service worker do dashboard mostra (§4.5). Atravessa o serviço de push do fabricante do celular — cifrado, mas fora do control plane —, então leva o mínimo para o gerente decidir abrir: a câmera, o gatilho e a hora. Nada de clipe, URL assinada ou imagem (R-9): abrir o evento exige a sessão do dashboard.",
+  "type": "object",
+  "required": ["schema_version", "tipo", "titulo", "corpo", "url", "tag"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "tipo": {
+      "enum": ["alerta", "teto"],
+      "description": "`alerta` é um evento novo. `teto` é o aviso, uma vez por dia e por loja, de que o limite diário de notificações foi atingido e os próximos eventos ficam só na fila — sem ele, o silêncio pareceria loja tranquila."
+    },
+    "event_id": {
+      "anyOf": [
+        { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/event_id" },
+        { "type": "null" }
+      ]
+    },
+    "titulo": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "corpo": { "type": "string", "maxLength": 200 },
+    "url": {
+      "type": "string",
+      "pattern": "^/(eventos/[A-Za-z0-9-]+|fila)$",
+      "description": "Caminho dentro do dashboard que o toque abre. Relativo de propósito: o service worker só navega para a própria origem."
+    },
+    "tag": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Agrupa no aparelho: uma notificação nova da mesma câmera substitui a anterior na bandeja em vez de empilhar."
+    }
+  }
+}

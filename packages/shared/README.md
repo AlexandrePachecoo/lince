@@ -50,6 +50,10 @@ Do dashboard (§4.5):
 | `schemas/triagem.v1.json` | Corpo do `POST /v1/events/{event_id}/triagem` |
 | `schemas/triagem-aceita.v1.json` | Resposta da triagem — o evento como ele passa a aparecer na fila |
 | `schemas/clipe-url.v1.json` | Resposta do `GET /v1/events/{event_id}/clip-url` |
+| `schemas/push-chave.v1.json` | Resposta do `GET /v1/push/chave` — a chave pública VAPID |
+| `schemas/push-inscricao.v1.json` | Corpo do `POST /v1/push/inscricoes` — o aparelho que recebe alerta |
+| `schemas/push-remocao.v1.json` | Corpo do `DELETE /v1/push/inscricoes` |
+| `schemas/notificacao.v1.json` | O que a API cifra e o service worker mostra |
 
 Nenhum documento de usuário carrega senha ou hash de senha, em nenhuma direção. O hash
 não é público: vazado, vira alvo de força bruta offline — sem rede, sem limite de

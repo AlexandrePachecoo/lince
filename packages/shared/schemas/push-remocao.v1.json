@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/push-remocao/v1.json",
+  "title": "Corpo do DELETE /v1/push/inscricoes",
+  "description": "Tira um aparelho da lista de quem recebe alerta. O dashboard chama na saída da sessão: um celular que passa de mão em mão não pode seguir recebendo os alertas de quem saiu — o alerta não traz o clipe, mas diz que houve furto, em que câmera e a que horas (R-9).",
+  "type": "object",
+  "required": ["schema_version", "endpoint"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "endpoint": { "type": "string", "minLength": 1, "maxLength": 2048 }
+  }
+}

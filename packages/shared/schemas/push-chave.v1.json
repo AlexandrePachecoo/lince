@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/push-chave/v1.json",
+  "title": "Resposta do GET /v1/push/chave",
+  "description": "A chave pública VAPID com que o navegador assina a inscrição de Web Push (§4.5). Vem da API, e não do build do dashboard: a chave é do servidor que vai enviar, e um PWA guardado no cache do celular com a chave antiga inscreveria o aparelho num par que o servidor já não tem — a inscrição seria aceita e nenhuma notificação chegaria, sem erro em lugar nenhum.",
+  "type": "object",
+  "required": ["schema_version", "chave_publica"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "chave_publica": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{80,100}$",
+      "description": "Ponto P-256 não comprimido em base64url, sem preenchimento — o formato que `pushManager.subscribe({ applicationServerKey })` aceita depois de decodificado."
+    }
+  }
+}

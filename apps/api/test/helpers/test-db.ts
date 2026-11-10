@@ -26,8 +26,9 @@ export const prismaTeste = new PrismaClient({ datasources: { db: { url: database
 
 export async function limpaBanco(): Promise<void> {
   await prismaTeste.$executeRawUnsafe(
-    'TRUNCATE TABLE "auditoria", "triagem", "usuario_loja", "usuario", "evento", ' +
-      '"agente", "token_bootstrap", "camera", "loja", "tenant" RESTART IDENTITY CASCADE',
+    'TRUNCATE TABLE "envio_alerta", "alerta", "inscricao_push", "auditoria", "triagem", ' +
+      '"usuario_loja", "usuario", "evento", "agente", "token_bootstrap", "camera", "loja", ' +
+      '"tenant" RESTART IDENTITY CASCADE',
   );
 }
 

@@ -9,6 +9,7 @@ const app = await buildApp({
   leituraExpiraEmS: env.leituraExpiraEmS,
   sessaoSegredo: env.sessaoSegredo,
   sessaoExpiraEmS: env.sessaoExpiraEmS,
+  push: env.push,
 });
 
 try {

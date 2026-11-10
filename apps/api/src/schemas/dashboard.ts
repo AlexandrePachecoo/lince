@@ -64,6 +64,14 @@ const validaEventoDetalhe = ajv.compile(
 const validaMetricaFalsoPositivo = ajv.compile(
   carregaSchema("@lince/shared/schemas/metricas-falso-positivo.v1.json"),
 );
+const validaPushChave = ajv.compile(carregaSchema("@lince/shared/schemas/push-chave.v1.json"));
+const validaPushInscricao = ajv.compile(
+  carregaSchema("@lince/shared/schemas/push-inscricao.v1.json"),
+);
+const validaPushRemocao = ajv.compile(carregaSchema("@lince/shared/schemas/push-remocao.v1.json"));
+const validaNotificacaoPush = ajv.compile(
+  carregaSchema("@lince/shared/schemas/notificacao.v1.json"),
+);
 
 export type ResultadoValidacao = { valido: true } | { valido: false; erros: ErrorObject[] };
 
@@ -135,4 +143,24 @@ export function validaRespostaTriagem(documento: unknown): ResultadoValidacao {
 /** Resposta do `GET /v1/events/{event_id}/clip-url`. */
 export function validaRespostaClipeUrl(documento: unknown): ResultadoValidacao {
   return resultado(validaClipeUrl, documento);
+}
+
+/** Resposta do `GET /v1/push/chave`. */
+export function validaRespostaPushChave(documento: unknown): ResultadoValidacao {
+  return resultado(validaPushChave, documento);
+}
+
+/** Corpo do `POST /v1/push/inscricoes`. */
+export function validaRequisicaoPushInscricao(corpo: unknown): ResultadoValidacao {
+  return resultado(validaPushInscricao, corpo);
+}
+
+/** Corpo do `DELETE /v1/push/inscricoes`. */
+export function validaRequisicaoPushRemocao(corpo: unknown): ResultadoValidacao {
+  return resultado(validaPushRemocao, corpo);
+}
+
+/** O conteúdo que a API cifra e o service worker mostra. */
+export function validaNotificacao(documento: unknown): ResultadoValidacao {
+  return resultado(validaNotificacaoPush, documento);
 }

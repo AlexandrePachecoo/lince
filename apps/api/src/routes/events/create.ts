@@ -118,6 +118,22 @@ export default async function eventsCreateRoutes(app: FastifyInstance) {
       update: { eventId: evento.event_id },
     });
 
+    // Só o evento novo avisa: o reenvio é a borda renovando URL ou repondo depois de um
+    // 404, e o gerente já foi avisado — ou já decidiu — da primeira vez. `manual` é o
+    // instalador testando a câmera, e o celular do gerente não precisa tocar por isso.
+    // Não espera o envio (notificacao/notificador.ts): um serviço de push lento não pode
+    // segurar a resposta e fazer a borda vencer o timeout e reenviar.
+    if (!existente && registro.source !== "manual") {
+      app.notificador?.aoNovoEvento({
+        eventId: registro.eventId,
+        tenantId: registro.tenantId,
+        lojaId: registro.lojaId,
+        cameraId: registro.cameraId,
+        source: registro.source,
+        ocorridoEm: registro.ocorridoEm,
+      });
+    }
+
     // URL nova a cada POST, inclusive no reenvio: é assim que o agente renova uma URL
     // vencida (event-accepted.v1.json). Só faz sentido enquanto o clipe é esperado --
     // com os bytes já no R2 ou com a borda tendo desistido, não há upload a oferecer,
