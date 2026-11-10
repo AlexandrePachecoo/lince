@@ -112,3 +112,37 @@ medição na RTX 3060 comparou com o recorte NumPy do piloto (6,5 ms contra
 
 ffmpeg e ffprobe precisam estar no PATH (é o que lê o vídeo). O JSON não deve
 voltar para o git.
+
+## Qualificar uma câmera (Fase 0)
+
+`qualifica_camera.py` responde a pergunta que vem antes de qualquer modelo de gesto:
+**esta câmera vê a mão?** Roda o YOLOX, o ByteTrack e o RTMPose-s sobre uma gravação e
+aplica a régua do plano:
+
+| Critério | Número |
+|---|---|
+| Resolução do frame medido | ≥ 1280×720 |
+| Altura da pessoa (mediana dos tracks com mais de 1 s) | ≥ 180 px |
+| Tracks longos com punho utilizável | ≥ 50% |
+
+"Punho utilizável" é um track em que um dos pulsos aparece com confiança ≥ 0,3 em pelo
+menos metade das amostras. O 0,3 é o `kpt_thr` da visualização do MMPose e é flag
+(`--limiar-punho`); os outros números são do plano e não têm flag.
+
+```bash
+cd apps/agent
+.venv/bin/python tools/qualifica_camera.py ~/lince-dados/corredor.mp4 \
+  --detector models/yolox_s.onnx \
+  --pose ~/lince-modelos/rtmpose-s.onnx \
+  --saida ~/lince-dados/qualificacao.json
+```
+
+`fonte` pode ser uma pasta: os vídeos das subpastas entram, e a tabela separa por
+subpasta (`normal/`, `shoplifting/`) além do total. A amostra é de 8 fps (`--fps`). Sem
+`--largura`, mede no tamanho do arquivo; com ela, escala como o `scale` da ingestão.
+O código de saída é o veredito: 0 passa, 2 não passa, 1 erro.
+
+O que decide a Fase 0 é uma gravação de 10 minutos do corredor real, com gente real e
+na luz das 18h. Dataset público serve para conferir que a régua e o pipeline funcionam
+— e quão longe a resolução dele está da exigida —, não para aprovar câmera de loja.
+Vídeo e JSON ficam fora do git.
