@@ -995,3 +995,23 @@ def test_linha_da_pose_mostra_fila_descartes_e_reconexoes():
         "reconexões=1",
     ):
         assert pedaço in linha
+
+
+def test_gesto_sem_pose_derruba_a_subida(tmp_path, monkeypatch, caplog):
+    """Sem pose não há pulso. Um gesto "ligado" assim nunca dispara, e a loja passaria
+    por coberta sem estar."""
+    monkeypatch.setattr(cli, "probe_stream", lambda *_a, **_k: pytest.fail("subiu"))
+    with caplog.at_level("ERROR"):
+        codigo = cli.main(["--camera", "rtsp://x/y", "--gesto", "--dry-run"])
+    assert codigo == 2
+    assert "--pose-model" in caplog.text
+
+
+def test_linha_do_gesto_mostra_abstencao_e_disparos():
+    from lince_agent.gesto.motor import MotorGestoStats
+
+    linha = cli._format_gesto(
+        MotorGestoStats(observacoes=120, sem_tronco=30, pulso_nao_visto=8, disparos=2)
+    )
+    for pedaço in ("[gesto]", "observações=120", "sem tronco=30", "disparos=2"):
+        assert pedaço in linha

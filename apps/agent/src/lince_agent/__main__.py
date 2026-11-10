@@ -59,6 +59,7 @@ from lince_agent.detect.state import DetectorStats
 from lince_agent.ffmpeg.capabilities import select_hwaccel
 from lince_agent.ffmpeg.probe import ProbeError, probe_stream
 from lince_agent.ffmpeg.process import IngestCallbacks
+from lince_agent.gesto.motor import MotorGesto, MotorGestoStats
 from lince_agent.heartbeat import HeartbeatSender, HeartbeatStats
 from lince_agent.ingest.state import CameraHealth
 from lince_agent.ingest.supervisor import CameraSupervisor
@@ -236,6 +237,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="RTMPose-s COCO-17 .onnx (tools/exporta_rtmpose.py). Sem ele não há pose. "
         "Exige --model: a pose só estima quem o tracking confirmou. Usa os mesmos "
         "--provider da detecção",
+    )
+    pose.add_argument(
+        "--gesto",
+        action="store_true",
+        help="liga a regra da bolsa sobre a pose: o disparo sobe como evento "
+        "`source: gesture`, com clipe, para a fila de triagem. Exige --pose-model. "
+        "Provisória: no dataset de furto encenado não separa furto de compra normal",
     )
 
     estagio3 = parser.add_argument_group("estágio 3 — tracking (§3.3)")
@@ -806,6 +814,19 @@ def _format_pose(saude: PoseHealth) -> str:
     )
 
 
+def _format_gesto(stats: MotorGestoStats) -> str:
+    """A linha do gesto. O número a vigiar é `sem tronco` contra `observações`.
+
+    `sem tronco` alto é a câmera que não mostra ombro e quadril: a regra se absteve, e
+    zero disparo ali não é loja sem furto, é loja que ninguém está olhando.
+    """
+    return (
+        f"[gesto] observações={stats.observacoes} sem tronco={stats.sem_tronco} "
+        f"pulso não visto={stats.pulso_nao_visto} disparos={stats.disparos} "
+        f"reconexões={stats.reconexoes}"
+    )
+
+
 class _TrackDumper:
     """Grava um MP4 por câmera com os tracks desenhados.
 
@@ -958,6 +979,11 @@ def main(argv: list[str] | None = None) -> int:
         # parece ligada e não estima ninguém.
         log.error("pose: %s", erro)
         return 2
+    if args.gesto and pose is None:
+        # Recusa em vez de ignorar: o agente subiria dizendo que vigia o gesto sem
+        # nunca ver um pulso.
+        log.error("--gesto exige --pose-model: é da pose que vêm os pulsos")
+        return 2
 
     for camera in config.cameras:
         # Uma câmera por vez, e falhar em qualquer uma para o agente inteiro. Subir com
@@ -1001,6 +1027,7 @@ def main(argv: list[str] | None = None) -> int:
         else None,
         on_tracking=tracks_dumper.on_tracking if tracks_dumper else None,
         pose=pose,
+        gesto=MotorGesto() if args.gesto else None,
     )
 
     finished = threading.Event()
@@ -1077,6 +1104,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(_format_regras(saude.rules), flush=True)  # noqa: T201
                 if saude.pose is not None:
                     print(_format_pose(saude.pose), flush=True)  # noqa: T201
+                if saude.gesto is not None:
+                    print(_format_gesto(saude.gesto), flush=True)  # noqa: T201
                 print(_format_outbox(saude.outbox, saude), flush=True)  # noqa: T201
                 if poller is not None:
                     print(_format_config(saude.config, poller.stats()), flush=True)  # noqa: T201

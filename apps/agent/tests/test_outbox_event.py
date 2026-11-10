@@ -44,6 +44,7 @@ def test_payload_leva_a_regra_e_as_versoes_vigentes():
         "agent": "0.0.0",
         "model": "yolo-v8n-2026.07",
         "config": "17",
+        "pose": None,
     }
     assert payload["tenant_id"] == "rede-abc"
     assert payload["source"] == "rule"
@@ -168,3 +169,54 @@ def test_identidade_exige_tenant_e_loja():
         AgentIdentity(tenant_id="", store_id="loja-01", agent_version="0.0.0")
     with pytest.raises(ValueError, match="store_id"):
         AgentIdentity(tenant_id="rede-abc", store_id="", agent_version="0.0.0")
+
+
+GESTO = {
+    "method": {"id": "regra-bolsa", "version": "1"},
+    "track_id": 4,
+    "hand": "right",
+    "started_s_before": 1.25,
+    "score": None,
+}
+
+
+def test_evento_de_gesto_leva_o_bloco_e_nao_leva_regra():
+    """O triador precisa saber qual gatilho trouxe o evento, e a nuvem conta o falso
+    positivo do gesto à parte do da travessia (R-1)."""
+    event_id = new_event_id()
+    payload = build_event_payload(
+        rascunho(
+            event_id, source=EventSource.GESTURE, rule_id=None, rule_version=None, gesture=GESTO
+        ),
+        resultado(event_id),
+        identity=IDENTIDADE,
+        reported_at=INSTANTE,
+    )
+
+    assert payload["source"] == "gesture"
+    assert payload["gesture"] == GESTO
+    assert payload["rule"] is None
+
+
+def test_evento_de_regra_nao_leva_bloco_de_gesto():
+    event_id = new_event_id()
+    payload = build_event_payload(
+        rascunho(event_id), resultado(event_id), identity=IDENTIDADE, reported_at=INSTANTE
+    )
+    assert "gesture" not in payload
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"source": EventSource.GESTURE, "rule_id": None, "rule_version": None},
+        {"gesture": GESTO},
+        {"source": EventSource.MANUAL, "rule_id": None, "rule_version": None, "gesture": GESTO},
+    ],
+    ids=["gesto-sem-bloco", "regra-com-bloco", "manual-com-bloco"],
+)
+def test_bloco_do_gesto_vem_se_e_somente_se_o_gatilho_e_gesto(extra):
+    """A nuvem recusa os dois casos com 400, e 400 é fila morta: o alerta se perderia
+    longe daqui. Recusar no rascunho põe o erro em quem o montou."""
+    with pytest.raises(ValueError, match="gesto"):
+        rascunho(new_event_id(), **extra)

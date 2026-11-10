@@ -177,6 +177,7 @@ class Agente:
         regras=None,
         pose=None,
         on_pose=None,
+        gesto=None,
     ):
         self.relogio = RelogioFalso()
         self.parede = RelogioFalso(1_700_000_000.0)
@@ -232,6 +233,7 @@ class Agente:
             on_tracking=on_tracking,
             pose=pose,
             on_pose=on_pose,
+            gesto=gesto,
         )
         # O recorder foi construído com o `on_result` do teste, então encadeamos: o
         # runtime precisa continuar recebendo o resultado, senão nada é enfileirado.
@@ -1101,3 +1103,118 @@ def test_camera_inelegivel_nao_gasta_pose(tmp_path):
         assert {c.camera_id for c in montado.runtime.health().pose.worker.cameras} == {"cam1"}
     finally:
         montado.runtime.stop(timeout=PRAZO_S)
+
+
+# --- gesto (desligado por padrão) ------------------------------------------------
+
+
+class PoseSeguindo:
+    """Devolve, a cada snapshot, a próxima posição do pulso direito de `trajeto`.
+
+    A posição é dada na régua do tronco (`gesto_util.pose_com`), que é o que o motor
+    lê. Uma pose por caixa, como a de verdade.
+    """
+
+    def __init__(self, trajeto) -> None:
+        self.trajeto = list(trajeto)
+        self.n = 0
+
+    def estimar(self, imagem, caixas):
+        from gesto_util import pose_com
+
+        posicao = self.trajeto[min(self.n, len(self.trajeto) - 1)]
+        self.n += 1
+        return tuple(pose_com(pulso_direito=posicao) for _ in caixas)
+
+    def info(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(model_version="rtmpose-s-0123456789ab")
+
+    def close(self) -> None:
+        pass
+
+
+ALCANCA_E_GUARDA = [(1.6, -0.1), (1.6, -0.1), (0.7, 0.0), (0.6, 0.7), (0.6, 0.7), (0.6, 0.7)]
+"""Braço esticado para a prateleira, volta, e a mão para na lateral do quadril."""
+
+
+def _anda_com_pose(montado, detector, n: int) -> None:
+    """Um frame por vez a 8 fps, esperando a pose de cada um.
+
+    A fila da pose tem dois lugares e joga fora o mais antigo: despejar os frames de
+    uma vez faria o motor ver só o fim do gesto, e o teste mediria o descarte.
+    """
+    for i in range(n):
+        detector.chamou.clear()
+        montado.alimenta_frame("cam1", quadro(i + 1, received_at=i / 8))
+        assert detector.chamou.wait(PRAZO_S)
+        assert _ate(lambda alvo=i + 1: montado.runtime.health().pose.worker.processados == alvo)
+
+
+def test_o_gesto_dispara_e_o_evento_sobe_como_gesture(tmp_path):
+    """**O caminho do gesto inteiro, sem ninguém chamar `trigger()`.**
+
+    Frame → detector → tracker → pose → motor do gesto → evento na fila local, com o
+    bloco `gesture` e sem regra. Sobe como `gesture` para a nuvem contar o falso
+    positivo dele à parte do da travessia (R-1).
+    """
+    from lince_agent.gesto.motor import MotorGesto
+
+    entregues: list = []
+    detector = DetectorFalso((pessoa(),))
+    montado = Agente(
+        tmp_path,
+        detector=detector,
+        pose=PoseSeguindo(ALCANCA_E_GUARDA),
+        on_pose=entregues.append,
+        gesto=MotorGesto(),
+    )
+    montado.relogio.agora = 1000.0
+    montado.runtime.start()
+    try:
+        _anda_com_pose(montado, detector, len(ALCANCA_E_GUARDA))
+        resultado = montado.espera_clipe()
+
+        item = montado.store.get(resultado.event_id)
+        assert item is not None, "o gesto disparou mas o evento não chegou à fila local"
+        assert item.payload["source"] == EventSource.GESTURE
+        assert item.payload["rule"] is None
+        gesto = item.payload["gesture"]
+        assert gesto["method"]["id"] == "regra-bolsa"
+        assert gesto["track_id"] == 1
+        assert gesto["hand"] == "right"
+        # O modelo de pose vai junto: troca de modelo muda a taxa do gesto.
+        assert item.payload["versions"]["pose"] == "rtmpose-s-0123456789ab"
+        # O gatilho é o instante do frame em que a regra fechou, não o da chegada da pose.
+        assert resultado.triggered_at == pytest.approx(5 / 8)
+
+        saude = montado.runtime.health()
+        assert saude.gesto is not None
+        assert saude.gesto.disparos == 1
+        # Quem já ouvia a pose continua ouvindo: o gesto pendura, não substitui.
+        assert len(entregues) == len(ALCANCA_E_GUARDA)
+    finally:
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+def test_pose_sem_gesto_nao_vira_evento(tmp_path):
+    """A pose sozinha continua só estimando. Sem o motor do gesto, o mesmo movimento
+    não produz evento nenhum — e o heartbeat não ganha uma seção de gesto vazia."""
+    detector = DetectorFalso((pessoa(),))
+    montado = Agente(tmp_path, detector=detector, pose=PoseSeguindo(ALCANCA_E_GUARDA))
+    montado.runtime.start()
+    try:
+        _anda_com_pose(montado, detector, len(ALCANCA_E_GUARDA))
+        assert montado.runtime.health().gesto is None
+        assert montado.recorder.stats().requested == 0
+    finally:
+        montado.runtime.stop(timeout=PRAZO_S)
+
+
+def test_gesto_sem_pose_e_recusado(tmp_path):
+    """Um gesto "ligado" sem pose nunca vê pulso nenhum, e a loja passaria por coberta."""
+    from lince_agent.gesto.motor import MotorGesto
+
+    with pytest.raises(ValueError, match="pose"):
+        Agente(tmp_path, gesto=MotorGesto())

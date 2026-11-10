@@ -8,6 +8,7 @@ tradução contra o schema, que é o que impede as duas definições de divergir
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -41,6 +42,10 @@ class EventSource(StrEnum):
     enquanto o estágio 4 não existe. A nuvem precisa distinguir para não contar
     esses eventos na taxa de falso positivo por câmera (NFR-2, R-1)."""
 
+    GESTURE = "gesture"
+    """O gesto de ocultação, a partir da pose (`lince_agent.gesto`). Contado à parte
+    da travessia na métrica: o falso positivo de cada um se conserta num lugar."""
+
 
 @dataclass(frozen=True, slots=True)
 class AgentIdentity:
@@ -56,6 +61,9 @@ class AgentIdentity:
     agent_version: str
     model_version: str | None = None
     config_version: str | None = None
+    pose_version: str | None = None
+    """O modelo de pose, quando ligada. Um evento de gesto depende dele tanto quanto
+    do detector, e uma troca de modelo muda a taxa de falso positivo do gesto."""
 
     def __post_init__(self) -> None:
         if not self.tenant_id:
@@ -86,12 +94,18 @@ class EventDraft:
     source: EventSource = EventSource.RULE
     rule_id: str | None = None
     rule_version: int | None = None
+    gesture: Mapping[str, object] | None = None
+    """O bloco `gesture` do contrato, já montado (`gesto.motor.bloco_do_contrato`)."""
 
     def __post_init__(self) -> None:
         if (self.rule_id is None) != (self.rule_version is None):
             raise ValueError("rule_id e rule_version andam juntos ou não andam")
         if self.source is EventSource.RULE and self.rule_id is None:
             raise ValueError("evento de regra precisa dizer qual regra disparou (§6)")
+        # A nuvem recusa com 400 os dois casos (event.v1.json, `if/then/else`), e 400 é
+        # fila morta: o alerta se perderia longe daqui, onde o erro é de quem montou.
+        if (self.source is EventSource.GESTURE) != (self.gesture is not None):
+            raise ValueError("o bloco do gesto vem se e somente se source = gesture")
 
 
 def clip_block(result: ClipResult) -> dict[str, object]:
@@ -135,7 +149,7 @@ def build_event_payload(
     if draft.rule_id is not None:
         rule = {"id": draft.rule_id, "version": draft.rule_version}
 
-    return {
+    payload: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
         "event_id": draft.event_id,
         "tenant_id": identity.tenant_id,
@@ -149,9 +163,13 @@ def build_event_payload(
             "agent": identity.agent_version,
             "model": identity.model_version,
             "config": identity.config_version,
+            "pose": identity.pose_version,
         },
         "clip": clip_block(result),
     }
+    if draft.gesture is not None:
+        payload["gesture"] = dict(draft.gesture)
+    return payload
 
 
 def build_clip_patch(

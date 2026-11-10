@@ -384,6 +384,16 @@ uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 \
   --width 1280 --height 720 --fps 8 \
   --model models/yolox_s.onnx --pose-model ~/lince-modelos/rtmpose-s.onnx --stats
 
+# o gesto (passo 4 do piloto): a regra da bolsa sobre a pose vira evento `source: gesture`,
+# com clipe, na mesma fila da travessia. Provisória — no dataset de furto encenado não
+# separa furto de compra normal (tools/avalia_gesto.py); existe para o caminho do evento
+# estar de pé quando o classificador chegar. A linha [gesto] do --stats mostra disparos e
+# quantas pessoas-frame a regra se absteve por não ver o tronco:
+uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 \
+  --width 1280 --height 720 --fps 8 \
+  --model models/yolox_s.onnx --pose-model ~/lince-modelos/rtmpose-s.onnx \
+  --gesto --dry-run --stats
+
 # estágio 4: a borda decidindo sozinha, sem andaime de gatilho. A linha é orientada —
 # desenhada da esquerda para a direita, o lado de dentro da loja fica embaixo (y maior):
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 --camera-id cam3 \

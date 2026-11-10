@@ -13,6 +13,7 @@ dos arquivos do repositório (fixtures `registry` e `validador`, no `conftest.py
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 from conftest import SCHEMAS
@@ -59,6 +60,36 @@ def test_evento_manual_sem_regra_valida(validador):
         rascunho(event_id, source=EventSource.MANUAL, rule_id=None, rule_version=None),
         resultado(event_id),
         identity=IDENTIDADE,
+        reported_at=INSTANTE,
+    )
+    validador("event.v1.json").validate(payload)
+
+
+def test_evento_de_gesto_valida(validador):
+    """O bloco que o motor do gesto monta, contra o schema que a nuvem usa para
+    aceitar ou recusar. É este teste que segura `bloco_do_contrato` no contrato."""
+    from lince_agent.gesto.motor import DisparoGesto, bloco_do_contrato
+
+    disparo = DisparoGesto(
+        camera_id="cam-saida",
+        track_id=4,
+        instante=12.5,
+        sequence=100,
+        lado="esquerdo",
+        motivo="sumiu",
+        alcance_em=11.25,
+    )
+    event_id = new_event_id()
+    payload = build_event_payload(
+        rascunho(
+            event_id,
+            source=EventSource.GESTURE,
+            rule_id=None,
+            rule_version=None,
+            gesture=bloco_do_contrato(disparo),
+        ),
+        resultado(event_id),
+        identity=replace(IDENTIDADE, pose_version="rtmpose-s-0123456789ab"),
         reported_at=INSTANTE,
     )
     validador("event.v1.json").validate(payload)

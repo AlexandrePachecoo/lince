@@ -119,6 +119,28 @@ class DisparoGesto:
     """Instante do último `longe` antes da corrida — onde o clipe deve começar a mostrar."""
 
 
+METODO_ID = "regra-bolsa"
+METODO_VERSAO = "1"
+"""Identidade da regra no evento (`gesture.method`). Suba a versão a cada mudança no
+que dispara — limiar default incluído: a nuvem compara falso positivo por método e
+versão, e duas regras com o mesmo número misturariam as duas estatísticas (R-1)."""
+
+_MAOS = {"esquerdo": "left", "direito": "right"}
+
+
+def bloco_do_contrato(disparo: DisparoGesto) -> dict[str, object]:
+    """O bloco `gesture` do evento (common.v1.json) a partir de um disparo."""
+    return {
+        "method": {"id": METODO_ID, "version": METODO_VERSAO},
+        "track_id": disparo.track_id,
+        "hand": _MAOS[disparo.lado],
+        # Arredondado como os rolls do clipe: mais casas seriam ruído de ponto flutuante
+        # atravessando a fronteira.
+        "started_s_before": round(max(0.0, disparo.instante - disparo.alcance_em), 3),
+        "score": None,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class MotorGestoStats:
     observacoes: int = 0
