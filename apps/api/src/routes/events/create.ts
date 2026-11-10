@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import type { FastifyInstance } from "fastify";
 import { autenticaAgente } from "../../auth/agent-token.js";
 import { EscopoDoAgente, RequisicaoInvalida } from "../../auth/errors.js";
@@ -26,8 +27,9 @@ interface CorpoEvento {
   camera_id: string;
   occurred_at: string;
   reported_at: string;
-  source: "rule" | "manual";
+  source: "rule" | "manual" | "gesture";
   rule?: { id: string; version: number } | null;
+  gesture?: { method: { id: string; version: string }; [campo: string]: unknown } | null;
   versions: Record<string, unknown>;
   clip: BlocoClipe;
 }
@@ -84,6 +86,10 @@ export default async function eventsCreateRoutes(app: FastifyInstance) {
         source: evento.source,
         regraId: evento.rule?.id ?? null,
         regraVersao: evento.rule?.version ?? null,
+        // O schema já garante que `gesture` vem se e somente se source = gesture.
+        gestoMetodo: evento.gesture?.method.id ?? null,
+        gestoMetodoVersao: evento.gesture?.method.version ?? null,
+        gesto: evento.gesture ? (evento.gesture as object) : Prisma.DbNull,
         versions: evento.versions as object,
         clip: evento.clip as object,
         // `clip.status` do POST é o desfecho do CORTE, não do upload. `clip_failed`

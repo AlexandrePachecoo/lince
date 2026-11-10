@@ -15,6 +15,7 @@ function linha(sobrescreve: Partial<LinhaPorDia> = {}): LinhaPorDia {
   return {
     lojaId: "loja-centro",
     cameraId: "cam3",
+    source: "rule",
     dia: "2026-08-29",
     confirmado: 0,
     falsoPositivo: 0,
@@ -155,6 +156,23 @@ test("a mesma câmera em duas lojas não se mistura", () => {
 
   assert.equal(documento.cameras.length, 2);
   assert.equal(documento.cameras[0]?.store_id, "loja-b");
+});
+
+test("travessia e gesto da mesma câmera não se somam", () => {
+  // Falso positivo de travessia se conserta na zona e na linha; o de gesto, no método.
+  // Numa linha só, os dois alertas falsos do gesto pareceriam da regra da porta, que
+  // seria recalibrada sem culpa nenhuma.
+  const documento = agrega(
+    [linha({ source: "rule", confirmado: 1 }), linha({ source: "gesture", falsoPositivo: 4 })],
+    SEMANA,
+    SP,
+  );
+
+  assert.equal(documento.cameras.length, 2);
+  assert.equal(documento.cameras[0]?.source, "gesture");
+  assert.equal(documento.cameras[0]?.acima_do_limite, true);
+  assert.equal(documento.cameras[1]?.source, "rule");
+  assert.equal(documento.cameras[1]?.falso_positivo, 0);
 });
 
 test("sem falso positivo nenhum, o pior dia é nulo e não o dia zero", () => {

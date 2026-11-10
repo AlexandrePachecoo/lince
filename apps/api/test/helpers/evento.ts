@@ -9,11 +9,21 @@ import type { LojaSemeada } from "./test-db.js";
 // esconderia justamente as diferenças entre os dois -- o bloco `clip` congelado no
 // corte, os três instantes, a regra achatada em duas colunas.
 
+/** O bloco que a regra da bolsa manda (event.v1.json, `gesture`). */
+export const GESTO_PADRAO = {
+  method: { id: "regra-bolsa", version: "1" },
+  track_id: 7,
+  hand: "right",
+  started_s_before: 1.25,
+  score: null,
+};
+
 export interface OpcoesEvento {
   cameraId?: string;
   ocorridoEm?: string;
-  source?: "rule" | "manual";
+  source?: "rule" | "manual" | "gesture";
   rule?: { id: string; version: number } | null;
+  gesture?: Record<string, unknown>;
   clipStatus?: "ok" | "clip_failed";
 }
 
@@ -41,9 +51,8 @@ export async function criaEvento(
       reported_at: ocorridoEm,
       source,
       rule:
-        source === "manual"
-          ? null
-          : (opcoes.rule ?? { id: "saida-sem-passar-no-caixa", version: 3 }),
+        source === "rule" ? (opcoes.rule ?? { id: "saida-sem-passar-no-caixa", version: 3 }) : null,
+      gesture: source === "gesture" ? (opcoes.gesture ?? GESTO_PADRAO) : null,
       versions: { agent: "0.1.0", model: "yolox_s-abc123", config: "v7" },
       clip:
         clipStatus === "ok"

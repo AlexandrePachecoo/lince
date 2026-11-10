@@ -148,11 +148,14 @@ model TokenBootstrap {
 
 // Origem do gatilho (event.v1.json). `manual` é gatilho humano -- teste de câmera na
 // instalação. Existe como enum e não como boolean porque a nuvem PRECISA separar os
-// dois para não contaminar a métrica de falso positivo por câmera (NFR-2, R-1): um
-// instalador testando 40 vezes numa tarde afundaria a estatística da loja.
+// gatilhos para não contaminar a métrica de falso positivo por câmera (NFR-2, R-1): um
+// instalador testando 40 vezes numa tarde afundaria a estatística da loja. `gesture` é o
+// gesto de ocultação a partir da pose, contado à parte de `rule` na métrica: falso
+// positivo de travessia se conserta na zona, e o de gesto no método.
 enum EventoOrigem {
   rule
   manual
+  gesture
 
   @@map("evento_origem")
 }
@@ -218,6 +221,14 @@ model Evento {
   // agrupar não pode morar dentro de um JSON. Nulas quando source = manual.
   regraId     String? @map("regra_id")
   regraVersao Int?    @map("regra_versao")
+
+  // O método do gesto, achatado pelo mesmo motivo da regra: é por (método, versão) que
+  // se compara o falso positivo da regra da bolsa com o do classificador que vai
+  // substituí-la. O resto do bloco fica em `gesto`, como veio. Nulos fora de
+  // source = gesture.
+  gestoMetodo       String? @map("gesto_metodo")
+  gestoMetodoVersao String? @map("gesto_metodo_versao")
+  gesto             Json?
 
   // Blocos do documento guardados como vieram (mesma decisão do JSONB por câmera).
   // `clip` aqui é o bloco do POST -- o desfecho do CORTE, com pré/pós-roll medidos e

@@ -49,6 +49,44 @@
         },
         "error": { "type": ["string", "null"], "maxLength": 500 }
       }
+    },
+    "gesture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "track_id"],
+      "description": "O que disparou um evento de gesto (`source: gesture`). Genérico de propósito: a regra da bolsa e o classificador que vai substituí-la produzem o mesmo bloco, e a fila, a triagem e a métrica não precisam saber qual dos dois foi.",
+      "properties": {
+        "method": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version"],
+          "description": "Quem decidiu, e em que versão. É por método que se compara o falso positivo da regra com o do classificador: sem isto, trocar um pelo outro numa câmera misturaria as duas estatísticas (R-1).",
+          "properties": {
+            "id": { "$ref": "#/$defs/identifier" },
+            "version": { "type": "string", "minLength": 1, "maxLength": 64 }
+          }
+        },
+        "track_id": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "A pessoa no tracking da câmera. Só vale dentro da sessão: na reconexão os IDs recomeçam do 1."
+        },
+        "hand": {
+          "enum": ["left", "right", null],
+          "description": "Qual pulso, quando o método sabe dizer. Diz ao triador para que lado do corpo olhar no clipe."
+        },
+        "started_s_before": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Quantos segundos antes de `occurred_at` o gesto começou — na regra da bolsa, o alcance. É onde o clipe passa a valer a pena ver."
+        },
+        "score": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Confiança do classificador. Nula para regra, que decide sem grau."
+        }
+      }
     }
   }
 }

@@ -38,7 +38,7 @@
       "type": "array",
       "maxItems": 500,
       "items": { "$ref": "#/$defs/camera" },
-      "description": "Ordenada da pior para a melhor: o pior dia primeiro, e o total de falso positivo como desempate. Quem abre esta tela quer saber onde mexer, e o topo da lista é a resposta."
+      "description": "Uma linha por câmera e gatilho, ordenada da pior para a melhor: o pior dia primeiro, e o total de falso positivo como desempate. Quem abre esta tela quer saber onde mexer, e o topo da lista é a resposta."
     }
   },
   "$defs": {
@@ -53,6 +53,7 @@
       "required": [
         "store_id",
         "camera_id",
+        "source",
         "eventos",
         "confirmado",
         "falso_positivo",
@@ -65,10 +66,14 @@
       "properties": {
         "store_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
         "camera_id": { "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier" },
+        "source": {
+          "enum": ["rule", "gesture"],
+          "description": "Qual gatilho. Uma câmera com os dois ligados aparece em duas linhas, e é de propósito: falso positivo de travessia se conserta na zona e na linha, e o de gesto no método. Somados, uma regra bem calibrada pagaria a conta do gesto e seria recalibrada sem culpa nenhuma. `manual` não aparece aqui."
+        },
         "eventos": {
           "type": "integer",
           "minimum": 0,
-          "description": "Eventos de regra no período. `source: manual` fica fora de tudo aqui: um instalador testando 40 vezes numa tarde afundaria a estatística da câmera que ele estava justamente calibrando."
+          "description": "Eventos deste gatilho no período. `source: manual` fica fora de tudo aqui: um instalador testando 40 vezes numa tarde afundaria a estatística da câmera que ele estava justamente calibrando."
         },
         "confirmado": { "type": "integer", "minimum": 0 },
         "falso_positivo": { "type": "integer", "minimum": 0 },

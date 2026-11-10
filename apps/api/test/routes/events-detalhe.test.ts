@@ -4,7 +4,7 @@ import { after, before, beforeEach, test } from "node:test";
 import type { FastifyInstance } from "fastify";
 import { emiteToken } from "../../src/auth/jwt.js";
 import { SEGREDO_TESTE, buildTestApp } from "../helpers/build-app.js";
-import { criaEvento } from "../helpers/evento.js";
+import { GESTO_PADRAO, criaEvento } from "../helpers/evento.js";
 import {
   type LojaSemeada,
   type UsuarioSemeado,
@@ -94,6 +94,32 @@ test("o evento avulso é byte a byte o mesmo que a fila devolve", async () => {
 
   assert.equal(resposta.statusCode, 200);
   assert.deepEqual(resposta.json(), { schema_version: 1, evento: daFila });
+});
+
+test("evento de gesto chega com o bloco do gesto, na fila e no avulso", async () => {
+  // O triador precisa saber qual gatilho trouxe o evento: a saída pela porta se confere no
+  // fim do clipe, o gesto no meio dele, e `hand` diz para que lado do corpo olhar.
+  const { loja, usuario } = await lojaComGerente();
+  const eventId = await criaEvento(app, loja, { source: "gesture" });
+  const token = tokenDe(usuario);
+
+  const daFila = (await fila(token)).json().eventos[0];
+  const avulso = (await detalhe(token, eventId)).json().evento;
+
+  assert.equal(daFila.source, "gesture");
+  assert.deepEqual(daFila.gesture, GESTO_PADRAO);
+  assert.equal(daFila.rule, null);
+  assert.deepEqual(avulso, daFila);
+});
+
+test("evento de regra chega com gesture nulo, e não omitido", async () => {
+  const { loja, usuario } = await lojaComGerente();
+  const eventId = await criaEvento(app, loja);
+
+  const evento = (await detalhe(tokenDe(usuario), eventId)).json().evento;
+
+  assert.ok("gesture" in evento);
+  assert.equal(evento.gesture, null);
 });
 
 test("evento triado abre com a decisão vigente, e a correção aparece como correção", async () => {
