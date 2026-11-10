@@ -10,6 +10,11 @@
     />
     <meta name="theme-color" content="#101418" />
     <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- No iPhone o Web Push só existe para o app adicionado à tela de início (iOS 16.4+),
+         e é este par que o faz abrir como app, e não como aba do Safari. -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="lince" />
     <title>lince — triagem</title>
   </head>
   <body>

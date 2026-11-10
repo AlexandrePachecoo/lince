@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { type SessaoGuardada, leSessao, limpaSessao } from "./auth/sessao.js";
+import { ambienteReal, desativaAvisos } from "./push/avisos.js";
 import { Evento } from "./telas/Evento.js";
 import { Fila } from "./telas/Fila.js";
 import { Login } from "./telas/Login.js";
@@ -10,7 +11,7 @@ import { Metrica } from "./telas/Metrica.js";
 //
 // A rota do evento é `/eventos/:eventId` e não um estado dentro da fila, de propósito: é
 // isso que faz um F5 no meio da triagem voltar ao mesmo evento em vez de ao topo da lista
-// — e é o que dá endereço à notificação quando ela existir (§4.5). É o par, no cliente,
+// — e é o que dá endereço à notificação (§4.5): o toque nela abre `/eventos/:eventId`. É o par, no cliente,
 // do GET /v1/events/{event_id} que a API passou a ter.
 
 export function App() {
@@ -23,6 +24,14 @@ export function App() {
   const local = useLocation();
 
   const sai = useCallback(() => {
+    // O aparelho sai da lista de quem recebe aviso junto com a sessão: o celular que passa
+    // de mão em mão não pode seguir tocando com os alertas de quem saiu (R-9). Sem
+    // esperar: sair não pode ficar preso a uma rede ruim, e a desinscrição no navegador
+    // acontece mesmo se a API não responder (push/avisos.ts).
+    const token = leSessao()?.token;
+    if (token !== undefined) {
+      void desativaAvisos(token, ambienteReal()).catch(() => undefined);
+    }
     limpaSessao();
     setSessao(null);
     navega("/login");

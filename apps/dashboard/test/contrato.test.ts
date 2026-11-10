@@ -31,6 +31,10 @@ const validaFila = ajv.compile(carrega("@lince/shared/schemas/fila-triagem.v1.js
 const validaSessao = ajv.compile(carrega("@lince/shared/schemas/auth-sessao.v1.json"));
 const validaDetalhe = ajv.compile(carrega("@lince/shared/schemas/evento-detalhe.v1.json"));
 const validaMetrica = ajv.compile(carrega("@lince/shared/schemas/metricas-falso-positivo.v1.json"));
+const validaChavePush = ajv.compile(carrega("@lince/shared/schemas/push-chave.v1.json"));
+const validaInscricao = ajv.compile(carrega("@lince/shared/schemas/push-inscricao.v1.json"));
+const validaRemocao = ajv.compile(carrega("@lince/shared/schemas/push-remocao.v1.json"));
+const validaNotificacao = ajv.compile(carrega("@lince/shared/schemas/notificacao.v1.json"));
 
 // Um evento de cada forma que a tela precisa distinguir. `clip_state` e `clip.status`
 // respondem a perguntas diferentes (upload x corte), e a combinação "cortou bem, ainda
@@ -124,5 +128,36 @@ describe("as fixturas da suíte batem com packages/shared", () => {
       >,
     ]);
     expect(validaFila(invalido)).toBe(false);
+  });
+});
+
+describe("o contrato dos avisos no celular", () => {
+  // O corpo que o dashboard manda é o `toJSON()` do navegador, sem remontagem: se o
+  // schema divergir dele, a inscrição é recusada e o gerente fica sem aviso achando que
+  // ligou. E o que o service worker lê é o que a API cifra.
+  test("a chave e a inscrição batem com os schemas", () => {
+    expect(validaChavePush({ schema_version: 1, chave_publica: fixturas.CHAVE_VAPID })).toBe(true);
+    const corpo = { schema_version: 1, inscricao: fixturas.inscricaoPush() };
+    expect(validaInscricao(corpo), JSON.stringify(validaInscricao.errors)).toBe(true);
+    const remocao = { schema_version: 1, endpoint: fixturas.inscricaoPush().endpoint };
+    expect(validaRemocao(remocao)).toBe(true);
+  });
+
+  test("a notificação de alerta e a de teto batem com o schema", () => {
+    for (const documento of [
+      fixturas.notificacao(),
+      fixturas.notificacao({
+        tipo: "teto",
+        event_id: null,
+        url: "/fila",
+        tag: "lince-loja-1-teto",
+      }),
+    ]) {
+      expect(validaNotificacao(documento), JSON.stringify(validaNotificacao.errors)).toBe(true);
+    }
+  });
+
+  test("o schema recusa notificação que levaria o toque para fora do app", () => {
+    expect(validaNotificacao(fixturas.notificacao({ url: "https://golpe.exemplo/" }))).toBe(false);
   });
 });

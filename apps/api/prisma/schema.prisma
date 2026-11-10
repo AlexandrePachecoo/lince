@@ -1,8 +1,8 @@
 // Schema do control plane. Cobre as rotas de agente da §5.2 (config, register,
-// heartbeat), o EVENTO com o desfecho do clipe e o lado humano: USUARIO, TRIAGEM e
-// AUDITORIA do diagrama ER de docs/arquitetura.md §6. ENVIO_ALERTA, MODELO_VERSAO e
-// POLITICA_RETENCAO ainda não existem — não há notificação, download de modelo nem
-// job de expurgo.
+// heartbeat), o EVENTO com o desfecho do clipe e o lado humano: USUARIO, TRIAGEM,
+// AUDITORIA e ENVIO_ALERTA do diagrama ER de docs/arquitetura.md §6, este último com a
+// decisão de notificar (ALERTA) e as inscrições de Web Push ao lado. MODELO_VERSAO e
+// POLITICA_RETENCAO ainda não existem — não há download de modelo nem job de expurgo.
 //
 // Zonas e regras são JSONB por câmera, não tabelas ZONA/REGRA_CONFIG normalizadas:
 // decisão explícita desta fatia, porque não há dashboard ainda para justificar editar
@@ -250,6 +250,9 @@ model Evento {
   agente   Agente?   @relation(fields: [agenteId], references: [id], onDelete: SetNull)
   triagens Triagem[]
 
+  alerta Alerta?
+  envios EnvioAlerta[]
+
   // Todo índice começa por tenant_id: é assim que a query da fila de triagem fica
   // fisicamente incapaz de varrer evento de outro tenant (NFR-6).
   @@index([tenantId, ocorridoEm])
@@ -333,6 +336,8 @@ model Usuario {
   tenant   Tenant        @relation(fields: [tenantId], references: [id])
   lojas    UsuarioLoja[]
   triagens Triagem[]
+
+  inscricoesPush InscricaoPush[]
 
   @@index([tenantId])
   @@map("usuario")
@@ -431,4 +436,94 @@ model Auditoria {
   @@index([tenantId, criadoEm])
   @@index([eventId])
   @@map("auditoria")
+}
+
+// --- Notificação (§4.5, §4.6, R-12) -------------------------------------------
+
+// O que se decidiu fazer com um evento novo, uma linha por evento. É aqui que mora o
+// agrupamento da §4.6 e o teto diário do R-12, e por isso é tabela e não log: a decisão
+// do próximo evento depende das anteriores.
+enum AlertaDecisao {
+  // Mandou notificação.
+  notificado
+  // Mesma câmera e mesmo gatilho dentro da janela de um alerta já notificado. O evento
+  // está na fila; o aparelho já foi avisado daquela câmera há pouco.
+  agrupado
+  // A loja atingiu o teto diário de notificações. Fila, sem aviso.
+  teto
+  // O evento chegou muito depois de acontecer (link caído, fila da borda drenando).
+  // Avisar agora de um furto de horas atrás manda o gerente correr atrás de ninguém.
+  atrasado
+
+  @@map("alerta_decisao")
+}
+
+model Alerta {
+  eventId  String        @id @map("event_id")
+  tenantId String        @map("tenant_id")
+  lojaId   String        @map("loja_id")
+  cameraId String        @map("camera_id")
+  source   EventoOrigem
+  decisao  AlertaDecisao
+  criadoEm DateTime      @default(now()) @map("criado_em")
+
+  evento Evento @relation(fields: [eventId], references: [eventId])
+
+  // A janela de agrupamento procura o último notificado da câmera e gatilho; o teto,
+  // os notificados da loja no dia.
+  @@index([lojaId, cameraId, source, decisao, criadoEm])
+  @@index([lojaId, decisao, criadoEm])
+  @@map("alerta")
+}
+
+// Um aparelho que recebe alerta. Presa ao usuário, e não à loja: o aparelho recebe o
+// que o usuário alcança, e perder o vínculo com a loja corta o alerta na hora, sem
+// ninguém lembrar de apagar inscrição.
+model InscricaoPush {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  usuarioId String   @map("usuario_id")
+  // Único no sistema inteiro: o mesmo navegador entrando com outro usuário passa a ser
+  // do novo. Um celular de turno não pode receber os alertas de quem saiu dele.
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  criadoEm  DateTime @default(now()) @map("criado_em")
+
+  usuario Usuario @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+
+  @@index([usuarioId])
+  @@map("inscricao_push")
+}
+
+enum EnvioStatus {
+  enviado
+  falhou
+  // O serviço de push respondeu 404/410: o aparelho desinscreveu ou a inscrição venceu.
+  // A inscrição é apagada no mesmo instante.
+  expirada
+
+  @@map("envio_status")
+}
+
+// Cada notificação despachada e o que o serviço de push respondeu (§6, ENVIO_ALERTA).
+// Sem isto, "o gerente diz que não recebeu" não tem como ser investigado.
+model EnvioAlerta {
+  id          String      @id @default(uuid())
+  tenantId    String      @map("tenant_id")
+  eventId     String      @map("event_id")
+  usuarioId   String      @map("usuario_id")
+  // Sem FK: a inscrição some quando o serviço de push diz que venceu, e o registro do
+  // envio que descobriu isso tem que sobreviver a ela.
+  inscricaoId String      @map("inscricao_id")
+  canal       String      @default("webpush")
+  status      EnvioStatus
+  httpStatus  Int?        @map("http_status")
+  erro        String?
+  criadoEm    DateTime    @default(now()) @map("criado_em")
+
+  evento Evento @relation(fields: [eventId], references: [eventId])
+
+  @@index([eventId])
+  @@map("envio_alerta")
 }

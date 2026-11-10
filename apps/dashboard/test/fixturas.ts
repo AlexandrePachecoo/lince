@@ -1,7 +1,9 @@
 import type {
   CameraMetrica,
+  ConteudoNotificacao,
   Evento,
   Fila,
+  InscricaoPushJson,
   MetricaFalsoPositivo,
   Sessao,
 } from "../src/api/tipos.js";
@@ -96,5 +98,41 @@ export function metrica(
     periodo: { desde: "2026-08-23", ate: "2026-08-29", dias, fuso: "America/Sao_Paulo" },
     limite_diario: 3,
     cameras,
+  };
+}
+
+/** Chave P-256 não comprimida em base64url: 65 bytes, o primeiro 0x04. */
+export const CHAVE_VAPID = btoa(
+  String.fromCharCode(4, ...Array.from({ length: 64 }, (_, i) => (i * 7 + 3) % 256)),
+)
+  .replace(/\+/g, "-")
+  .replace(/\//g, "_")
+  .replace(/=+$/, "");
+
+/** `PushSubscription.toJSON()` de um Chrome no Android. */
+export function inscricaoPush(
+  endpoint = "https://fcm.googleapis.com/fcm/send/abc123",
+): InscricaoPushJson {
+  return {
+    endpoint,
+    expirationTime: null,
+    keys: {
+      p256dh:
+        "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM",
+      auth: "tBHItJI5svbpez7KI4CCXg",
+    },
+  };
+}
+
+export function notificacao(sobrescreve: Partial<ConteudoNotificacao> = {}): ConteudoNotificacao {
+  return {
+    schema_version: 1,
+    tipo: "alerta",
+    event_id: "0b6f1a52-1d0e-4c9a-9a0e-6f1f2c3d4e5f",
+    titulo: "Possível furto — cam3",
+    corpo: "gesto de esconder · Mercado Centro · 11:07",
+    url: "/eventos/0b6f1a52-1d0e-4c9a-9a0e-6f1f2c3d4e5f",
+    tag: "lince-loja-1-cam3",
+    ...sobrescreve,
   };
 }

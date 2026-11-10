@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import type { ConfigPush } from "../../src/notificacao/config.js";
 import { buildApp } from "../../src/server.js";
 import type { ConfigArmazenamento } from "../../src/storage/clip-storage.js";
 
@@ -41,6 +42,10 @@ export interface OpcoesTestApp {
    * conferir que ele é recusado depois, sem sleep (CLAUDE.md) -- quem manipula o
    * relógio é emiteToken, via agoraMs. */
   sessaoExpiraEmS?: number;
+  /** Notificação ligada. Sem isto o app de teste sobe como a API sem chaves VAPID: os
+   * testes que não falam de notificação não precisam de um serviço de push de pé. */
+  push?: ConfigPush;
+  relogioAlerta?: () => Date;
 }
 
 export async function buildTestApp(opcoes: OpcoesTestApp = {}): Promise<FastifyInstance> {
@@ -55,6 +60,8 @@ export async function buildTestApp(opcoes: OpcoesTestApp = {}): Promise<FastifyI
     leituraExpiraEmS: opcoes.leituraExpiraEmS ?? 300,
     sessaoSegredo: SEGREDO_TESTE,
     sessaoExpiraEmS: opcoes.sessaoExpiraEmS ?? 43200,
+    push: opcoes.push ?? null,
+    relogioAlerta: opcoes.relogioAlerta,
     logger: false,
   });
 }

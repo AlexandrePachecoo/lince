@@ -95,6 +95,7 @@ body {
 
 .cabecalho {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
@@ -317,7 +318,24 @@ body {
 
 .cabecalho__acoes {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 0.5rem;
+}
+
+/* A dica do iPhone e o aviso de bloqueio ocupam a linha inteira abaixo dos botões: são
+   instrução de um passo a fazer fora do app, e espremidas ao lado de um botão ninguém lê. */
+.cabecalho__dica {
+  display: block;
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.cabecalho__nota {
+  align-self: center;
+  color: var(--texto-fraco);
+  font-size: 0.85rem;
 }
 
 .periodo {

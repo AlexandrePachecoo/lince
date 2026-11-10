@@ -2,9 +2,15 @@
   "name": "lince — triagem",
   "short_name": "lince",
   "description": "Fila de triagem de possíveis ocorrências",
+  "id": "/fila",
   "start_url": "/fila",
+  "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#101418",
-  "theme_color": "#101418"
+  "theme_color": "#101418",
+  "icons": [
+    { "src": "/icone-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icone-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { buscaFila } from "../api/cliente.js";
 import type { Evento } from "../api/tipos.js";
+import { BotaoAvisos } from "./BotaoAvisos.js";
 import { type EstadoDaFila, FILA_VAZIA, acumulaPagina } from "./paginacao.js";
 import { instanteCurto, quandoFoi } from "./tempo.js";
 
@@ -79,6 +80,7 @@ export function Fila({ token, nome, aoSair, versao = 0 }: Props) {
           <p className="cabecalho__legenda">{nome}</p>
         </div>
         <div className="cabecalho__acoes">
+          <BotaoAvisos token={token} />
           {/* A métrica fica a um toque da fila, e não num menu: é a leitura que diz se a
               fila que ele acabou de triar significa uma câmera para recalibrar (R-1). */}
           <Link className="botao botao--discreto" to="/metrica">

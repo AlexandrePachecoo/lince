@@ -4,6 +4,7 @@ import type {
   Evento,
   EventoDetalhe,
   Fila,
+  InscricaoPushJson,
   MetricaFalsoPositivo,
   Sessao,
 } from "./tipos.js";
@@ -41,7 +42,7 @@ export class ErroDeRede extends Error {
 }
 
 interface OpcoesPedido {
-  metodo?: "GET" | "POST";
+  metodo?: "GET" | "POST" | "DELETE";
   token?: string;
   corpo?: unknown;
 }
@@ -79,6 +80,10 @@ async function pede<T>(caminho: string, opcoes: OpcoesPedido = {}): Promise<T> {
     throw new ErroHttp(resposta.status, mensagem);
   }
 
+  // 204 não tem corpo: ler JSON dele estoura, e o que o chamador quer é só "deu certo".
+  if (resposta.status === 204) {
+    return undefined as T;
+  }
   return (await resposta.json()) as T;
 }
 
@@ -128,5 +133,30 @@ export function decide(
     metodo: "POST",
     token,
     corpo: { decisao, ...(observacao !== undefined ? { observacao } : {}) },
+  });
+}
+
+/** A chave pública VAPID do servidor. `503` é a notificação desligada nele. */
+export function buscaChavePush(
+  token: string,
+): Promise<{ schema_version: 1; chave_publica: string }> {
+  return pede("/push/chave", { token });
+}
+
+/** Grava este aparelho como destino dos alertas do usuário da sessão. */
+export function inscrevePush(token: string, inscricao: InscricaoPushJson): Promise<void> {
+  return pede("/push/inscricoes", {
+    metodo: "POST",
+    token,
+    corpo: { schema_version: 1, inscricao },
+  });
+}
+
+/** Tira este aparelho da lista. Chamado na saída da sessão. */
+export function removeInscricaoPush(token: string, endpoint: string): Promise<void> {
+  return pede("/push/inscricoes", {
+    metodo: "DELETE",
+    token,
+    corpo: { schema_version: 1, endpoint },
   });
 }

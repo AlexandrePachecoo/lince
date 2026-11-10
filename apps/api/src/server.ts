@@ -1,6 +1,8 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { AppError } from "./app-error.js";
+import type { ConfigPush } from "./notificacao/config.js";
 import authPlugin from "./plugins/auth.js";
+import notificacaoPlugin from "./plugins/notificacao.js";
 import prismaPlugin from "./plugins/prisma.js";
 import storagePlugin from "./plugins/storage.js";
 import agentsConfigRoutes from "./routes/agents/config.js";
@@ -14,6 +16,8 @@ import eventsDetalheRoutes from "./routes/events/detalhe.js";
 import eventsListarRoutes from "./routes/events/listar.js";
 import eventsTriagemRoutes from "./routes/events/triagem.js";
 import metricasFalsoPositivoRoutes from "./routes/metricas/falso-positivo.js";
+import pushChaveRoutes from "./routes/push/chave.js";
+import pushInscricoesRoutes from "./routes/push/inscricoes.js";
 import usuariosAlterarRoutes from "./routes/usuarios/alterar.js";
 import usuariosCriarRoutes from "./routes/usuarios/criar.js";
 import usuariosListarRoutes from "./routes/usuarios/listar.js";
@@ -26,6 +30,10 @@ export interface BuildAppOptions {
   leituraExpiraEmS: number;
   sessaoSegredo: string;
   sessaoExpiraEmS: number;
+  /** `null` desliga a notificação por Web Push (ver env.ts). */
+  push: ConfigPush | null;
+  /** Relógio da decisão de alerta (teto diário, janela). Só o teste troca. */
+  relogioAlerta?: (() => Date) | undefined;
   logger?: boolean;
 }
 
@@ -42,6 +50,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     sessaoSegredo: opts.sessaoSegredo,
     sessaoExpiraEmS: opts.sessaoExpiraEmS,
   });
+  await app.register(notificacaoPlugin, { push: opts.push, relogio: opts.relogioAlerta });
 
   // Erro tipado (auth, validação) vira o status que ele já declara. Qualquer outra
   // exceção é bug interno -> 500, nunca vaza como 401/403 nem some sem log.
@@ -68,6 +77,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   await app.register(eventsDetalheRoutes);
   await app.register(eventsTriagemRoutes);
   await app.register(eventsClipeUrlRoutes);
+  await app.register(pushChaveRoutes);
+  await app.register(pushInscricoesRoutes);
   await app.register(metricasFalsoPositivoRoutes);
   await app.register(usuariosCriarRoutes);
   await app.register(usuariosListarRoutes);
