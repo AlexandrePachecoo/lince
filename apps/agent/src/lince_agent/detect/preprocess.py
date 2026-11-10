@@ -19,9 +19,10 @@ era recusado e o conserto era o `scale` do ffmpeg (§3.1).
 O piloto mudou isso. A pose recorta o punho do frame **cheio** — em 1280x720 o punho
 tem o dobro de pixels — e o detector só precisa achar a pessoa. Pedir ao ffmpeg duas
 saídas, uma para cada, dobraria a banda do pipe e a superfície de erro do §3.1; a
-redução de 1280x720 para 640x360 aqui custa cerca de 0,2 ms por frame na CPU. Ela segue o `preproc` do YOLOX ao
-pé da letra (`cv2.resize` INTER_LINEAR para `int(w*r) x int(h*r)`), porque outra
-interpolação ou outro arredondamento é uma imagem que o modelo nunca viu no treino.
+redução de 1280x720 para 640x360 aqui custa cerca de 0,2 ms por frame na CPU. Ela
+segue o `preproc` do YOLOX ao pé da letra (`cv2.resize` INTER_LINEAR para
+`int(w*r) x int(h*r)`), porque outra interpolação ou outro arredondamento é uma
+imagem que o modelo nunca viu no treino.
 
 Ampliar continua recusado: um frame menor que a entrada viraria um borrão e um recall
 pior sem sinal nenhum.
