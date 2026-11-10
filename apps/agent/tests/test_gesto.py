@@ -23,7 +23,13 @@ import pytest
 from gesto_util import pose_com, resultado, sequencia
 
 from lince_agent.gesto.corpo import normaliza, referencia_do_tronco
-from lince_agent.gesto.motor import MotorGesto, ParametrosGesto, estados_dos_pulsos
+from lince_agent.gesto.motor import (
+    DisparoGesto,
+    MotorGesto,
+    ParametrosGesto,
+    bloco_do_contrato,
+    estados_dos_pulsos,
+)
 
 LONGE = (1.6, -0.1)  # braço esticado para a prateleira
 MEIO = (0.7, 0.0)  # voltando
@@ -242,3 +248,23 @@ def test_estados_dos_pulsos_e_o_que_o_motor_ve():
         ("esquerdo", "sem_tronco"),
         ("direito", "sem_tronco"),
     ]
+
+
+def test_bloco_do_contrato_diz_a_mao_e_quando_o_gesto_comecou():
+    """`started_s_before` é onde o clipe passa a valer a pena ver: o alcance, não o
+    disparo. `hand` diz para que lado do corpo olhar."""
+    disparo = DisparoGesto(
+        camera_id="cam1",
+        track_id=3,
+        instante=10.5,
+        sequence=84,
+        lado="esquerdo",
+        motivo="permaneceu",
+        alcance_em=9.375,
+    )
+    bloco = bloco_do_contrato(disparo)
+    assert bloco["method"] == {"id": "regra-bolsa", "version": "1"}
+    assert bloco["track_id"] == 3
+    assert bloco["hand"] == "left"
+    assert bloco["started_s_before"] == pytest.approx(1.125)
+    assert bloco["score"] is None

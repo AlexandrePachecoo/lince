@@ -32,7 +32,7 @@ import functools
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 
 from lince_agent import __version__
@@ -47,6 +47,7 @@ from lince_agent.detect.state import DetectionResult, DetectorStats
 from lince_agent.detect.worker import DetectorWorker
 from lince_agent.ffmpeg.process import IngestCallbacks
 from lince_agent.ffmpeg.rawframe import Frame
+from lince_agent.gesto.motor import MotorGesto, MotorGestoStats, bloco_do_contrato
 from lince_agent.ingest.state import CameraHealth
 from lince_agent.ingest.supervisor import CameraSupervisor
 from lince_agent.outbox.clock import MonotonicAnchor
@@ -136,6 +137,10 @@ class AgentHealth:
     """`None` é a pose desligada, que é o padrão: sem `pose` no construtor não há
     thread, fila nem sessão."""
 
+    gesto: MotorGestoStats | None = None
+    """`None` é o gesto desligado. Ligado, `sem_tronco` alto é ângulo de câmera que não
+    mostra o corpo, e a regra se absteve — não é uma loja sem furto."""
+
     uptime_s: float = 0.0
     frames_ingested: int = 0
     """Frames que chegaram da ingestão, contando os das câmeras que o R-3 marcou como
@@ -173,6 +178,7 @@ class AgentRuntime:
         pose: Pose | None = None,
         pose_queue_size: int | None = None,
         on_pose: Callable[[ResultadoPose], None] | None = None,
+        gesto: MotorGesto | None = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -187,6 +193,7 @@ class AgentRuntime:
             store_id=config.store_id,
             agent_version=__version__,
             config_version=config.config_version,
+            pose_version=_versao_da_pose(pose),
         )
         self._clip_store = clip_store or ClipStore(
             config.clips_dir,
@@ -221,10 +228,16 @@ class AgentRuntime:
         self._on_tracking = on_tracking
 
         # Desligada por padrão: sem `pose`, nada abaixo existe. Ligada, ela pendura no
-        # tracking e não toca em mais nada — nem regra, nem evento, nem heartbeat da
-        # nuvem. É o microescopo do plano: estimar e entregar, sem decidir.
+        # tracking e não toca em mais nada. Quem decide é o `gesto`, também desligado
+        # por padrão: só com ele a pose vira evento.
         self._pose: PoseWorker | None = None
         self._pose_adaptador: PoseAdapter | None = None
+        if gesto is not None and pose is None:
+            # Recusa em vez de ignorar: um gesto "ligado" sem pose nunca vê junta
+            # nenhuma, e a loja passaria por coberta sem estar.
+            raise ValueError("o gesto precisa da pose ligada: é dela que vêm os pulsos")
+        self._gesto = gesto
+        self._on_pose = on_pose
         if pose is not None:
             if not config.tracking.enabled:
                 log.warning(
@@ -233,7 +246,7 @@ class AgentRuntime:
                 )
             opcoes = {} if pose_queue_size is None else {"queue_size": pose_queue_size}
             self._pose = PoseWorker(pose, on_result=self._ao_estimar_pose, **opcoes)
-            self._pose_adaptador = PoseAdapter(self._pose, on_pose=on_pose)
+            self._pose_adaptador = PoseAdapter(self._pose, on_pose=self._ao_entregar_pose)
 
         self._lock = threading.Lock()
         self._detecta = {camera.camera_id: camera.detect for camera in config.cameras}
@@ -330,13 +343,14 @@ class AgentRuntime:
         source: EventSource = EventSource.MANUAL,
         rule_id: str | None = None,
         rule_version: int | None = None,
+        gesture: Mapping[str, object] | None = None,
         at: float | None = None,
     ) -> str:
         """Registra uma possível ocorrência e devolve o `event_id`.
 
-        Chamado pelo motor de regras (§3.4) quando ele existir, e hoje pelo andaime da
-        CLI. Não bloqueia: quem chama é a thread despachante do ffmpeg, e segurá-la por
-        10 s esperando pós-roll travaria a leitura do RTSP de todas as câmeras.
+        Chamado pelo motor de regras (§3.4) na thread de detecção, pelo motor do gesto
+        na thread da pose e pelo andaime da CLI. Não bloqueia: segurar qualquer uma
+        dessas threads por 10 s esperando pós-roll travaria a inferência da loja.
         """
         if camera_id not in self._buffers:
             raise KeyError(f"câmera desconhecida: {camera_id!r}")
@@ -350,6 +364,7 @@ class AgentRuntime:
             source=source,
             rule_id=rule_id,
             rule_version=rule_version,
+            gesture=gesture,
         )
         self._guarda_rascunho(rascunho)
 
@@ -499,6 +514,29 @@ class AgentRuntime:
         if self._pose_adaptador is not None:
             self._pose_adaptador.entrega(resultado)
 
+    def _ao_entregar_pose(self, resultado: ResultadoPose) -> None:
+        """A pose que passou pelo adaptador — já sem a sessão anterior. Roda na thread
+        da pose, a única que fala com o motor do gesto.
+
+        Depois do adaptador, e não antes, de propósito: uma pose atrasada da sessão
+        anterior traria o "track 1" de outra pessoa, e um disparo sobre ela abriria um
+        clipe em que quem está no quadro não fez nada.
+        """
+        if self._gesto is not None:
+            for disparo in self._gesto.observa(resultado):
+                try:
+                    self.trigger(
+                        disparo.camera_id,
+                        source=EventSource.GESTURE,
+                        gesture=bloco_do_contrato(disparo),
+                        at=disparo.instante,
+                    )
+                except KeyError:
+                    # Câmera removida por troca de configuração com a pose em voo.
+                    log.warning("gesto na câmera %s, que já não existe", disparo.camera_id)
+        if self._on_pose is not None:
+            self._on_pose(resultado)
+
     def _guarda_rascunho(self, rascunho: EventDraft) -> None:
         with self._lock:
             self._rascunhos[rascunho.event_id] = rascunho
@@ -624,6 +662,7 @@ class AgentRuntime:
         return AgentHealth(
             config=config,
             pose=pose,
+            gesto=None if self._gesto is None else self._gesto.stats(),
             cameras=tuple(sup.health() for sup in self._supervisores.values()),
             buffers=tuple(buffer.stats() for buffer in self._buffers.values()),
             detector=self._deteccao.stats(),
@@ -638,6 +677,16 @@ class AgentRuntime:
             clock_reanchors=self._anchor.reanchors,
             enqueue_failures=falhas,
         )
+
+
+def _versao_da_pose(pose: Pose | None) -> str | None:
+    """O `model_version` da pose, quando ela sabe dizer. Vai no evento de gesto
+    (`versions.pose`): uma troca de modelo muda a taxa de falso positivo do gesto, e
+    sem isto não se saberia sob qual modelo cada evento nasceu."""
+    info = getattr(pose, "info", None)
+    if not callable(info):
+        return None
+    return getattr(info(), "model_version", None)
 
 
 def _monta_detector(config: AgentConfig) -> Detector:
