@@ -32,6 +32,9 @@ passa por triagem humana.
 > [`CLAUDE.md`](CLAUDE.md) para as convenções — em especial a regra de que toda
 > função nova precisa de teste automatizado.
 
+Plano histórico e handoff de continuidade:
+[`docs/faro-plano-e-continuidade-claude.md`](docs/faro-plano-e-continuidade-claude.md).
+
 ---
 
 ## Estrutura
