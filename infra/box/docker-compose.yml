@@ -1,10 +1,19 @@
 # O box da loja (§3.8): o agente da borda e a fila local dele. É ESTE arquivo que vai
-# para o desktop com GPU no estoque do mercado — junto com um `.env` e a pasta do
-# modelo, e mais nada do repositório. Instalação passo a passo em docs/box.md.
+# para o mini PC do mini market — junto com um `.env` e a pasta do modelo, e mais nada
+# do repositório. Instalação passo a passo em docs/box.md.
 #
 #   cp .env.example .env && $EDITOR .env
 #   docker compose up -d
 #   docker compose logs -f agente
+#
+# Sozinho, este arquivo é o box SEM placa de vídeo (ADR-012): imagem de CPU com
+# OpenVINO e o YOLOX-tiny. É o alvo do produto, e por isso é o padrão. O box com placa
+# NVIDIA acrescenta o docker-compose.gpu.yml, que troca a imagem e reserva a placa:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# A reserva da placa não pode morar aqui. Num host sem o NVIDIA Container Toolkit o
+# `up` recusa com `could not select device driver "nvidia"` — o mini PC não subiria.
 #
 # Não confundir com infra/docker-compose.yml, que é a infraestrutura de
 # DESENVOLVIMENTO do control plane (Postgres, MinIO). Os dois têm um Redis, e são
@@ -34,7 +43,7 @@ services:
   agente:
     # Versão fixa, nunca `latest`. Cada loja roda o que o `.env` dela diz, e é isso que
     # permite o rollout gradual do R-7: a loja piloto sobe primeiro, as outras depois.
-    image: ${LINCE_IMAGEM:-ghcr.io/alexandrepachecoo/lince-agent}:${LINCE_VERSAO:?defina LINCE_VERSAO em .env}
+    image: ${LINCE_IMAGEM:-ghcr.io/alexandrepachecoo/lince-agent-cpu}:${LINCE_VERSAO:?defina LINCE_VERSAO em .env}
     restart: unless-stopped
     # O agente abre um ffmpeg por câmera. Como PID 1, um processo que não espera os
     # filhos deixa zumbi a cada reconexão de câmera (§3.1), e uma câmera instável
@@ -78,7 +87,10 @@ services:
       LINCE_BOOTSTRAP_TOKEN: ${LINCE_BOOTSTRAP_TOKEN:-}
       LINCE_AGENT_TOKEN: ${LINCE_AGENT_TOKEN:-}
       LINCE_REDIS_URL: ${LINCE_REDIS_URL:-redis://redis:6379/0}
-      LINCE_MODEL_PATH: /modelos/${LINCE_MODELO:-yolox_s.onnx}
+      # O YOLOX-tiny no box sem placa: acha 93% das pessoas do YOLOX-s a um terço do
+      # custo (tools/bench_deteccao.py). O lado de entrada sai do próprio arquivo, então
+      # trocar o modelo aqui não pede mudança nenhuma no documento da nuvem.
+      LINCE_MODEL_PATH: /modelos/${LINCE_MODELO:-yolox_tiny.onnx}
     volumes:
       # Clipes à espera de upload e o cache de configuração. Volume, não diretório do
       # container: a fila do Redis sobrevive a uma atualização da imagem, e se os
@@ -87,16 +99,6 @@ services:
       # Só leitura: o agente nunca escreve no modelo, e um bug que escrevesse
       # corromperia o único arquivo que a loja não consegue refazer sem internet.
       - ${LINCE_MODELOS_DIR:-./modelos}:/modelos:ro
-    deploy:
-      resources:
-        reservations:
-          devices:
-            # `video` é o NVDEC. Só `gpu` deixaria o driver decidir pelas capacidades
-            # da imagem; declarar aqui é a segunda trava da armadilha descrita no
-            # Dockerfile — sem `video`, o decode cai para CPU em silêncio (R-4).
-            - driver: nvidia
-              count: all
-              capabilities: [gpu, compute, utility, video]
     logging: *logging
 
   redis:

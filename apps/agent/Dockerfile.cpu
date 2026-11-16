@@ -1,0 +1,94 @@
+# syntax=docker/dockerfile:1.7
+#
+# Imagem do agente para o box SEM placa de vídeo (ADR-012, §3.8): o mini PC Intel do
+# mini market de condomínio. É o alvo do produto; a imagem CUDA (`Dockerfile`) continua
+# existindo para o box com placa NVIDIA. O contexto do build é a raiz do repositório,
+# pelo mesmo motivo da outra imagem — o estágio `teste` valida contra o contrato de
+# `packages/shared`:
+#
+#   docker build -f apps/agent/Dockerfile.cpu -t lince-agent-cpu .         # imagem do box
+#   docker build -f apps/agent/Dockerfile.cpu --target teste .             # roda a suíte
+#
+# Os mesmos quatro estágios da imagem CUDA, e é de propósito: as duas imagens diferem
+# na base e no grupo do ONNX Runtime, e em mais nada. Uma diferença a mais seria um
+# segundo jeito de o box se comportar, testado pela metade.
+#
+# Dois arquivos e não um com `ARG`: a imagem CUDA tem armadilhas que só existem nela
+# (`NVIDIA_DRIVER_CAPABILITIES`, cuDNN por `dlopen`), e `tests/test_box.py` confere cada
+# uma lendo o arquivo como dado. Com `ARG`, o teste passaria a conferir o valor padrão de
+# uma variável, e uma loja construída com o outro valor escaparia dele.
+
+# Ubuntu 24.04 puro: o mesmo sistema da imagem CUDA, sem o CUDA. O ffmpeg e o Python
+# 3.12 saem do mesmo apt, então o binário que os testes de ingestão exercitam no CI é
+# o mesmo que roda no mini PC.
+FROM ubuntu:24.04 AS base
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        ffmpeg \
+        python3.12 \
+    && rm -rf /var/lib/apt/lists/*
+
+
+FROM base AS deps
+
+COPY --from=ghcr.io/astral-sh/uv:0.11.32 /uv /usr/local/bin/uv
+
+ENV UV_PROJECT_ENVIRONMENT=/opt/lince/venv \
+    UV_PYTHON=/usr/bin/python3.12 \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
+WORKDIR /src/apps/agent
+
+# `--no-default-groups --group openvino`, nunca o `uv sync` puro: o padrão inclui `cpu`,
+# que conflita com `openvino` — os dois escrevem o mesmo módulo `onnxruntime`, e o que
+# sobra importa sem erro e sem o provider do OpenVINO. A roda Linux do
+# `onnxruntime-openvino` traz o runtime do OpenVINO dentro: nada de apt da Intel.
+COPY apps/agent/pyproject.toml apps/agent/uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-default-groups --group openvino --no-install-project
+
+COPY apps/agent/src ./src
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-default-groups --group openvino --no-editable
+
+
+# A suíte contra o ffmpeg da imagem e o `onnxruntime-openvino` — o par que vai para o
+# mini PC, não o `onnxruntime` de CPU do ambiente de desenvolvimento.
+FROM deps AS teste
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-default-groups --group openvino --group dev
+
+COPY packages/shared/schemas /src/packages/shared/schemas
+COPY infra/box/docker-compose.yml infra/box/docker-compose.gpu.yml infra/box/docker-compose.dev.yml infra/box/.env.example /src/infra/box/
+COPY apps/agent/Dockerfile apps/agent/Dockerfile.cpu apps/agent/config.exemplo.json ./
+# tools/ fica de fora, como na imagem CUDA: scripts offline que não vão para a loja.
+COPY apps/agent/tests ./tests
+
+# Pelo binário do venv e não por `uv run`, que sincronizaria com o grupo padrão `cpu` e
+# trocaria o OpenVINO pela CPU pura justamente no estágio que existe para testá-lo.
+RUN /opt/lince/venv/bin/pytest -q -p no:cacheprovider
+
+
+FROM base AS agente
+
+LABEL org.opencontainers.image.source="https://github.com/AlexandrePachecoo/lince" \
+      org.opencontainers.image.description="lince — agente da borda (§3), box sem placa"
+
+COPY --from=deps /opt/lince/venv /opt/lince/venv
+ENV PATH=/opt/lince/venv/bin:$PATH
+
+# Clipes, cache da configuração e credencial: o volume do compose (§3.8).
+WORKDIR /var/lib/lince
+
+# Root, pelo mesmo motivo da imagem CUDA (regra 7 dos testes no CLAUDE.md).
+ENTRYPOINT ["lince-agent"]
+CMD ["--help"]

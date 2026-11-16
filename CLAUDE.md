@@ -7,8 +7,9 @@ confirma ou descarta.
 
 **O foco mudou** — antes eram mercados de bairro com ~20 câmeras e box com GPU. A
 §0 da arquitetura diz o que mudou e por quê, e a §11 diz o que do código se aproveita
-e em que ordem o resto muda. O código abaixo, no "Estado atual", ainda é o do foco
-anterior: travessia de linha por track, e imagem do box com CUDA.
+e em que ordem o resto muda. A fase 1 (rodar em CPU) está no código; as regras ainda
+são as do foco anterior — travessia de linha por track —, e a sessão da loja (fase 2)
+não existe.
 
 Leia [`docs/arquitetura.md`](docs/arquitetura.md) antes de escrever código —
 especialmente a §7 (riscos). O maior risco do projeto não é a arquitetura, é a taxa
@@ -75,7 +76,7 @@ cd apps/agent && uv run ruff check src tests tools && uv run ruff format --check
 | `apps/api` | As três rotas de agente (`config`, `register`, `heartbeat`), o caminho do evento (`POST /v1/events` com URL pré-assinada e `PATCH /v1/events/{event_id}`) e o lado humano da §4.5: login, fila de triagem, evento avulso por `GET /v1/events/{event_id}`, decisão, URL de leitura do clipe com auditoria, cadastro de usuário e o token de instalação do box (`POST /v1/lojas/{store_id}/bootstrap-token`, §5.1). Mais a métrica de falso positivo por câmera/dia do R-1 (`GET /v1/metricas/falso-positivo`) e o aviso no celular por Web Push, com agrupamento por câmera e teto diário por loja (§4.6, R-12). Falta download de modelo e WebSocket |
 | `apps/dashboard` | O ciclo de triagem da §4.5 em Vite + React: login, fila por cursor, evento com o clipe rodando e a decisão em três botões — os dois toques da NFR-9 —, mais a tela de falso positivo por câmera (R-1), o botão de avisos no celular (service worker + manifesto instalável) e a tela `/box`, onde o admin gera o token de instalação. Falta WebSocket e as telas de usuário |
 | `packages/shared` | JSON Schema dos dois contratos: agente ↔ nuvem (§5) e dashboard ↔ nuvem (§4.5) |
-| `infra/box` | O box da loja (§3.8): imagem do agente em `apps/agent/Dockerfile` (CUDA 13 + cuDNN 9 + ffmpeg com NVDEC + `onnxruntime-gpu`), compose com agente e Redis local, override de desenvolvimento, e o passo a passo em `docs/box.md`. O CI constrói a imagem, roda a suíte dentro dela e publica no GHCR a cada tag `agente-vX.Y.Z`. Falta atualização automática com rollback (R-7) |
+| `infra/box` | O box da loja (§3.8), em dois sabores. O padrão é o **sem placa** (ADR-012): `apps/agent/Dockerfile.cpu` (Ubuntu + ffmpeg + `onnxruntime-openvino`) com o YOLOX-tiny. O com placa acrescenta `docker-compose.gpu.yml` e usa `apps/agent/Dockerfile` (CUDA 13 + cuDNN 9 + NVDEC + `onnxruntime-gpu`) com o YOLOX-s. Compose com agente e Redis local, override de desenvolvimento, e o passo a passo em `docs/box.md`. O CI constrói as duas imagens, roda a suíte dentro de cada uma e publica `lince-agent-cpu` e `lince-agent` no GHCR a cada tag `agente-vX.Y.Z`. Falta atualização automática com rollback (R-7) |
 
 O caminho **pessoa cruza a linha → clipe → fila local → nuvem → clipe apagado do
 disco** funciona ponta a ponta, sem andaime nenhum e **sem `--dry-run`**: a borda vê,
@@ -402,6 +403,33 @@ foram desenhados para cair, e a loja opera a uma fração da taxa com o heartbea
 - **Tailscale no host, não no compose.** É o acesso para consertar o box à distância; se
   dependesse do Docker, um Docker quebrado levaria junto o acesso que o consertaria.
 
+A fase 1 do novo foco (§11) é o agente caber num mini PC sem placa, e as decisões dela
+são todas sobre não deixar a CPU degradar em silêncio:
+
+- **YOLOX-tiny é o modelo do box sem placa.** `tools/bench_deteccao.py` mede tempo e
+  recall **relativo** ao YOLOX-s juntos, porque um sem o outro não decide nada: o tiny
+  acha 93% das pessoas do s a um terço do custo; o nano, 78%. Rode-o no mini PC antes de
+  escolher o hardware das lojas.
+- **OpenVINO é um terceiro grupo do uv** (`openvino`), em conflito com `cpu` e `gpu`
+  pelo mesmo motivo dos outros dois. A lista padrão de providers é CUDA, OpenVINO, CPU, e
+  cada imagem pula o que não tem instalado.
+- **O aviso de queda compara com o primeiro provider *instalado*, não com o primeiro da
+  lista** (`provider_esperado`). Comparar com `providers[0]` avisaria "CUDA
+  indisponível" em toda subida de todo mini PC, e um aviso que sempre aparece esconde a
+  queda de verdade.
+- **O lado de entrada do modelo vem do `.onnx`** quando o documento não diz
+  (`DetectionOptions.input_size = None`). O arquivo é do box e o documento é da loja; um
+  número fixo na nuvem faria o box de 416 ou o de 640 recusar a subida. A recusa do
+  frame menor que o modelo continua na subida — no runtime, depois de o modelo abrir.
+- **O portão de movimento** (`detect/movimento.py`) só deixa o frame ir ao detector com
+  movimento, track vivo na câmera, retenção depois do movimento ou na vigia periódica.
+  Desligado por padrão; liga por `detection.portao_movimento` (`A_QUENTE`). O erro
+  perigoso é ele fechado com alguém na loja, que não deixa rastro — por isso cada
+  abertura cobre um jeito de a pessoa ficar invisível, e falha do portão abre.
+  `poupados` no `--stats` é o que separa "loja vazia" de "câmera parada".
+- **Duas imagens, dois Dockerfiles, não um com `ARG`.** `test_box.py` lê cada um como
+  dado; com `ARG` ele conferiria só o valor padrão.
+
 `packages/shared` é onde o contrato da §5 mora em **um lugar só**. Duplicar essa
 definição entre a API e o agente é o erro mais caro que dá para cometer neste
 projeto. O agente valida o payload real contra o schema em
@@ -501,12 +529,20 @@ cd ../agent && uv run python -m lince_agent --config-nuvem --api-url http://loca
 O box da loja (§3.8), em Docker — passo a passo de instalação em `docs/box.md`:
 
 ```bash
-docker build -f apps/agent/Dockerfile --target teste .     # a suíte dentro da imagem
-docker build -f apps/agent/Dockerfile -t lince-agent .     # a imagem que vai para a loja
+docker build -f apps/agent/Dockerfile.cpu --target teste .        # a suíte na imagem sem placa
+docker build -f apps/agent/Dockerfile.cpu -t lince-agent-cpu .    # o box sem placa (o padrão)
+docker build -f apps/agent/Dockerfile --target teste .            # a suíte na imagem CUDA
+docker build -f apps/agent/Dockerfile -t lince-agent .            # o box com placa
 
-# o box inteiro na máquina de desenvolvimento com GPU, contra `pnpm dev` e `pnpm rtsp:up`
-# (o .env de desenvolvimento está em docs/box.md):
+# o box inteiro na máquina de desenvolvimento, contra `pnpm dev` e `pnpm rtsp:up`
+# (o .env de desenvolvimento está em docs/box.md). Com placa, `-f docker-compose.gpu.yml`
+# por último:
 cd infra/box && docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+
+# qual modelo cabe no mini PC: tempo e recall relativo ao YOLOX-s, juntos
+cd apps/agent && uv run python tools/bench_deteccao.py ../../infra/videos/pessoas.mp4 \
+  --modelo models/yolox_s.onnx:640 --modelo models/yolox_tiny.onnx:416 \
+  --modelo models/yolox_nano.onnx:416
 ```
 
 O outro lado, o do §4.5 — login, fila de triagem, decisão e clipe. O `pnpm seed` imprime
@@ -800,6 +836,9 @@ Não reintroduza nenhuma destas — cada uma custou depuração e tem teste guar
   próprio `frame`. E na reconexão a pose que ainda estava na fila é da sessão anterior —
   o adaptador a descarta pelo `received_at`, senão a junta do "track 1" antigo cai no
   "track 1" novo.
+- **`github.com/<repo>/raw/...` é um redirecionamento**, e há proxy de rede que o recusa
+  com `403` enquanto deixa passar o destino. O `scripts/modelo.sh` baixa o vídeo de teste
+  direto do `raw.githubusercontent.com`.
 - **Ordenar a triagem vigente por `criadoEm` é cara ou coroa.** Duas decisões no mesmo
   milissegundo empatam, e "a última" passa a depender de como o Postgres devolveu a
   linha. Por isso existe `Triagem.seq`: a sequência não empata.

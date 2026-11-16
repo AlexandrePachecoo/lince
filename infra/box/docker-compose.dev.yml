@@ -1,10 +1,16 @@
-# O box rodando na máquina de desenvolvimento com GPU, contra a API (`pnpm dev`, :3000)
-# e as câmeras sintéticas (`pnpm rtsp:up`, :8554) que rodam no host:
+# O box rodando na máquina de desenvolvimento, contra a API (`pnpm dev`, :3000) e as
+# câmeras sintéticas (`pnpm rtsp:up`, :8554) que rodam no host. Sem placa — o box de
+# referência (ADR-012):
 #
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 #
-# É o box de verdade — a mesma imagem, o mesmo compose, a GPU de verdade — com duas
-# diferenças, e só duas:
+# Com placa NVIDIA, o override da GPU POR ÚLTIMO, para o Dockerfile dele vencer:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+#     -f docker-compose.gpu.yml up --build
+#
+# É o box de verdade — a mesma imagem, o mesmo compose — com duas diferenças, e só
+# duas:
 #
 # 1. A imagem é construída do código local em vez de puxada do registry.
 # 2. O agente usa a rede do host. A configuração semeada pelo `pnpm seed` aponta as
@@ -29,7 +35,7 @@ services:
     image: lince-agent:${LINCE_VERSAO:-dev}
     build:
       context: ../..
-      dockerfile: apps/agent/Dockerfile
+      dockerfile: apps/agent/Dockerfile.cpu
       target: agente
     network_mode: host
     environment:

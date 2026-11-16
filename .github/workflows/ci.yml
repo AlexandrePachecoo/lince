@@ -177,7 +177,9 @@ jobs:
         run: |
           cp .env.example .env
           docker compose -f docker-compose.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.gpu.yml config -q
           docker compose -f docker-compose.yml -f docker-compose.dev.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.gpu.yml config -q
 
       # A suíte do agente DENTRO da imagem: o ffmpeg do Ubuntu da imagem e o
       # `onnxruntime-gpu`, que é o pacote que vai para a loja — não o `onnxruntime` de
@@ -219,6 +221,41 @@ jobs:
             if [ -n "$faltando" ]; then echo "provider de CUDA não carregaria:"; echo "$faltando"; exit 1; fi
             ldconfig -p | grep -q "libcudnn.so.9"
             echo "$NVIDIA_DRIVER_CAPABILITIES" | tr , "\n" | grep -qx video
+          '
+
+      # O box sem placa (ADR-012), que é o padrão do docker-compose.yml. A suíte roda
+      # dentro dela pelo mesmo motivo da imagem CUDA: o `onnxruntime-openvino` é o pacote
+      # que vai para o mini PC, não o `onnxruntime` de CPU do job `agente`.
+      - name: testes na imagem de CPU
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/agent/Dockerfile.cpu
+          target: teste
+          cache-from: type=gha,scope=agente-cpu
+          cache-to: type=gha,scope=agente-cpu,mode=max
+
+      - name: imagem do box sem placa
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/agent/Dockerfile.cpu
+          target: agente
+          load: true
+          tags: lince-agent-cpu:ci
+          cache-from: type=gha,scope=agente-cpu
+
+      # O que faz o mini PC usar o OpenVINO: o pacote instalado é o `onnxruntime-openvino`
+      # — o de CPU pura não lista o provider. Uma imagem com o pacote errado passaria o
+      # resto do CI e rodaria a loja até 50% mais devagar. Que a sessão de fato
+      # inicializa nele, quem prova é a suíte da etapa anterior: os testes da pose abrem
+      # sessões reais com a lista padrão de providers, dentro desta imagem.
+      - name: a imagem de CPU tem o OpenVINO
+        run: |
+          docker run --rm --entrypoint sh lince-agent-cpu:ci -euc '
+            lince-agent --help > /dev/null
+            ffmpeg -hide_banner -version > /dev/null
+            python -c "import onnxruntime as o; p = o.get_available_providers(); assert \"OpenVINOExecutionProvider\" in p, p"
           '
 
   # Publica a imagem que os boxes puxam (infra/box/docker-compose.yml). Só depois dos
@@ -269,3 +306,26 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=agente
+
+      # A imagem do box sem placa (ADR-012), com as mesmas tags. Um nome de imagem por
+      # box, e não um sufixo na tag: o `LINCE_VERSAO` de uma loja é o mesmo número nas
+      # duas, e quem escolhe qual é o compose (docker-compose.gpu.yml troca o nome).
+      - id: meta-cpu
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/alexandrepachecoo/lince-agent-cpu
+          flavor: latest=false
+          tags: |
+            type=match,pattern=agente-v(\d+\.\d+\.\d+),group=1
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,format=short,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/agent/Dockerfile.cpu
+          target: agente
+          push: true
+          tags: ${{ steps.meta-cpu.outputs.tags }}
+          labels: ${{ steps.meta-cpu.outputs.labels }}
+          cache-from: type=gha,scope=agente-cpu
