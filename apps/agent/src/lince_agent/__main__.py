@@ -237,7 +237,8 @@ def build_parser() -> argparse.ArgumentParser:
         dest="providers",
         metavar="NOME",
         help="provider do ONNX Runtime, em ordem de preferência; repetível. "
-        "O default tenta CUDA e cai para CPU (§10.10)",
+        "O default tenta CUDA, depois OpenVINO, e cai para CPU (§10.10, ADR-012). "
+        "O que a instalação não tem é pulado",
     )
     padrao = DetectionOptions()
     estagio2.add_argument("--score-threshold", type=float, default=padrao.score_threshold)

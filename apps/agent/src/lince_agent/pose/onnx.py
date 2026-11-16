@@ -45,7 +45,12 @@ from typing import Any
 import numpy as np
 
 from lince_agent.detect.onnx import ModelError as DetectorModelError
-from lince_agent.detect.onnx import abre_sessao, recusa_pesos_agpl
+from lince_agent.detect.onnx import (
+    _instalados,
+    abre_sessao,
+    provider_esperado,
+    recusa_pesos_agpl,
+)
 from lince_agent.detect.onnx import model_version as _model_version_detector
 from lince_agent.ffmpeg.rawframe import Frame
 from lince_agent.pose.preprocess import (
@@ -62,9 +67,13 @@ from lince_agent.pose.preprocess import (
 
 log = logging.getLogger(__name__)
 
-# A mesma ordem de `DetectionOptions.providers`. CUDA primeiro; CPU se a placa
-# cair (§10.10). A lista mora aqui para a pose não nascer diferente do detector.
-PROVIDERS: tuple[str, ...] = ("CUDAExecutionProvider", "CPUExecutionProvider")
+# A mesma ordem de `DetectionOptions.providers`: CUDA, OpenVINO, CPU (§10.10, ADR-012).
+# A lista mora aqui para a pose não nascer diferente do detector.
+PROVIDERS: tuple[str, ...] = (
+    "CUDAExecutionProvider",
+    "OpenVINOExecutionProvider",
+    "CPUExecutionProvider",
+)
 
 NUM_JUNTAS = 17
 """`out_channels` da RTMCCHead na config do RTMPose-s COCO. Não é WholeBody."""
@@ -287,6 +296,7 @@ class OnnxPose:
         providers: tuple[str, ...] = PROVIDERS,
         spec: PreprocessSpec = RTMPOSE,
         session_factory: Callable[[Path, tuple[str, ...]], Any] | None = None,
+        instalados: frozenset[str] | None = None,
     ) -> None:
         # Antes de conferir se o arquivo existe. Um caminho `wholebody` ou
         # `yolov8n-pose` tem que dizer o motivo, não "modelo não encontrado".
@@ -316,10 +326,13 @@ class OnnxPose:
         # Pedido não é obtido: o box aceita CUDA na lista e roda em CPU sem
         # dizer nada. O aviso na subida é o que separa "a pose está lenta" de
         # "a pose caiu para CPU" (§10.10).
-        if provider != providers[0]:
+        # Contra o primeiro pedido que a instalação tem, pelo motivo de
+        # `provider_esperado`: no box sem placa, CUDA nem está instalado.
+        esperado = provider_esperado(providers, _instalados(instalados, session_factory, providers))
+        if provider != esperado:
             log.warning(
                 "provider %s indisponível; a pose vai rodar em %s",
-                providers[0],
+                esperado,
                 provider,
             )
         log.info(

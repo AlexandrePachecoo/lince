@@ -45,6 +45,13 @@ cpu = ["onnxruntime>=1.20"]
 # CUDA falha ao carregar e a sessão roda em CPU (§10.10). É o job `imagem` do CI que
 # pega isso, conferindo com `ldd` que as bibliotecas do provider resolvem na imagem.
 gpu = ["onnxruntime-gpu>=1.27"]
+# O box de referência sem placa (ADR-012): mini PC Intel. O mesmo `.onnx`, o mesmo
+# módulo `onnxruntime`, com o `OpenVINOExecutionProvider` a mais — de 20% a 50% mais
+# rápido que a CPU pura no YOLOX-tiny e no nano, medido. A roda Linux traz o runtime do
+# OpenVINO dentro; nada de apt. Também conflita com os outros dois: é o mesmo módulo.
+#
+#   uv sync --no-group cpu --group openvino
+openvino = ["onnxruntime-openvino>=1.24"]
 dev = [
     # Só de desenvolvimento: o agente monta dicionários puros e o schema do §5 é
     # verificado no teste. Validar em runtime custaria dependência no box para
@@ -61,7 +68,7 @@ dev = [
 
 [tool.uv]
 default-groups = ["dev", "cpu"]
-conflicts = [[{ group = "cpu" }, { group = "gpu" }]]
+conflicts = [[{ group = "cpu" }, { group = "gpu" }, { group = "openvino" }]]
 
 [build-system]
 requires = ["hatchling"]

@@ -18,7 +18,7 @@ import pytest
 from deteccoes import frame
 
 from lince_agent.config import DetectionOptions
-from lince_agent.detect.onnx import ModelError, OnnxDetector, model_version
+from lince_agent.detect.onnx import ModelError, OnnxDetector, model_version, provider_esperado
 
 LADO = 640
 ANCORAS = 80 * 80 + 40 * 40 + 20 * 20
@@ -65,9 +65,16 @@ def modelo_falso(tmp_path: Path) -> Path:
     return caminho
 
 
-def detector(tmp_path: Path, sessao: SessaoFalsa, **kwargs) -> OnnxDetector:
+def detector(
+    tmp_path: Path, sessao: SessaoFalsa, *, instalados: frozenset[str] | None = None, **kwargs
+) -> OnnxDetector:
     opcoes = DetectionOptions(enabled=True, model_path=modelo_falso(tmp_path), **kwargs)
-    return OnnxDetector(modelo_falso(tmp_path), opcoes, session_factory=lambda *_args: sessao)
+    return OnnxDetector(
+        modelo_falso(tmp_path),
+        opcoes,
+        session_factory=lambda *_args: sessao,
+        instalados=instalados,
+    )
 
 
 def saida_com_pessoa(ancora: int, *, objectness: float = 0.9, prob: float = 0.8) -> np.ndarray:
@@ -188,6 +195,56 @@ def test_avisa_quando_cai_para_o_segundo_provider(tmp_path: Path, caplog):
             providers=("CUDAExecutionProvider", "CPUExecutionProvider"),
         )
     assert "CUDAExecutionProvider" in caplog.text
+
+
+CPU_INTEL = frozenset({"OpenVINOExecutionProvider", "CPUExecutionProvider"})
+"""O que o pacote `onnxruntime-openvino` compila: a imagem do box sem placa (ADR-012)."""
+
+
+def test_box_sem_o_pacote_do_cuda_nao_avisa_queda_que_nao_houve(tmp_path: Path, caplog):
+    """A lista padrão é a mesma nas três imagens. No mini PC o CUDA nem está instalado,
+    e rodar em OpenVINO é o caminho previsto: avisar "CUDA indisponível" a cada subida de
+    toda loja ensinaria a ignorar o aviso — o mesmo que avisa o box com placa e driver
+    quebrado."""
+    with caplog.at_level("WARNING"):
+        detector(
+            tmp_path,
+            SessaoFalsa(provider="OpenVINOExecutionProvider"),
+            providers=DetectionOptions().providers,
+            instalados=CPU_INTEL,
+        )
+    assert "indisponível" not in caplog.text
+
+
+def test_openvino_instalado_que_cai_para_cpu_avisa(tmp_path: Path, caplog):
+    """O OpenVINO instalado que não inicializa (CPU sem as instruções que ele exige,
+    biblioteca faltando na imagem) é a mesma queda silenciosa do CUDA, só mais barata:
+    a loja roda mais devagar e ninguém sabe por quê."""
+    with caplog.at_level("WARNING"):
+        detector(
+            tmp_path,
+            SessaoFalsa(provider="CPUExecutionProvider"),
+            providers=DetectionOptions().providers,
+            instalados=CPU_INTEL,
+        )
+    assert "OpenVINOExecutionProvider" in caplog.text
+    assert "CUDAExecutionProvider" not in caplog.text
+
+
+def test_provider_esperado_e_o_primeiro_pedido_que_a_instalacao_tem():
+    pedidos = DetectionOptions().providers
+    assert provider_esperado(pedidos, CPU_INTEL) == "OpenVINOExecutionProvider"
+    assert provider_esperado(pedidos, frozenset({"CPUExecutionProvider"})) == (
+        "CPUExecutionProvider"
+    )
+    tudo = frozenset(pedidos)
+    assert provider_esperado(pedidos, tudo) == "CUDAExecutionProvider"
+
+
+def test_provider_esperado_sem_nada_instalado_aponta_o_primeiro_pedido():
+    """Sem interseção, `abre_sessao` recusa antes; mas a função não pode devolver
+    `None` para quem a chamar sozinha, e o primeiro pedido é o que a mensagem deve citar."""
+    assert provider_esperado(("CUDAExecutionProvider",), frozenset()) == "CUDAExecutionProvider"
 
 
 def test_entrada_declarada_divergente_da_configuracao_e_recusada(tmp_path: Path):

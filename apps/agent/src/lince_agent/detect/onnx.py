@@ -111,6 +111,7 @@ class OnnxDetector:
         *,
         spec: PreprocessSpec = YOLOX,
         session_factory: Callable[[Path, tuple[str, ...]], Any] | None = None,
+        instalados: frozenset[str] | None = None,
     ) -> None:
         # Antes de qualquer outra coisa, inclusive de conferir se o arquivo existe: a
         # recusa por licença não pode depender de o arquivo estar no disco.
@@ -140,10 +141,13 @@ class OnnxDetector:
         # O provider pedido não é o provider obtido: um box com o driver quebrado aceita
         # `CUDAExecutionProvider` na lista e roda em CPU sem dizer nada. Registrar na
         # subida é o que transforma "o box está lento" em "o box caiu para CPU" (§10.10).
-        if provider != options.providers[0]:
+        esperado = provider_esperado(
+            options.providers, _instalados(instalados, session_factory, options.providers)
+        )
+        if provider != esperado:
             log.warning(
                 "provider %s indisponível; a inferência vai rodar em %s",
-                options.providers[0],
+                esperado,
                 provider,
             )
         log.info(
@@ -200,6 +204,45 @@ class OnnxDetector:
 
     def close(self) -> None:
         self._session = None
+
+
+def providers_instalados() -> frozenset[str]:
+    """O que a instalação do ONNX Runtime compilou. Import adiado: ver `abre_sessao`."""
+    import onnxruntime as ort
+
+    return frozenset(ort.get_available_providers())
+
+
+def provider_esperado(pedidos: tuple[str, ...], instalados: frozenset[str]) -> str:
+    """O provider que a sessão **deveria** ter pegado: o primeiro pedido que a instalação
+    tem.
+
+    É contra ele que se compara o obtido, e não contra o primeiro da lista. A lista
+    padrão é a mesma para as três imagens do box (CUDA, OpenVINO, CPU), e o box sem
+    placa nem tem o pacote do CUDA: comparar com `pedidos[0]` avisaria "CUDA
+    indisponível" em toda subida de toda loja, e um aviso que sempre aparece ensina a
+    ignorá-lo — justamente o que esconderia a queda de verdade, a do box com placa e
+    driver quebrado, onde o CUDA está instalado e não carrega.
+    """
+    for provider in pedidos:
+        if provider in instalados:
+            return provider
+    return pedidos[0]
+
+
+def _instalados(
+    instalados: frozenset[str] | None,
+    session_factory: Callable[..., Any] | None,
+    pedidos: tuple[str, ...],
+) -> frozenset[str]:
+    """Com uma fábrica de sessão injetada, a instalação é a que a fábrica finge ser:
+    tudo o que foi pedido. Perguntar ao ONNX Runtime de verdade misturaria o pacote da
+    máquina que roda o teste com a sessão falsa do teste."""
+    if instalados is not None:
+        return instalados
+    if session_factory is not None:
+        return frozenset(pedidos)
+    return providers_instalados()
 
 
 def abre_sessao(model_path: Path, providers: tuple[str, ...]):

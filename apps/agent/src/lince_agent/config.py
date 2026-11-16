@@ -328,10 +328,20 @@ class DetectionOptions:
     """Lado do quadrado que o modelo consome. É conferido contra a forma declarada no
     próprio `.onnx` na subida — divergir aqui decodifica caixas plausíveis e erradas."""
 
-    providers: tuple[str, ...] = ("CUDAExecutionProvider", "CPUExecutionProvider")
+    providers: tuple[str, ...] = (
+        "CUDAExecutionProvider",
+        "OpenVINOExecutionProvider",
+        "CPUExecutionProvider",
+    )
     """Ordem de preferência do ONNX Runtime. É esta lista que implementa o fallback do
     §3.2 sem nenhum `if gpu`: num box sem placa, ou com o driver quebrado, o runtime
-    simplesmente cai para o próximo da lista e o heartbeat reporta qual pegou (§10.10)."""
+    simplesmente cai para o próximo da lista e o heartbeat reporta qual pegou (§10.10).
+
+    O OpenVINO vem antes da CPU pura porque o box de referência agora é um mini PC Intel
+    sem placa (ADR-012), e nele o mesmo `.onnx` roda de 20% a 50% mais rápido (medido com
+    o YOLOX-tiny e o nano). Cada imagem instala um pacote só (`cpu`, `gpu` ou `openvino`,
+    no `pyproject.toml`), e o que não está instalado sai da lista antes de abrir a sessão
+    — então a mesma lista serve às três sem `if` nenhum."""
 
     score_threshold: float = 0.10
     """**Piso**, não o limiar de decisão. Abaixo disto a caixa não vale nada para
