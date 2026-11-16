@@ -17,24 +17,49 @@ export interface TokenBootstrapCriado {
   expiraEm: Date;
 }
 
-// Usada hoje só por scripts/seed.ts -- não existe POST /v1/lojas nem dashboard ainda
-// para gerar isto por conta própria (§5.1 descreve "gerado no dashboard ao cadastrar
-// a loja"; nesta fatia, o seed faz esse papel).
+/** Quem pediu o token. Ausente só no scripts/seed.ts, que não tem usuário. */
+export interface AutorDoToken {
+  usuarioId: string;
+  email: string;
+}
+
+// Usada pelo POST /v1/lojas/{store_id}/bootstrap-token (o "gerado no dashboard" da
+// §5.1) e pelo scripts/seed.ts.
+//
+// Gerar um token **vence os anteriores da mesma loja que ainda não foram usados**. O
+// token é mostrado uma vez e copiado para um `.env`; quem pede outro é porque perdeu o
+// primeiro ou não sabe onde ele foi parar, e nos dois casos o primeiro continuar
+// valendo é uma credencial solta que ninguém está vigiando. Os já usados não são
+// tocados: a linha deles é o registro de qual token virou qual agente.
+//
+// Vencer é adiantar `expiraEm`, e não apagar a linha: a trilha de quem gerou continua,
+// e o box que chegar com o token antigo recebe "expirado" -- que manda gerar outro --
+// em vez de "não reconhecido", que mandaria conferir se copiou errado.
 export async function criaTokenBootstrap(
   prisma: PrismaClient,
   lojaId: string,
+  autor?: AutorDoToken,
 ): Promise<TokenBootstrapCriado> {
   const token = geraToken();
-  const expiraEm = new Date(Date.now() + TTL_HORAS * 60 * 60 * 1000);
+  const agora = new Date();
+  const expiraEm = new Date(agora.getTime() + TTL_HORAS * 60 * 60 * 1000);
 
-  await prisma.tokenBootstrap.create({
-    data: {
-      lojaId,
-      tokenHash: hashToken(token),
-      tokenPrefix: token.slice(0, 8),
-      expiraEm,
-    },
-  });
+  await prisma.$transaction([
+    prisma.tokenBootstrap.updateMany({
+      where: { lojaId, usadoEm: null, expiraEm: { gt: agora } },
+      data: { expiraEm: agora },
+    }),
+    prisma.tokenBootstrap.create({
+      data: {
+        lojaId,
+        tokenHash: hashToken(token),
+        tokenPrefix: token.slice(0, 8),
+        expiraEm,
+        criadoPorId: autor?.usuarioId ?? null,
+        criadoPorEmail: autor?.email ?? null,
+      },
+    }),
+  ]);
 
   return { token, expiraEm };
 }

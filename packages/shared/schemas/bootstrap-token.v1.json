@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.lince.dev/bootstrap-token/v1.json",
+  "title": "Resposta do POST /v1/lojas/{store_id}/bootstrap-token",
+  "description": "O token de bootstrap de uso único de uma loja (§5.1), que o box troca por credencial no POST /v1/agents/register. Aparece em claro só aqui e uma vez só: a nuvem guarda o hash, e não há rota que o devolva de novo. Sem corpo na requisição — a loja está no caminho e o autor no token de sessão.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "store_id",
+    "bootstrap_token",
+    "expires_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "store_id": {
+      "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/identifier"
+    },
+    "bootstrap_token": {
+      "type": "string",
+      "minLength": 32,
+      "maxLength": 256,
+      "description": "Segredo opaco. É o valor de LINCE_BOOTSTRAP_TOKEN no .env do box, e o mesmo campo bootstrap_token de agent-register.v1.json."
+    },
+    "expires_at": {
+      "$ref": "https://schemas.lince.dev/common/v1.json#/$defs/instant",
+      "description": "Vence sem uso neste instante. Vai na resposta, e não como duração, porque quem lê é uma pessoa que vai instalar o box mais tarde: \"vale até as 14h de amanhã\" é o que ela precisa saber."
+    }
+  }
+}

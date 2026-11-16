@@ -42,6 +42,7 @@ Do dashboard (§4.5):
 |---|---|
 | `schemas/auth-login.v1.json` | Corpo do `POST /v1/auth/login` |
 | `schemas/auth-sessao.v1.json` | Resposta do `POST /v1/auth/login` — token e o usuário que ele representa |
+| `schemas/bootstrap-token.v1.json` | Resposta do `POST /v1/lojas/{store_id}/bootstrap-token` — o token de instalação do box, em claro só aqui |
 | `schemas/usuario.v1.json` | Resposta com um usuário, e os `$defs` de papel e vínculo |
 | `schemas/usuarios.v1.json` | Resposta do `GET /v1/usuarios` |
 | `schemas/usuario-novo.v1.json` | Corpo do `POST /v1/usuarios` |

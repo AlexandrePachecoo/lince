@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { lojasAdministradas } from "./auth/papeis.js";
 import { type SessaoGuardada, leSessao, limpaSessao } from "./auth/sessao.js";
 import { ambienteReal, desativaAvisos } from "./push/avisos.js";
+import { Box } from "./telas/Box.js";
 import { Evento } from "./telas/Evento.js";
 import { Fila } from "./telas/Fila.js";
 import { Login } from "./telas/Login.js";
@@ -68,6 +70,8 @@ export function App() {
     );
   }
 
+  const lojasDeAdmin = lojasAdministradas(sessao.usuario);
+
   return (
     <Routes>
       <Route
@@ -78,6 +82,7 @@ export function App() {
             nome={sessao.usuario.nome}
             aoSair={sai}
             versao={versaoDaFila}
+            podeInstalarBox={lojasDeAdmin.length > 0}
           />
         }
       />
@@ -86,6 +91,7 @@ export function App() {
         element={<Evento token={sessao.token} aoDecidir={() => setVersaoDaFila((v) => v + 1)} />}
       />
       <Route path="/metrica" element={<Metrica token={sessao.token} />} />
+      <Route path="/box" element={<Box token={sessao.token} lojas={lojasDeAdmin} />} />
       <Route path="*" element={<Navigate to="/fila" replace />} />
     </Routes>
   );

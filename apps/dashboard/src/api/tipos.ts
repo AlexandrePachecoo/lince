@@ -123,6 +123,15 @@ export interface Sessao {
   usuario: Usuario;
 }
 
+/** O token de uso único que o box troca por credencial (bootstrap-token.v1.json). */
+export interface TokenDeInstalacao {
+  schema_version: 1;
+  store_id: string;
+  /** Em claro só nesta resposta: a nuvem guarda o hash e não o devolve de novo. */
+  bootstrap_token: string;
+  expires_at: string;
+}
+
 /** `PushSubscription.toJSON()` no formato de push-inscricao.v1.json. */
 export interface InscricaoPushJson {
   endpoint: string;

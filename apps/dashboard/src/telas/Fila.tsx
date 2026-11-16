@@ -22,9 +22,11 @@ interface Props {
   aoSair: () => void;
   /** Sobe quando um evento é decidido, para a fila recarregar sem o que saiu dela. */
   versao?: number;
+  /** Só admin de alguma loja vê o atalho da instalação do box (§5.1). */
+  podeInstalarBox?: boolean;
 }
 
-export function Fila({ token, nome, aoSair, versao = 0 }: Props) {
+export function Fila({ token, nome, aoSair, versao = 0, podeInstalarBox = false }: Props) {
   const [estado, setEstado] = useState<EstadoDaFila>(FILA_VAZIA);
   const [carregando, setCarregando] = useState(true);
   const [erro, setErro] = useState<string | null>(null);
@@ -86,6 +88,13 @@ export function Fila({ token, nome, aoSair, versao = 0 }: Props) {
           <Link className="botao botao--discreto" to="/metrica">
             Falsos
           </Link>
+          {/* Escondido de quem não é admin: um botão que só devolve 403 ocupa, no
+              cabeçalho do celular, o lugar de um que serve. */}
+          {podeInstalarBox && (
+            <Link className="botao botao--discreto" to="/box">
+              Box
+            </Link>
+          )}
           <button className="botao botao--discreto" type="button" onClick={aoSair}>
             Sair
           </button>

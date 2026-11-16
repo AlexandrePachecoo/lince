@@ -7,6 +7,7 @@ import type {
   InscricaoPushJson,
   MetricaFalsoPositivo,
   Sessao,
+  TokenDeInstalacao,
 } from "./tipos.js";
 
 // O acesso à API, num lugar só. Caminho relativo sempre: em desenvolvimento o Vite faz o
@@ -158,5 +159,16 @@ export function removeInscricaoPush(token: string, endpoint: string): Promise<vo
     metodo: "DELETE",
     token,
     corpo: { schema_version: 1, endpoint },
+  });
+}
+
+/**
+ * Gera o token de instalação do box de uma loja (§5.1). `403` é quem não é admin dela.
+ * Gerar vence o token anterior da loja que ainda não foi usado.
+ */
+export function geraTokenDeInstalacao(token: string, storeId: string): Promise<TokenDeInstalacao> {
+  return pede<TokenDeInstalacao>(`/lojas/${encodeURIComponent(storeId)}/bootstrap-token`, {
+    metodo: "POST",
+    token,
   });
 }

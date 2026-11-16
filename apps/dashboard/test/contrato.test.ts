@@ -34,6 +34,9 @@ const validaMetrica = ajv.compile(carrega("@lince/shared/schemas/metricas-falso-
 const validaChavePush = ajv.compile(carrega("@lince/shared/schemas/push-chave.v1.json"));
 const validaInscricao = ajv.compile(carrega("@lince/shared/schemas/push-inscricao.v1.json"));
 const validaRemocao = ajv.compile(carrega("@lince/shared/schemas/push-remocao.v1.json"));
+const validaTokenDeInstalacao = ajv.compile(
+  carrega("@lince/shared/schemas/bootstrap-token.v1.json"),
+);
 const validaNotificacao = ajv.compile(carrega("@lince/shared/schemas/notificacao.v1.json"));
 
 // Um evento de cada forma que a tela precisa distinguir. `clip_state` e `clip.status`
@@ -159,5 +162,21 @@ describe("o contrato dos avisos no celular", () => {
 
   test("o schema recusa notificação que levaria o toque para fora do app", () => {
     expect(validaNotificacao(fixturas.notificacao({ url: "https://golpe.exemplo/" }))).toBe(false);
+  });
+});
+
+describe("o contrato da instalação do box", () => {
+  test("o token de instalação bate com bootstrap-token.v1.json", () => {
+    // A tela monta a linha do `.env` a partir de `bootstrap_token`. Um campo renomeado
+    // no contrato viraria `LINCE_BOOTSTRAP_TOKEN=undefined` copiado para um box.
+    const documento = fixturas.tokenDeInstalacao();
+    expect(validaTokenDeInstalacao(documento), JSON.stringify(validaTokenDeInstalacao.errors)).toBe(
+      true,
+    );
+  });
+
+  test("o schema recusa um token curto demais para ser segredo", () => {
+    const invalido = fixturas.tokenDeInstalacao({ bootstrap_token: "abc" });
+    expect(validaTokenDeInstalacao(invalido)).toBe(false);
   });
 });

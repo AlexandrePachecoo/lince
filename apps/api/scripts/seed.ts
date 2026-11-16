@@ -81,7 +81,7 @@ async function main(): Promise<void> {
 
   // Token de bootstrap para exercitar POST /v1/agents/register (§5.1) na mão. Não é
   // idempotente por id fixo como o resto do seed -- é de uso único por natureza, então
-  // cada `pnpm seed` gera um novo (o(s) anterior(es) seguem no banco, inertes).
+  // cada `pnpm seed` gera um novo, e gerar vence o anterior que não foi usado.
   const bootstrap = await criaTokenBootstrap(prisma, loja.id);
 
   const tokenHash = hashToken(TOKEN_DEV);

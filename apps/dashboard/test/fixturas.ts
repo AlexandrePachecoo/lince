@@ -6,6 +6,7 @@ import type {
   InscricaoPushJson,
   MetricaFalsoPositivo,
   Sessao,
+  TokenDeInstalacao,
 } from "../src/api/tipos.js";
 
 // Os documentos que a suíte usa no lugar da API. Ficam num arquivo só porque
@@ -133,6 +134,16 @@ export function notificacao(sobrescreve: Partial<ConteudoNotificacao> = {}): Con
     corpo: "gesto de esconder · Mercado Centro · 11:07",
     url: "/eventos/0b6f1a52-1d0e-4c9a-9a0e-6f1f2c3d4e5f",
     tag: "lince-loja-1-cam3",
+    ...sobrescreve,
+  };
+}
+
+export function tokenDeInstalacao(sobrescreve: Partial<TokenDeInstalacao> = {}): TokenDeInstalacao {
+  return {
+    schema_version: 1,
+    store_id: "loja-centro",
+    bootstrap_token: "3f9a".repeat(16),
+    expires_at: "2026-11-17T14:00:00.000Z",
     ...sobrescreve,
   };
 }
