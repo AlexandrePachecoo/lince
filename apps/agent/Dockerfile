@@ -95,6 +95,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY packages/shared/schemas /src/packages/shared/schemas
 COPY infra/box/docker-compose.yml infra/box/docker-compose.gpu.yml infra/box/docker-compose.dev.yml infra/box/.env.example /src/infra/box/
 COPY apps/agent/Dockerfile apps/agent/Dockerfile.cpu apps/agent/config.exemplo.json ./
+COPY apps/agent/Dockerfile.dockerignore apps/agent/Dockerfile.cpu.dockerignore ./
 # tools/ fica de fora de propósito, também neste estágio. São scripts offline
 # (export e benchmark) e não vão para a loja; copiá-los aqui não os leva à
 # imagem final, mas ensinaria o contrário. Os testes que os carregam pulam

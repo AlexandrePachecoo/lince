@@ -377,6 +377,51 @@ def test_estagio_de_teste_leva_tudo_que_test_box_le(caminho: Path):
         "infra/box/docker-compose.dev.yml",
         "infra/box/.env.example",
         "apps/agent/Dockerfile ",
-        "apps/agent/Dockerfile.cpu",
+        "apps/agent/Dockerfile.cpu ",
+        "apps/agent/Dockerfile.dockerignore",
+        "apps/agent/Dockerfile.cpu.dockerignore",
     ):
         assert arquivo in copiados + " ", f"{caminho.name} não copia {arquivo.strip()}"
+
+
+def _origens_copiadas(dockerfile: str) -> list[str]:
+    """As origens de cada `COPY` que lê do contexto (sem `--from`), relativas à raiz."""
+    origens = []
+    for instrucao in _instrucoes(dockerfile, "COPY"):
+        partes = [p for p in instrucao.split() if not p.startswith("--")]
+        if "--from=" in instrucao:
+            continue
+        origens.extend(partes[:-1])
+    return origens
+
+
+def _permitido(caminho: str, regras: list[str]) -> bool:
+    """A semântica do `.dockerignore` no que estas listas usam: a última regra que casa
+    vence, `*` exclui tudo, `!x` devolve `x` e tudo abaixo dele."""
+    permitido = True
+    for regra in regras:
+        negada = regra.startswith("!")
+        padrao = regra[1:] if negada else regra
+        if padrao == "*" or caminho == padrao or caminho.startswith(padrao + "/"):
+            permitido = negada
+    return permitido
+
+
+@pytest.mark.parametrize("caminho", [DOCKERFILE, DOCKERFILE_CPU], ids=["cuda", "cpu"])
+def test_contexto_do_build_entrega_tudo_que_o_dockerfile_copia(caminho: Path):
+    """O contexto é a raiz do repositório, filtrado por uma lista de PERMISSÃO ao lado de
+    cada Dockerfile (`<nome>.dockerignore`). Arquivo copiado e não permitido derruba o
+    build no CI com "not found". E Dockerfile sem a própria lista manda o repositório
+    inteiro como contexto — `.env` de verdade incluído, a um `COPY . .` de uma imagem
+    pública."""
+    ignore = caminho.with_name(caminho.name + ".dockerignore")
+    assert ignore.is_file(), f"{caminho.name} sem {ignore.name}: o contexto seria o repo inteiro"
+
+    regras = [
+        linha.strip()
+        for linha in ignore.read_text(encoding="utf-8").splitlines()
+        if linha.strip() and not linha.strip().startswith("#")
+    ]
+    assert regras[0] == "*", "a lista tem que começar excluindo tudo"
+    for origem in _origens_copiadas(_le_dockerfile(caminho)):
+        assert _permitido(origem, regras), f"{ignore.name} não deixa passar {origem}"
