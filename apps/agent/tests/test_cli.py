@@ -1015,3 +1015,175 @@ def test_linha_do_gesto_mostra_abstencao_e_disparos():
     )
     for pedaço in ("[gesto]", "observações=120", "sem tronco=30", "disparos=2"):
         assert pedaço in linha
+
+
+# --- a credencial na subida (§5.1) -----------------------------------------------------
+
+
+def _credencial_de_teste(token="tok-registrado"):
+    from lince_agent.credencial import Credencial
+
+    return Credencial(agent_id="ag-1", tenant_id="rede-1", store_id="loja-7", token=token)
+
+
+def _args_de_credencial(tmp_path, *extras):
+    return cli.build_parser().parse_args(
+        ["--config-nuvem", "--clips-dir", str(tmp_path / "clipes"), *extras]
+    )
+
+
+class _Registrador:
+    """Conta as trocas: cada chamada é um token de bootstrap gasto."""
+
+    def __init__(self, erro=None):
+        self.tokens: list[str] = []
+        self.erro = erro
+
+    def __call__(self, token):
+        self.tokens.append(token)
+        if self.erro is not None:
+            raise self.erro
+        return _credencial_de_teste()
+
+
+def test_primeira_subida_troca_o_token_e_guarda_a_credencial(tmp_path):
+    """A instalação inteira é isto: token no `.env`, `docker compose up`. A credencial
+    fica ao lado dos clipes, que no box é o volume que sobrevive à troca de imagem."""
+    args = _args_de_credencial(tmp_path, "--bootstrap-token", "bs-1")
+    registrador = _Registrador()
+
+    assert cli._resolve_token(args, registrador) == "tok-registrado"
+
+    assert registrador.tokens == ["bs-1"]
+    guardado = json.loads((tmp_path / "clipes" / "credencial.json").read_text())
+    assert guardado["token"] == "tok-registrado"
+    assert guardado["store_id"] == "loja-7"
+
+
+def test_segunda_subida_nao_toca_no_token_de_bootstrap(tmp_path):
+    """O token fica no `.env` para sempre e a nuvem o recusa do segundo uso em diante.
+    Um agente que o tentasse a cada subida morreria no primeiro reinício — o de uma
+    queda de energia ou o de uma atualização de imagem."""
+    args = _args_de_credencial(tmp_path, "--bootstrap-token", "bs-1")
+    cli._resolve_token(args, _Registrador())
+    segundo = _Registrador()
+
+    assert cli._resolve_token(args, segundo) == "tok-registrado"
+
+    assert segundo.tokens == []
+
+
+def test_api_token_vence_a_credencial_guardada_e_o_bootstrap(tmp_path):
+    """O atalho de desenvolvimento precisa ser previsível: quem passa `--api-token`
+    aponta para a API que quer, e um `credencial.json` esquecido no diretório não pode
+    decidir no lugar dele. Também não gasta token de bootstrap."""
+    args = _args_de_credencial(tmp_path, "--bootstrap-token", "bs-1")
+    cli._resolve_token(args, _Registrador())
+    args = _args_de_credencial(tmp_path, "--api-token", "tok-dev", "--bootstrap-token", "bs-2")
+    registrador = _Registrador()
+
+    assert cli._resolve_token(args, registrador) == "tok-dev"
+
+    assert registrador.tokens == []
+
+
+def test_sem_onde_guardar_o_token_de_bootstrap_nao_e_gasto(tmp_path):
+    """A credencial é entregue uma vez. Descobrir que o volume não aceita escrita
+    DEPOIS da troca é perdê-la junto com o token; antes, é só consertar e subir de
+    novo. O pai do arquivo é um arquivo, que falha até para root (regra 7)."""
+    from lince_agent.registro import RegistroError
+
+    obstaculo = tmp_path / "nao-e-diretorio"
+    obstaculo.write_text("x")
+    args = _args_de_credencial(
+        tmp_path, "--bootstrap-token", "bs-1", "--credencial", str(obstaculo / "credencial.json")
+    )
+    registrador = _Registrador()
+
+    with pytest.raises(RegistroError, match="NÃO foi usado"):
+        cli._resolve_token(args, registrador)
+
+    assert registrador.tokens == []
+
+
+def test_sem_nenhuma_das_tres_fontes_nao_ha_token(tmp_path):
+    assert cli._resolve_token(_args_de_credencial(tmp_path), _Registrador()) is None
+
+
+def test_variavel_vazia_do_compose_e_ausencia_e_nao_token(tmp_path, monkeypatch):
+    """O compose passa `LINCE_AGENT_TOKEN=` vazio quando o `.env` só tem o token de
+    bootstrap. Lido como token, a string vazia venceria as outras fontes e o box
+    subiria sem credencial, com o registro pulado."""
+    monkeypatch.setenv("LINCE_AGENT_TOKEN", "")
+    monkeypatch.setenv("LINCE_BOOTSTRAP_TOKEN", "bs-do-env")
+    args = _args_de_credencial(tmp_path)
+    registrador = _Registrador()
+
+    assert args.api_token is None
+    assert cli._resolve_token(args, registrador) == "tok-registrado"
+    assert registrador.tokens == ["bs-do-env"]
+
+
+def test_registro_recusado_derruba_a_subida_com_a_mensagem_da_nuvem(tmp_path, monkeypatch, caplog):
+    """O instalador lê o log na loja. Precisa sair de lá sabendo que o conserto é gerar
+    outro token — e o agente não pode seguir adiante sem credencial."""
+    from lince_agent.registro import RegistroRecusado
+
+    monkeypatch.setattr(
+        cli, "registra", lambda *_a, **_k: (_ for _ in ()).throw(RegistroRecusado(409, "já usado"))
+    )
+    monkeypatch.setattr(cli, "_monta_config", lambda *_a, **_k: pytest.fail("seguiu adiante"))
+
+    with caplog.at_level("ERROR"):
+        codigo = cli.main(
+            [
+                "--config-nuvem",
+                "--clips-dir",
+                str(tmp_path / "clipes"),
+                "--bootstrap-token",
+                "bs-1",
+            ]
+        )
+
+    assert codigo == 2
+    assert "já usado" in caplog.text
+    assert "/box" in caplog.text
+    assert "bs-1" not in caplog.text
+
+
+def test_config_nuvem_sem_credencial_nenhuma_nao_sobe(tmp_path, monkeypatch, caplog):
+    """Sem credencial a nuvem responde 401 a tudo. Com um cache de configuração no
+    disco o agente subiria, detectaria e não entregaria evento nenhum: uma loja que
+    parece instalada. A recusa diz onde se gera o token."""
+    monkeypatch.delenv("LINCE_AGENT_TOKEN", raising=False)
+    monkeypatch.delenv("LINCE_BOOTSTRAP_TOKEN", raising=False)
+    monkeypatch.setattr(cli, "_monta_config", lambda *_a, **_k: pytest.fail("seguiu adiante"))
+
+    with caplog.at_level("ERROR"):
+        codigo = cli.main(["--config-nuvem", "--clips-dir", str(tmp_path / "clipes")])
+
+    assert codigo == 2
+    assert "LINCE_BOOTSTRAP_TOKEN" in caplog.text
+    assert "/box" in caplog.text
+
+
+def test_a_credencial_registrada_e_a_que_o_cliente_da_nuvem_usa(tmp_path, monkeypatch):
+    """Fecha o circuito: o token que saiu do registro é o `Bearer` do cliente que puxa
+    a configuração. Resolver certo e montar o cliente com outro campo daria um box
+    registrado que toma 401 em tudo."""
+    monkeypatch.setattr(cli, "registra", lambda *_a, **_k: _credencial_de_teste("tok-novo"))
+    visto = {}
+
+    def monta(_parser, args, cliente):
+        visto["args"] = args.api_token
+        visto["cliente"] = cliente._token
+        raise ValueError("chega: o teste só queria ver o cliente")
+
+    monkeypatch.setattr(cli, "_monta_config", monta)
+
+    codigo = cli.main(
+        ["--config-nuvem", "--clips-dir", str(tmp_path / "clipes"), "--bootstrap-token", "bs-1"]
+    )
+
+    assert codigo == 2
+    assert visto == {"args": "tok-novo", "cliente": "tok-novo"}

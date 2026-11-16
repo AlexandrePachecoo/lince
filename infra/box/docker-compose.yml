@@ -67,7 +67,16 @@ services:
       # O que é do box entra por ambiente (§5.2): onde está a nuvem, qual credencial,
       # qual Redis, onde pousou o modelo. Nada disso desce no documento de configuração.
       LINCE_API_URL: ${LINCE_API_URL:?defina LINCE_API_URL em .env}
-      LINCE_AGENT_TOKEN: ${LINCE_AGENT_TOKEN:?defina LINCE_AGENT_TOKEN em .env}
+      # A credencial (§5.1). Na instalação o `.env` traz só o token de bootstrap, de uso
+      # único, gerado no dashboard em /box: o agente o troca por credencial na primeira
+      # subida e a guarda em /var/lib/lince/clipes/credencial.json, no volume `estado`.
+      # Depois disso o token de bootstrap pode ficar no `.env` — é ignorado.
+      # Nenhuma das duas é obrigatória AQUI, de propósito: obrigar a de bootstrap
+      # impediria o box já registrado de subir sem ela, e obrigar a outra desfaria o
+      # registro. Quem recusa subir sem credencial nenhuma é o agente, com a mensagem
+      # que diz onde gerar o token. LINCE_AGENT_TOKEN é o atalho de desenvolvimento.
+      LINCE_BOOTSTRAP_TOKEN: ${LINCE_BOOTSTRAP_TOKEN:-}
+      LINCE_AGENT_TOKEN: ${LINCE_AGENT_TOKEN:-}
       LINCE_REDIS_URL: ${LINCE_REDIS_URL:-redis://redis:6379/0}
       LINCE_MODEL_PATH: /modelos/${LINCE_MODELO:-yolox_s.onnx}
     volumes:

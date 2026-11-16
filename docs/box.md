@@ -83,7 +83,7 @@ cd /opt/lince
 curl -fsSLO https://raw.githubusercontent.com/AlexandrePachecoo/lince/main/infra/box/docker-compose.yml
 curl -fsSL  https://raw.githubusercontent.com/AlexandrePachecoo/lince/main/infra/box/.env.example -o .env
 chmod 600 .env
-$EDITOR .env        # LINCE_VERSAO, LINCE_API_URL, LINCE_AGENT_TOKEN
+$EDITOR .env        # LINCE_VERSAO, LINCE_API_URL, LINCE_BOOTSTRAP_TOKEN
 
 # o modelo, conferido pelo checksum — o mesmo do scripts/modelo.sh
 curl -fL -o modelos/yolox_s.onnx \
@@ -103,16 +103,35 @@ A imagem não carrega credencial nem modelo, e o código já é público; tornar
 público (Settings do pacote no GitHub → *Change visibility*) dispensa esse passo em
 todo box.
 
-O token do agente (`LINCE_AGENT_TOKEN`) hoje é provisionado à mão. As duas pontas da
-nuvem já existem — o admin da loja gera o token de bootstrap no dashboard, em `/box`, e o
-`POST /v1/agents/register` o troca por credencial —, mas o lado do agente que faz essa
-troca na subida ainda não (§5.1). Até lá, o token de `/box` se troca por `curl`, e o
-`token` da resposta é o `LINCE_AGENT_TOKEN`:
+### A credencial do box
 
-```bash
-curl -s -X POST "$LINCE_API_URL/v1/agents/register" -H 'content-type: application/json' \
-  -d '{"schema_version":1,"bootstrap_token":"<token de /box>"}'
-```
+O box não recebe credencial pronta: recebe um **token de instalação** e se registra
+sozinho (§5.1).
+
+1. No dashboard, o admin da loja abre `/box` e toca em **Gerar token**. A tela mostra a
+   linha `LINCE_BOOTSTRAP_TOKEN=...` uma única vez; ela vale 24 h e serve para um box só.
+2. Cole a linha no `.env`.
+3. Na primeira subida o agente troca o token pela credencial e a guarda em
+   `credencial.json`, no volume `estado`, ao lado dos clipes. O log diz
+   `agente <id> registrado na loja <loja>`.
+
+Daí em diante o token do `.env` é ignorado — pode ficar lá. Reinício, queda de energia e
+atualização de imagem usam a credencial guardada.
+
+O que pode dar errado, e o que o log diz em cada caso:
+
+| No log | O que houve | O que fazer |
+|---|---|---|
+| `a nuvem recusou o token de bootstrap (401: ... expirado)` | Passaram as 24 h, ou alguém gerou outro token para a loja | Gerar outro em `/box` e trocar no `.env` |
+| `(409: ... já foi usado)` | O token já virou a credencial de um box — este mesmo, se o volume foi apagado | Idem |
+| `(401: ... não reconhecido)` | A linha foi colada pela metade, ou `LINCE_API_URL` aponta para outra nuvem | Conferir os dois |
+| `não consegui registrar o agente em 5 tentativas` | Sem link, ou `LINCE_API_URL` errada. O token **não** foi gasto | Consertar e esperar: o Docker reinicia o agente |
+| `não dá para gravar em ...` | O volume não aceita escrita. O token **não** foi gasto | Consertar o volume e subir de novo |
+| `sem credencial` | Nem token no `.env`, nem credencial no volume | Gerar o token em `/box` |
+
+A credencial existe **só** no volume `estado`: a nuvem guarda o hash e não a devolve.
+`docker compose down -v` a apaga junto com a fila e os clipes, e o box precisa de um token
+novo. Cada registro cria um agente novo na nuvem e não desativa o anterior.
 
 ### Subir
 

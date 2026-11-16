@@ -33,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -55,6 +56,7 @@ from lince_agent.config import (
 from lince_agent.config_cache import ConfigCache
 from lince_agent.config_loader import ConfigError, carrega_arquivo, monta_config
 from lince_agent.config_poller import ConfigPoller, ConfigPollerStats
+from lince_agent.credencial import CofreDeCredencial, Credencial
 from lince_agent.detect.state import DetectorStats
 from lince_agent.ffmpeg.capabilities import select_hwaccel
 from lince_agent.ffmpeg.probe import ProbeError, probe_stream
@@ -68,6 +70,7 @@ from lince_agent.outbox.policy import ConfigOutcome, classify_config_response
 from lince_agent.outbox.state import OutboxStats
 from lince_agent.outbox.store import MemoryOutbox, OutboxStore
 from lince_agent.pose.onnx import ModelError as PoseModelError
+from lince_agent.registro import RegistroError, registra
 from lince_agent.rules.geometry import LinhaOrientada, Poligono
 from lince_agent.rules.state import RuleStats
 from lince_agent.runtime import AgentHealth, AgentRuntime, ConfigHealth, PoseHealth
@@ -183,7 +186,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("LINCE_API_URL", CloudOptions().api_url),
         help="control plane (§5.2)",
     )
-    estagio6.add_argument("--api-token", default=os.environ.get("LINCE_AGENT_TOKEN"))
+    estagio6.add_argument(
+        "--api-token",
+        default=os.environ.get("LINCE_AGENT_TOKEN") or None,
+        help="credencial pronta; atalho de desenvolvimento, e vence as outras duas fontes",
+    )
+    estagio6.add_argument(
+        "--bootstrap-token",
+        default=os.environ.get("LINCE_BOOTSTRAP_TOKEN") or None,
+        help="token de uso único gerado no dashboard, em /box (§5.1). Trocado por "
+        "credencial na primeira subida e ignorado depois que ela existe",
+    )
+    estagio6.add_argument(
+        "--credencial",
+        type=Path,
+        metavar="ARQUIVO",
+        help="onde guardar a credencial que o registro devolve; default: "
+        "credencial.json ao lado de --clips-dir. É o único lugar onde ela existe",
+    )
     estagio6.add_argument(
         "--config-cache",
         type=Path,
@@ -517,6 +537,72 @@ def _opcoes_do_box(args: argparse.Namespace) -> dict[str, object]:
         "model_path": args.model,
         "providers": tuple(args.providers) if args.providers else None,
     }
+
+
+def _caminho_da_credencial(args: argparse.Namespace) -> Path:
+    """Ao lado dos clipes, como o cache de configuração e pelo mesmo motivo: é o
+    diretório que no box mora num volume e sobrevive a troca de imagem (§3.8)."""
+    return args.credencial or (args.clips_dir / "credencial.json")
+
+
+def _resolve_token(
+    args: argparse.Namespace, registrador: Callable[[str], Credencial] | None = None
+) -> str | None:
+    """O token com que o agente fala com a nuvem, pela ordem da §5.1.
+
+    1. `--api-token`: quem passa a credencial pronta sabe o que quer. É o atalho de
+       desenvolvimento, e vencer as outras fontes é o que o mantém previsível.
+    2. A credencial guardada. **Antes** do token de bootstrap, e não depois: o token
+       fica no `.env` para sempre, a nuvem o recusa a partir do segundo uso, e um
+       agente que o tentasse a cada subida morreria no primeiro reinício.
+    3. O token de bootstrap, trocado agora e guardado.
+
+    `None` é "nenhuma das três". Levanta `RegistroError` se a troca falhar — e também
+    se não der para guardar o resultado, conferido antes de gastar o token.
+    """
+    if args.api_token:
+        return args.api_token
+
+    cofre = CofreDeCredencial(_caminho_da_credencial(args))
+    guardada = cofre.le()
+    if guardada is not None:
+        log.info(
+            "credencial do agente %s (loja %s) lida de %s",
+            guardada.agent_id,
+            guardada.store_id,
+            cofre.caminho,
+        )
+        return guardada.token
+
+    if not args.bootstrap_token:
+        return None
+
+    if not cofre.pode_gravar():
+        raise RegistroError(
+            f"não dá para gravar em {cofre.caminho}, e a credencial só é entregue uma "
+            "vez. O token de bootstrap NÃO foi usado: conserte o volume e suba de novo"
+        )
+    if registrador is None:
+        cliente = HttpCloudClient(args.api_url, timeout_s=CloudOptions().timeout_s)
+        credencial = registra(cliente, args.bootstrap_token)
+    else:
+        credencial = registrador(args.bootstrap_token)
+    log.info(
+        "agente %s registrado na loja %s (tenant %s)",
+        credencial.agent_id,
+        credencial.store_id,
+        credencial.tenant_id,
+    )
+    if not cofre.grava(credencial):
+        # `pode_gravar` passou e a gravação falhou: disco encheu no meio. O agente
+        # segue com a credencial na memória, que é melhor do que parar — mas o próximo
+        # reinício não a encontra, e o token de bootstrap já foi.
+        log.error(
+            "a credencial NÃO ficou guardada em %s: este agente funciona até reiniciar, "
+            "e depois precisa de um token de bootstrap novo",
+            cofre.caminho,
+        )
+    return credencial.token
 
 
 def _caminho_do_cache(args: argparse.Namespace) -> Path:
@@ -954,6 +1040,23 @@ def main(argv: list[str] | None = None) -> int:
     # quem a traz. Tudo de que precisa vem das flags do box, não do documento — que é
     # exatamente a divisão da §5.2: uma resposta HTTP não repointa o endereço para onde
     # o agente vai pedir a próxima.
+    try:
+        # Daqui em diante `args.api_token` é a credencial resolvida, venha de onde vier:
+        # o cliente abaixo, o `CloudOptions` e o poller leem o mesmo campo.
+        args.api_token = _resolve_token(args)
+    except RegistroError as erro:
+        log.error("registro do agente: %s", erro)
+        return 2
+    if args.config_nuvem and args.api_token is None:
+        # Recusa em vez de subir: sem credencial a nuvem responde 401 a tudo, e com um
+        # cache de configuração no disco o agente subiria, detectaria e não entregaria
+        # nenhum evento — uma loja que parece instalada.
+        log.error(
+            "sem credencial: gere o token de instalação no dashboard, em /box, e ponha "
+            "em LINCE_BOOTSTRAP_TOKEN (ou passe --api-token em desenvolvimento)"
+        )
+        return 2
+
     api = HttpCloudClient(
         args.api_url,
         token=args.api_token,
