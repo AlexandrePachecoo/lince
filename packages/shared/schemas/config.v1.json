@@ -188,7 +188,23 @@
           "description": "Índices COCO de interesse; 0 é `person`. As outras 79 seriam inferência paga e descartada três estágios depois."
         },
         "queue_size": { "type": "integer", "minimum": 1 },
-        "fps_window": { "type": "integer", "minimum": 2 }
+        "fps_window": { "type": "integer", "minimum": 2 },
+        "portao_movimento": {
+          "type": "boolean",
+          "description": "Só infere quando a câmera mostra movimento ou tem track vivo (ADR-012). Com ele, `inference_fps` de uma câmera saudável numa loja vazia fica perto de zero — é o que faz três câmeras caberem num mini PC sem placa."
+        },
+        "movimento_min": {
+          "$ref": "#/$defs/fracao",
+          "description": "Fração das amostras do frame que precisa mudar para contar como movimento."
+        },
+        "movimento_retencao_s": {
+          "$ref": "#/$defs/nao_negativo",
+          "description": "Segundos que o portão continua aberto depois do último movimento, mesmo sem track: cobre quem entrou e o tracking ainda não confirmou."
+        },
+        "vigia_s": {
+          "$ref": "#/$defs/positivo",
+          "description": "Com o portão fechado, uma inferência a cada `vigia_s` mesmo assim — acha quem já estava imóvel no quadro."
+        }
       }
     },
     "tracking": {

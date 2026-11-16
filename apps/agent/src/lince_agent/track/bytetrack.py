@@ -264,6 +264,11 @@ class ByteTracker:
     # --- observação ---------------------------------------------------------
 
     @property
+    def tem_tracks(self) -> bool:
+        """Sem congelar nada: o portão pergunta isto a cada frame."""
+        return bool(self._tracks)
+
+    @property
     def vivos(self) -> tuple[Track, ...]:
         agora = self._ultimo_at or 0.0
         return tuple(track.congela(self.camera_id, agora) for track in self._tracks)

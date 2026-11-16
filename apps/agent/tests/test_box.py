@@ -5,9 +5,14 @@ o resto da suíte. O que se testa é o que está ESCRITO em `infra/box/` e no Do
 porque cada uma destas linhas, se sumir, não dá erro: o box sobe, o heartbeat chega
 verde, e a loja passa a operar degradada até alguém olhar a métrica certa.
 
-O que estes testes não cobrem, e quem cobre: que a imagem constrói, que o
-`onnxruntime-gpu` carrega o provider de CUDA dentro dela e que o ffmpeg dela lista
-`cuda` em `-hwaccels`. Isso exige construir a imagem, e é o job `imagem` do CI.
+São dois boxes (ADR-012): o padrão, sem placa — `docker-compose.yml` e
+`Dockerfile.cpu`, com OpenVINO —, e o com placa NVIDIA, que acrescenta
+`docker-compose.gpu.yml` e usa o `Dockerfile` CUDA.
+
+O que estes testes não cobrem, e quem cobre: que as imagens constroem, que o
+`onnxruntime-gpu` carrega o provider de CUDA, que o `onnxruntime-openvino` lista o do
+OpenVINO e que o ffmpeg da imagem CUDA lista `cuda` em `-hwaccels`. Isso exige construir
+as imagens, e é o job `imagem` do CI.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from lince_agent.config import ClipOptions, SupervisionOptions
 RAIZ = Path(__file__).resolve().parents[3]
 BOX = RAIZ / "infra" / "box"
 DOCKERFILE = RAIZ / "apps" / "agent" / "Dockerfile"
+DOCKERFILE_CPU = RAIZ / "apps" / "agent" / "Dockerfile.cpu"
 
 
 def _carrega(nome: str) -> dict:
@@ -36,15 +42,29 @@ def box() -> dict:
 
 
 @pytest.fixture(scope="module")
+def gpu() -> dict:
+    return _carrega("docker-compose.gpu.yml")
+
+
+@pytest.fixture(scope="module")
 def dev() -> dict:
     return _carrega("docker-compose.dev.yml")
 
 
-@pytest.fixture(scope="module")
-def dockerfile() -> str:
+def _le_dockerfile(caminho: Path) -> str:
     # Junta as continuações de linha: um `ENV A=1 \` seguido de `    B=2` é uma
     # instrução só, e é assim que o Docker a lê.
-    return DOCKERFILE.read_text(encoding="utf-8").replace("\\\n", " ")
+    return caminho.read_text(encoding="utf-8").replace("\\\n", " ")
+
+
+@pytest.fixture(scope="module")
+def dockerfile() -> str:
+    return _le_dockerfile(DOCKERFILE)
+
+
+@pytest.fixture(scope="module")
+def dockerfile_cpu() -> str:
+    return _le_dockerfile(DOCKERFILE_CPU)
 
 
 def _instrucoes(dockerfile: str, nome: str) -> list[str]:
@@ -155,31 +175,65 @@ def test_modelo_vem_de_uma_montagem_so_leitura_no_caminho_que_o_agente_le(box):
     alerta nenhum e com heartbeat verde. E a montagem é `:ro` porque o modelo é o
     único arquivo que o box não consegue refazer sem internet (ADR-006)."""
     agente = box["services"]["agente"]
-    modelo = agente["environment"]["LINCE_MODEL_PATH"]
-
     montagens_ro = [destino for _, destino, modo in _montagens(agente) if modo == "ro"]
-    assert any(modelo.startswith(destino + "/") for destino in montagens_ro), (
-        f"LINCE_MODEL_PATH={modelo} não está dentro de uma montagem só leitura"
-    )
+
+    # O override da GPU troca o modelo e herda as montagens do arquivo base.
+    modelo_gpu = _carrega("docker-compose.gpu.yml")["services"]["agente"]["environment"]
+    for modelo in (agente["environment"]["LINCE_MODEL_PATH"], modelo_gpu["LINCE_MODEL_PATH"]):
+        assert any(modelo.startswith(destino + "/") for destino in montagens_ro), (
+            f"LINCE_MODEL_PATH={modelo} não está dentro de uma montagem só leitura"
+        )
 
 
-def test_gpu_reservada_com_a_capacidade_de_video(box):
+def test_box_padrao_nao_reserva_placa_nenhuma(box):
+    """O box de referência é o mini PC sem placa (ADR-012). Uma reserva `nvidia` aqui faz
+    o `up` recusar com `could not select device driver "nvidia"` num host sem o NVIDIA
+    Container Toolkit — o box nem sobe. A placa mora no docker-compose.gpu.yml."""
+    assert "deploy" not in box["services"]["agente"]
+
+
+def test_box_padrao_roda_a_imagem_de_cpu_com_o_modelo_pequeno(box):
+    """Imagem de CUDA num mini PC roda — em CPU pura, sem o OpenVINO, e com o YOLOX-s
+    que não cabe em três câmeras (tools/bench_deteccao.py). Sem erro nenhum: a loja
+    descarta frame o dia inteiro com o heartbeat verde (R-4)."""
+    agente = box["services"]["agente"]
+    assert "/lince-agent-cpu}:" in agente["image"]
+    assert agente["environment"]["LINCE_MODEL_PATH"].endswith("${LINCE_MODELO:-yolox_tiny.onnx}")
+
+
+def test_override_da_gpu_troca_imagem_modelo_e_dockerfile_juntos(gpu):
+    """As três coisas andam juntas. A imagem CUDA com o tiny desperdiça a placa; a de CPU
+    com a placa reservada roda em CPU com a placa ociosa; e o build de desenvolvimento
+    com o Dockerfile de CPU entregaria a segunda sem ninguém notar."""
+    agente = gpu["services"]["agente"]
+    assert "/lince-agent}:" in agente["image"]
+    assert agente["environment"]["LINCE_MODEL_PATH"].endswith("${LINCE_MODELO:-yolox_s.onnx}")
+    assert agente["build"]["dockerfile"] == "apps/agent/Dockerfile"
+
+
+def test_override_de_dev_constroi_o_box_de_referencia(dev):
+    """Sem placa por padrão também no desenvolvimento: é o box que vai para a loja."""
+    assert dev["services"]["agente"]["build"]["dockerfile"] == "apps/agent/Dockerfile.cpu"
+
+
+def test_gpu_reservada_com_a_capacidade_de_video(gpu):
     """`video` é o que faz o NVIDIA Container Toolkit montar a `libnvcuvid.so` — o
     NVDEC. Sem ela a inferência continua na GPU, o `-hwaccel cuda` falha, e o §3.1
     cai para decode em CPU como foi desenhado para cair: N streams decodificados na
     CPU, sem um erro em lugar nenhum (R-4)."""
-    dispositivos = box["services"]["agente"]["deploy"]["resources"]["reservations"]["devices"]
+    dispositivos = gpu["services"]["agente"]["deploy"]["resources"]["reservations"]["devices"]
     nvidia = [d for d in dispositivos if d.get("driver") == "nvidia"]
 
     assert nvidia, "o agente não reserva GPU NVIDIA nenhuma"
     assert {"gpu", "video"} <= set(nvidia[0]["capabilities"])
 
 
-def test_imagem_do_agente_tem_versao_fixa_e_obrigatoria(box):
+@pytest.mark.parametrize("arquivo", ["docker-compose.yml", "docker-compose.gpu.yml"])
+def test_imagem_do_agente_tem_versao_fixa_e_obrigatoria(arquivo: str):
     """`latest` faria cada loja rodar a versão do dia em que reiniciou. O R-7 pede o
     contrário: saber exatamente o que roda em cada box e subir uma loja piloto antes
-    das outras. A versão vem do `.env` do box e é obrigatória (`:?`)."""
-    imagem = box["services"]["agente"]["image"]
+    das outras. A versão vem do `.env` do box e é obrigatória (`:?`) — nos dois boxes."""
+    imagem = _carrega(arquivo)["services"]["agente"]["image"]
 
     assert "latest" not in imagem
     assert re.search(r":\$\{LINCE_VERSAO:\?[^}]*\}$", imagem), (
@@ -286,3 +340,88 @@ def test_toda_sincronizacao_da_imagem_usa_o_grupo_gpu_e_nunca_o_padrao(dockerfil
         assert "--group gpu" in comando, comando
         assert "--frozen" in comando, comando
     assert not [c for c in comandos if "uv run" in c]
+
+
+def test_toda_sincronizacao_da_imagem_de_cpu_usa_o_grupo_openvino(dockerfile_cpu):
+    """O mesmo erro da imagem CUDA, do outro lado: `cpu` e `openvino` escrevem o mesmo
+    módulo `onnxruntime`. Com o padrão junto, o que sobra importa sem erro e pode não
+    ter o provider do OpenVINO — o mini PC roda de 20% a 50% mais devagar sem aviso."""
+    comandos = _instrucoes(dockerfile_cpu, "RUN")
+    sincronizacoes = [c for c in comandos if "uv sync" in c]
+
+    assert sincronizacoes, "a imagem não instala dependência nenhuma pelo uv"
+    for comando in sincronizacoes:
+        assert "--no-default-groups" in comando, comando
+        assert "--group openvino" in comando, comando
+        assert "--group gpu" not in comando, comando
+        assert "--frozen" in comando, comando
+    assert not [c for c in comandos if "uv run" in c]
+
+
+def test_imagem_de_cpu_nao_parte_do_cuda(dockerfile_cpu):
+    """A base CUDA são gigabytes que o mini PC baixa a cada atualização e nunca usa."""
+    bases = _instrucoes(dockerfile_cpu, "FROM")
+    assert bases[0].startswith("ubuntu:24.04"), bases[0]
+    assert not [b for b in bases if "nvidia" in b or "cuda" in b]
+
+
+@pytest.mark.parametrize("caminho", [DOCKERFILE, DOCKERFILE_CPU], ids=["cuda", "cpu"])
+def test_estagio_de_teste_leva_tudo_que_test_box_le(caminho: Path):
+    """A suíte roda dentro das duas imagens, e este arquivo lê os composes e os dois
+    Dockerfiles. Um que falte no `COPY` derruba o build da imagem no CI com um
+    `FileNotFoundError` que parece problema da imagem e não do teste."""
+    copiados = " ".join(_instrucoes(_le_dockerfile(caminho), "COPY"))
+    for arquivo in (
+        "infra/box/docker-compose.yml",
+        "infra/box/docker-compose.gpu.yml",
+        "infra/box/docker-compose.dev.yml",
+        "infra/box/.env.example",
+        "apps/agent/Dockerfile ",
+        "apps/agent/Dockerfile.cpu ",
+        "apps/agent/Dockerfile.dockerignore",
+        "apps/agent/Dockerfile.cpu.dockerignore",
+    ):
+        assert arquivo in copiados + " ", f"{caminho.name} não copia {arquivo.strip()}"
+
+
+def _origens_copiadas(dockerfile: str) -> list[str]:
+    """As origens de cada `COPY` que lê do contexto (sem `--from`), relativas à raiz."""
+    origens = []
+    for instrucao in _instrucoes(dockerfile, "COPY"):
+        partes = [p for p in instrucao.split() if not p.startswith("--")]
+        if "--from=" in instrucao:
+            continue
+        origens.extend(partes[:-1])
+    return origens
+
+
+def _permitido(caminho: str, regras: list[str]) -> bool:
+    """A semântica do `.dockerignore` no que estas listas usam: a última regra que casa
+    vence, `*` exclui tudo, `!x` devolve `x` e tudo abaixo dele."""
+    permitido = True
+    for regra in regras:
+        negada = regra.startswith("!")
+        padrao = regra[1:] if negada else regra
+        if padrao == "*" or caminho == padrao or caminho.startswith(padrao + "/"):
+            permitido = negada
+    return permitido
+
+
+@pytest.mark.parametrize("caminho", [DOCKERFILE, DOCKERFILE_CPU], ids=["cuda", "cpu"])
+def test_contexto_do_build_entrega_tudo_que_o_dockerfile_copia(caminho: Path):
+    """O contexto é a raiz do repositório, filtrado por uma lista de PERMISSÃO ao lado de
+    cada Dockerfile (`<nome>.dockerignore`). Arquivo copiado e não permitido derruba o
+    build no CI com "not found". E Dockerfile sem a própria lista manda o repositório
+    inteiro como contexto — `.env` de verdade incluído, a um `COPY . .` de uma imagem
+    pública."""
+    ignore = caminho.with_name(caminho.name + ".dockerignore")
+    assert ignore.is_file(), f"{caminho.name} sem {ignore.name}: o contexto seria o repo inteiro"
+
+    regras = [
+        linha.strip()
+        for linha in ignore.read_text(encoding="utf-8").splitlines()
+        if linha.strip() and not linha.strip().startswith("#")
+    ]
+    assert regras[0] == "*", "a lista tem que começar excluindo tudo"
+    for origem in _origens_copiadas(_le_dockerfile(caminho)):
+        assert _permitido(origem, regras), f"{ignore.name} não deixa passar {origem}"

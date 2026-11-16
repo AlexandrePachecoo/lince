@@ -58,8 +58,21 @@ A_QUENTE: dict[str, frozenset[str]] = {
         }
     ),
     # Lidos a cada `detect()` em `OnnxDetector`, depois da inferência. Trocar o objeto
-    # de opções vale a partir do frame seguinte.
-    "detection": frozenset({"score_threshold", "iou_threshold", "classes"}),
+    # de opções vale a partir do frame seguinte. Os do portão de movimento são lidos a
+    # cada frame pelo `DetectorWorker`, antes da inferência: ligá-lo ou desligá-lo não
+    # toca na sessão do ONNX Runtime nem em estado nenhum que valha a pena preservar —
+    # na pior hipótese, o primeiro frame depois da troca abre como vigia.
+    "detection": frozenset(
+        {
+            "score_threshold",
+            "iou_threshold",
+            "classes",
+            "portao_movimento",
+            "movimento_min",
+            "movimento_retencao_s",
+            "vigia_s",
+        }
+    ),
     # Lidos a cada `update()` em `ByteTracker`: são limiares de associação, não estado.
     # Os tracks vivos continuam válidos, com o Kalman intacto.
     "tracking": frozenset(

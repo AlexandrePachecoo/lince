@@ -15,6 +15,11 @@ já deixa o terreno pronto.
 
 O que sai daqui não vira evento. Vai para `on_result`, que hoje é um contador e amanhã é
 o tracking do §3.3.
+
+**O portão de movimento mora aqui, na thread de detecção, e não no `submit`.** O
+`submit` roda na thread despachante do ffmpeg e não pode gastar nada; o portão custa
+pouco, mas é custo por frame, e a fila já descarta o excedente antes dele. Do lado de
+cá ele ainda consulta o tracking sem lock, porque o tracking também roda nesta thread.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from dataclasses import dataclass, field
 
 from lince_agent.config import DetectionOptions
 from lince_agent.detect.detector import Detector
+from lince_agent.detect.movimento import PortaoMovimento
 from lince_agent.detect.state import CameraDetectionStats, DetectionResult, DetectorStats
 from lince_agent.ffmpeg.queues import DropOldestQueue
 from lince_agent.ffmpeg.rawframe import Frame
@@ -56,6 +62,7 @@ class _Contador:
     errors: int = 0
     last_inference_ms: float = 0.0
     last_frame_at: float | None = None
+    gated: int = 0
     marcos: deque[float] = field(default_factory=deque)
     """Instantes das últimas inferências, para o `inference_fps` em janela deslizante."""
 
@@ -69,12 +76,17 @@ class DetectorWorker:
         *,
         options: DetectionOptions | None = None,
         on_result: Callable[[DetectionResult], None] | None = None,
+        tem_track: Callable[[str], bool] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._detector = detector
         self._options = options or DetectionOptions()
         self._on_result = on_result
+        self._tem_track = tem_track or (lambda _camera_id: False)
+        """Se o tracking da câmera tem algum track vivo. Sem tracking, nunca tem — e o
+        portão passa a depender só de movimento, retenção e vigia."""
         self._clock = clock
+        self._portao = PortaoMovimento()
 
         self._fila: DropOldestQueue[_Pedido] = DropOldestQueue(self._options.queue_size)
         self._lock = threading.Lock()
@@ -110,6 +122,16 @@ class DetectorWorker:
             if thread.is_alive():
                 log.warning("thread de detecção não terminou em %.1fs", timeout)
         self._detector.close()
+
+    def reconfigure(self, options: DetectionOptions) -> None:
+        """Troca os limiares com o agente em pé (§5.2): os do portão, lidos aqui a cada
+        frame, e os do pós-processamento, repassados ao detector.
+
+        `queue_size` e `fps_window` não mudam com isto — a fila e a janela já foram
+        dimensionadas, e o `config_diff` os classifica como estruturais.
+        """
+        self._options = options
+        self._detector.reconfigure(options)
 
     # --- entrada ------------------------------------------------------------
 
@@ -148,6 +170,11 @@ class DetectorWorker:
         return True
 
     def _infere(self, pedido: _Pedido) -> None:
+        if not self._portao_abre(pedido):
+            with self._lock:
+                self._cameras.setdefault(pedido.camera_id, _Contador()).gated += 1
+            return
+
         inicio = self._clock()
         try:
             deteccoes = self._detector.detect(pedido.frame)
@@ -190,6 +217,28 @@ class DetectorWorker:
             with self._lock:
                 self._errors += 1
 
+    def _portao_abre(self, pedido: _Pedido) -> bool:
+        """Se este frame vai para o detector. Com o portão desligado, sempre.
+
+        Uma falha do portão abre, não fecha. Portão fechado com alguém na loja não deixa
+        rastro nenhum — nem caixa, nem track, nem evento —, e o outro lado do erro custa
+        só uma inferência.
+        """
+        opcoes = self._options
+        if not opcoes.portao_movimento:
+            return True
+        try:
+            abertura = self._portao.avalia(
+                pedido.camera_id,
+                pedido.frame,
+                tem_track=self._tem_track(pedido.camera_id),
+                options=opcoes,
+            )
+        except Exception:
+            log.exception("portão de movimento falhou na câmera %s; inferindo", pedido.camera_id)
+            return True
+        return abertura.infere
+
     # --- observação ---------------------------------------------------------
 
     def stats(self) -> DetectorStats:
@@ -206,6 +255,7 @@ class DetectorWorker:
                     last_inference_ms=contador.last_inference_ms,
                     inference_fps=_fps(contador.marcos, agora),
                     last_frame_at=contador.last_frame_at,
+                    gated=contador.gated,
                 )
                 for camera_id, contador in sorted(self._cameras.items())
             )

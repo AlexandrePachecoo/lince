@@ -11,10 +11,16 @@
 # Só o estágio `teste` lê estes, cada um no mesmo lugar relativo em que está no repo:
 # o exemplo de configuração (tests/test_config_loader.py e test_contrato_config.py
 # conferem que ele carrega e valida), o compose do box e o próprio Dockerfile
-# (tests/test_box.py).
+# (tests/test_box.py). Os dois Dockerfiles e os três composes, porque test_box.py
+# confere os dois boxes nas duas imagens — e `tests/test_box.py` falha se esta lista
+# deixar de fora algo que o Dockerfile copia.
 !apps/agent/config.exemplo.json
 !apps/agent/Dockerfile
+!apps/agent/Dockerfile.cpu
+!apps/agent/Dockerfile.dockerignore
+!apps/agent/Dockerfile.cpu.dockerignore
 !infra/box/docker-compose.yml
+!infra/box/docker-compose.gpu.yml
 !infra/box/docker-compose.dev.yml
 # O `.env.example`, e só ele: é o arquivo que o instalador copia, sem valor real
 # dentro, e tests/test_box.py confere o que ele pede. O `.env` de verdade continua fora.

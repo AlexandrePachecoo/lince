@@ -28,11 +28,29 @@ MODELO_URL="https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.
 MODELO_SHA="c5c2d13e59ae883e6af3b45daea64af4833a4951c92d116ec270d9ddbe998063"
 MODELO_DEST="apps/agent/models/yolox_s.onnx"
 
+# As duas variantes pequenas, para o box sem placa de vídeo (ADR-012, §3.2). Mesma
+# família, mesma licença e mesma convenção de entrada do YOLOX-s; o que muda é a
+# entrada de 416 — por isso o agente sobe com `--input-size 416` para elas.
+#
+# Medido no vídeo de teste a 3 fps, numa CPU Xeon de 4 núcleos, contra o YOLOX-s:
+#   tiny  ~27 ms/frame, acha 93% das pessoas que o s acha
+#   nano  ~11 ms/frame, acha 78%
+#   s     ~71 ms/frame
+# O tiny é o padrão do box em CPU; o nano é a reserva para máquina muito fraca.
+TINY_URL="https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.onnx"
+TINY_SHA="427cc366d34e27ff7a03e2899b5e3671425c262ea2291f88bb942bc1cc70b0f7"
+TINY_DEST="apps/agent/models/yolox_tiny.onnx"
+NANO_URL="https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_nano.onnx"
+NANO_SHA="c789161ed43c8269fcd4e67c67eeeb4e80c622da2eb296a20bc6007bd18a0b7d"
+NANO_DEST="apps/agent/models/yolox_nano.onnx"
+
 # Vídeo com pessoas andando e cruzando o quadro. `testsrc2` das cam1 e cam2 é padrão
 # de barras: o detector não tem o que achar ali, e um teste de detecção contra barras
 # de cor não significa nada. É este vídeo que a cam3 publica, e é ele que o tracking
 # (§3.3) e o motor de regras (§3.4) vão precisar depois — os dois querem movimento.
-VIDEO_URL="https://github.com/intel-iot-devkit/sample-videos/raw/master/people-detection.mp4"
+# Pelo host de conteúdo, e não por `github.com/.../raw/...`: o segundo é só um
+# redirecionamento para o primeiro, e há proxy de rede que recusa o redirecionamento.
+VIDEO_URL="https://raw.githubusercontent.com/intel-iot-devkit/sample-videos/master/people-detection.mp4"
 VIDEO_SHA="18ffe8672d741e3e29c9d891d22c59d453720b086c25b35c88b393d55f92f693"
 VIDEO_DEST="infra/videos/pessoas.mp4"
 
@@ -70,6 +88,8 @@ baixa() {
 }
 
 baixa "$MODELO_URL" "$MODELO_DEST" "$MODELO_SHA" "modelo YOLOX-s"
+baixa "$TINY_URL" "$TINY_DEST" "$TINY_SHA" "modelo YOLOX-tiny"
+baixa "$NANO_URL" "$NANO_DEST" "$NANO_SHA" "modelo YOLOX-nano"
 baixa "$VIDEO_URL" "$VIDEO_DEST" "$VIDEO_SHA" "vídeo de teste"
 
 cat <<'FIM'
@@ -81,4 +101,8 @@ Pronto. Agora dá para:
 
   uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 \
     --model models/yolox_s.onnx --stats
+
+  # o box sem placa: modelo pequeno, entrada de 416
+  uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 \
+    --model models/yolox_tiny.onnx --input-size 416 --stats
 FIM

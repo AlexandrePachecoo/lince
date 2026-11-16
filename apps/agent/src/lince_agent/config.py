@@ -324,14 +324,31 @@ class DetectionOptions:
     """Arquivo `.onnx`. Hoje vem da configuração local; o `GET /v1/models/current` do
     §5.2 vai entregar este arquivo com checksum e versão (ADR-006)."""
 
-    input_size: int = 640
-    """Lado do quadrado que o modelo consome. É conferido contra a forma declarada no
-    próprio `.onnx` na subida — divergir aqui decodifica caixas plausíveis e erradas."""
+    input_size: int | None = None
+    """Lado do quadrado que o modelo consome. `None` — o padrão — é "o que o `.onnx`
+    declara", e é o certo quase sempre: o arquivo do modelo é do box, não da loja
+    (§5.2), e o box sem placa roda o YOLOX-tiny de 416 enquanto o com placa roda o s de
+    640 (ADR-012). Um número fixo vindo do documento da nuvem faria um dos dois recusar
+    a subida.
 
-    providers: tuple[str, ...] = ("CUDAExecutionProvider", "CPUExecutionProvider")
+    Quando o documento diz um número, ele é conferido contra a forma declarada no
+    `.onnx` — divergir decodifica caixas plausíveis e erradas. Só um `.onnx` de entrada
+    dinâmica *precisa* do número, e sem ele é recusado na subida."""
+
+    providers: tuple[str, ...] = (
+        "CUDAExecutionProvider",
+        "OpenVINOExecutionProvider",
+        "CPUExecutionProvider",
+    )
     """Ordem de preferência do ONNX Runtime. É esta lista que implementa o fallback do
     §3.2 sem nenhum `if gpu`: num box sem placa, ou com o driver quebrado, o runtime
-    simplesmente cai para o próximo da lista e o heartbeat reporta qual pegou (§10.10)."""
+    simplesmente cai para o próximo da lista e o heartbeat reporta qual pegou (§10.10).
+
+    O OpenVINO vem antes da CPU pura porque o box de referência agora é um mini PC Intel
+    sem placa (ADR-012), e nele o mesmo `.onnx` roda de 20% a 50% mais rápido (medido com
+    o YOLOX-tiny e o nano). Cada imagem instala um pacote só (`cpu`, `gpu` ou `openvino`,
+    no `pyproject.toml`), e o que não está instalado sai da lista antes de abrir a sessão
+    — então a mesma lista serve às três sem `if` nenhum."""
 
     score_threshold: float = 0.10
     """**Piso**, não o limiar de decisão. Abaixo disto a caixa não vale nada para
@@ -360,10 +377,32 @@ class DetectionOptions:
     """Inferências consideradas no cálculo de `inference_fps`. Janela, e não média
     desde a subida, para uma degradação recente aparecer no heartbeat."""
 
+    portao_movimento: bool = False
+    """Só infere quando a câmera mostra movimento ou tem track vivo (ADR-012,
+    `detect/movimento.py`). É o que faz três câmeras caberem num mini PC sem placa: a
+    loja passa a maior parte do dia vazia.
+
+    Desligado por padrão porque muda o que `inference_fps` significa — com o portão, uma
+    câmera saudável numa loja vazia reporta perto de zero — e quem lê o heartbeat de um
+    box com GPU não pode passar a ver isso sem ter pedido."""
+
+    movimento_min: float = 0.005
+    """Fração das amostras do frame que precisa mudar para contar como movimento. 0,5%
+    de 80x60 amostras são 24: uma pessoa ao fundo de um quadro 640x480 cobre mais que
+    isso, e ruído de câmera barata à noite, menos. **A validar com vídeo de loja.**"""
+
+    movimento_retencao_s: float = 2.0
+    """Por quanto tempo o portão continua aberto depois do último movimento, mesmo sem
+    track. Cobre quem entrou e ainda não foi confirmado pelo tracking."""
+
+    vigia_s: float = 5.0
+    """Com o portão fechado, uma inferência a cada `vigia_s` mesmo assim. É o que acha
+    a pessoa que já estava imóvel no quadro quando o portão começou a olhar."""
+
     def __post_init__(self) -> None:
         if self.enabled and self.model_path is None:
             raise ValueError("detecção habilitada exige model_path")
-        if self.input_size <= 0 or self.input_size % 32:
+        if self.input_size is not None and (self.input_size <= 0 or self.input_size % 32):
             raise ValueError(
                 f"input_size deve ser múltiplo positivo de 32, recebi {self.input_size}: "
                 "é o maior stride da grade de âncoras"
@@ -380,6 +419,36 @@ class DetectionOptions:
             raise ValueError(f"queue_size deve ser positivo, recebi {self.queue_size}")
         if self.fps_window < 2:
             raise ValueError(f"fps_window precisa de ao menos 2 amostras, recebi {self.fps_window}")
+        if not 0.0 <= self.movimento_min <= 1.0:
+            raise ValueError(f"movimento_min deve estar entre 0 e 1, recebi {self.movimento_min}")
+        if self.movimento_retencao_s < 0:
+            raise ValueError(
+                f"movimento_retencao_s não pode ser negativo, recebi {self.movimento_retencao_s}"
+            )
+        if self.vigia_s <= 0:
+            # Zero faria toda avaliação do portão abrir como vigia: o portão ligado e
+            # nunca fechado, que é o pior dos dois mundos — paga o custo e não poupa nada.
+            raise ValueError(f"vigia_s deve ser positivo, recebi {self.vigia_s}")
+
+
+def valida_entrada_do_modelo(cameras: tuple[CameraConfig, ...], lado: int) -> None:
+    """Recusa câmera cujo frame é menor que a entrada do modelo.
+
+    Reduzir é o `preproc` do YOLOX; ampliar daria um borrão que o modelo nunca viu, e o
+    `preprocess` recusa — uma vez por frame, num log que ninguém lê, com o agente
+    ingerindo e nunca detectando. Por isso a recusa vem na subida.
+    """
+    for camera in cameras:
+        if not camera.detect:
+            continue
+        maior = max(camera.decode.width, camera.decode.height)
+        if maior < lado:
+            raise ValueError(
+                f"câmera {camera.camera_id} decodifica em "
+                f"{camera.decode.width}x{camera.decode.height}, e o modelo consome {lado}: "
+                f"o maior lado precisa ser pelo menos {lado}. Ajuste DecodeOptions.width/"
+                f"height — o ffmpeg já escala no filtro que existe (§3.1)"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -729,18 +798,14 @@ class AgentConfig:
         if not self.detection.enabled:
             return
 
-        lado = self.detection.input_size
+        # Sem número no documento, o lado é o que o `.onnx` declara, e o arquivo só é
+        # aberto pelo runtime: a conferência do tamanho acontece lá, com o mesmo
+        # `valida_entrada_do_modelo`, antes de qualquer câmera subir.
+        if self.detection.input_size is not None:
+            valida_entrada_do_modelo(self.cameras, self.detection.input_size)
         for camera in self.cameras:
             if not camera.detect:
                 continue
-            maior = max(camera.decode.width, camera.decode.height)
-            if maior < lado:
-                raise ValueError(
-                    f"câmera {camera.camera_id} decodifica em "
-                    f"{camera.decode.width}x{camera.decode.height}, e o modelo consome {lado}: "
-                    f"o maior lado precisa ser pelo menos {lado}. Ajuste DecodeOptions.width/"
-                    f"height — o ffmpeg já escala no filtro que existe (§3.1)"
-                )
             if camera.decode.pixel_format is not PixelFormat.BGR24:
                 raise ValueError(
                     f"câmera {camera.camera_id} entrega {camera.decode.pixel_format} e o "

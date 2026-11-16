@@ -206,3 +206,46 @@ precisa de GPU nem dos `.onnx`, e leva segundos:
 O cache é refeito quando muda a taxa de amostragem, a largura ou o tamanho do vídeo. O JSON
 traz cada disparo (vídeo, instante, track, lado, motivo), para conferir no vídeo de
 `desenha_pose.py` o que a regra viu.
+
+## Medir o detector no box sem placa (fase 1)
+
+`bench_deteccao.py` decide qual modelo vai para o mini PC (ADR-012). Ele roda o
+`OnnxDetector` de produção — letterbox, inferência, decodificação e NMS — sobre o
+mesmo vídeo para cada modelo e devolve dois números que só valem juntos: o tempo
+por frame e o **recall relativo**, a fração das pessoas que o primeiro modelo
+(a referência) acha e que o modelo medido também acha. Um modelo rápido que não
+vê as pessoas só troca CPU saturada por loja cega.
+
+```bash
+bash scripts/modelo.sh        # s, tiny, nano e o vídeo com pessoas
+cd apps/agent
+uv run python tools/bench_deteccao.py ../../infra/videos/pessoas.mp4 \
+  --modelo models/yolox_s.onnx:640 \
+  --modelo models/yolox_tiny.onnx:416 \
+  --modelo models/yolox_nano.onnx:416
+```
+
+Para o OpenVINO, um grupo de cada vez, e o binário do venv — `uv run` voltaria
+para o grupo `cpu`:
+
+```bash
+uv sync --no-group cpu --group openvino
+.venv/bin/python tools/bench_deteccao.py ../../infra/videos/pessoas.mp4 \
+  --modelo models/yolox_s.onnx:640 --modelo models/yolox_tiny.onnx:416 \
+  --provider openvino
+uv sync                       # de volta ao padrão
+```
+
+`câmeras` é quantas câmeras a 3 fps cabem numa thread de inferência pelo p95 —
+teto otimista, porque decode, tracking e pose dividem a mesma CPU. É o portão
+de movimento que dá a folga. Primeira medida, numa CPU Xeon de 4 núcleos (não é
+o mini PC; o número que decide sai rodando isto nele):
+
+| modelo | provider | p95 ms | recall | câmeras |
+|---|---|---|---|---|
+| yolox_s 640 | OpenVINO | 97,7 | 100% | 3 |
+| yolox_tiny 416 | OpenVINO | 26,2 | 93% | 12 |
+| yolox_nano 416 | OpenVINO | 11,3 | 78% | 29 |
+
+O OpenVINO acha exatamente as mesmas pessoas que a CPU pura nos três modelos: é
+só tempo, sem perda.

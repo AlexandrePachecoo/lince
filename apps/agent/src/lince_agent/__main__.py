@@ -228,8 +228,9 @@ def build_parser() -> argparse.ArgumentParser:
     estagio2.add_argument(
         "--input-size",
         type=int,
-        default=640,
-        help="lado da entrada do modelo; conferido contra o que o .onnx declara",
+        default=None,
+        help="lado da entrada do modelo. Sem ele, o que o .onnx declara — 640 no YOLOX-s, "
+        "416 no tiny e no nano. Com ele, é conferido contra o arquivo",
     )
     estagio2.add_argument(
         "--provider",
@@ -237,11 +238,18 @@ def build_parser() -> argparse.ArgumentParser:
         dest="providers",
         metavar="NOME",
         help="provider do ONNX Runtime, em ordem de preferência; repetível. "
-        "O default tenta CUDA e cai para CPU (§10.10)",
+        "O default tenta CUDA, depois OpenVINO, e cai para CPU (§10.10, ADR-012). "
+        "O que a instalação não tem é pulado",
     )
     padrao = DetectionOptions()
     estagio2.add_argument("--score-threshold", type=float, default=padrao.score_threshold)
     estagio2.add_argument("--iou-threshold", type=float, default=padrao.iou_threshold)
+    estagio2.add_argument(
+        "--portao-movimento",
+        action="store_true",
+        help="só infere com movimento ou track vivo na câmera (ADR-012): o que faz três "
+        "câmeras caberem num PC sem placa. Os limiares do portão vêm do documento",
+    )
     estagio2.add_argument(
         "--no-detect",
         action="store_true",
@@ -400,6 +408,7 @@ def _monta_deteccao(args: argparse.Namespace) -> DetectionOptions:
         providers=tuple(args.providers) if args.providers else padrao.providers,
         score_threshold=args.score_threshold,
         iou_threshold=args.iou_threshold,
+        portao_movimento=args.portao_movimento,
     )
 
 
@@ -473,6 +482,7 @@ FLAGS_DO_DOCUMENTO = {
     "input_size": "--input-size",
     "score_threshold": "--score-threshold",
     "iou_threshold": "--iou-threshold",
+    "portao_movimento": "--portao-movimento",
     "track_high_threshold": "--track-high-threshold",
     "no_detect": "--no-detect",
     "no_track": "--no-track",
@@ -824,7 +834,8 @@ def _format_deteccao(stats: DetectorStats) -> str:
     modelo = "?" if info is None else f"{info.model_version} em {info.provider}"
     por_camera = "  ".join(
         f"{camera.camera_id}={camera.inference_fps:4.2f} fps "
-        f"({camera.detections} caixas, {camera.dropped} descartados)"
+        f"({camera.detections} caixas, {camera.dropped} descartados, "
+        f"{camera.gated} poupados)"
         for camera in stats.cameras
     )
     return (

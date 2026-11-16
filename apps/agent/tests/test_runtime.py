@@ -1218,3 +1218,16 @@ def test_gesto_sem_pose_e_recusado(tmp_path):
 
     with pytest.raises(ValueError, match="pose"):
         Agente(tmp_path, gesto=MotorGesto())
+
+
+def test_modelo_maior_que_o_frame_derruba_a_subida_depois_de_abrir(tmp_path):
+    """Sem `input_size` no documento (o padrão, ADR-012), o lado do modelo só existe
+    depois de o `.onnx` abrir. A recusa do frame pequeno demais tem que acontecer ali,
+    antes de qualquer câmera subir: senão o agente ingere, grava clipe e falha uma vez
+    por frame no letterbox, com o heartbeat verde."""
+    from dataclasses import replace as troca
+
+    grande = DetectorFalso(info=troca(INFO, input_size=800))
+    with pytest.raises(ValueError, match="maior lado"):
+        Agente(tmp_path, detector=grande)
+    assert grande.fechado, "a sessão do modelo não pode ficar aberta num agente que não sobe"

@@ -20,7 +20,7 @@ import pytest
 from onnx import TensorProto, helper, numpy_helper
 
 from lince_agent.config import PixelFormat
-from lince_agent.detect.onnx import abre_sessao
+from lince_agent.detect.onnx import abre_sessao, provider_esperado
 from lince_agent.detect.onnx import model_version as versao_do_detector
 from lince_agent.detect.state import Detection
 from lince_agent.ffmpeg.rawframe import Frame
@@ -301,9 +301,12 @@ def test_versao_e_o_provider_inicializado_nao_o_anunciado(tmp_path: Path, caplog
         for registro in caplog.records
         if "indisponível" in registro.getMessage()
     ]
-    if info.provider != PROVIDERS[0]:
+    # O esperado é o primeiro pedido que esta instalação tem, não o primeiro da lista:
+    # num ambiente sem o pacote do CUDA, cair na CPU é o caminho previsto, não queda.
+    esperado = provider_esperado(PROVIDERS, frozenset(anunciados))
+    if info.provider != esperado:
         assert len(quedas) == 1
-        assert PROVIDERS[0] in quedas[0]
+        assert esperado in quedas[0]
         assert info.provider in quedas[0]
     else:
         assert quedas == []
@@ -514,3 +517,24 @@ def test_avisa_quando_o_cuda_pedido_cai_para_cpu(tmp_path: Path, caplog):
         )
     assert pose.info().provider == "CPUExecutionProvider"
     assert "CUDAExecutionProvider" in caplog.text
+
+
+def test_box_sem_o_pacote_do_cuda_nao_avisa_queda_que_nao_houve(tmp_path: Path, caplog):
+    """No mini PC sem placa (ADR-012) o pacote do CUDA nem está instalado, e a pose
+    rodar em OpenVINO é o caminho previsto. Avisar "CUDA indisponível" a cada subida de
+    toda loja ensinaria a ignorar o aviso que importa."""
+    caminho = tmp_path / "rtmpose-s.onnx"
+    caminho.write_bytes(b"a sessao e duble; o hash nao liga para o conteudo")
+
+    class _SessaoOpenVino(_SessaoCpu):
+        def get_providers(self):
+            return ["OpenVINOExecutionProvider"]
+
+    with caplog.at_level("WARNING"):
+        OnnxPose(
+            caminho,
+            providers=PROVIDERS,
+            session_factory=lambda *_args: _SessaoOpenVino(),
+            instalados=frozenset({"OpenVINOExecutionProvider", "CPUExecutionProvider"}),
+        )
+    assert "indisponível" not in caplog.text

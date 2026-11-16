@@ -120,6 +120,11 @@ class CameraDetectionStats:
     """Monotônico da borda. Com `status` da câmera, distingue "stream travado" de
     "stream ausente" (§5.3)."""
 
+    gated: int = 0
+    """Frames que o portão de movimento poupou de inferência (ADR-012). É o que explica
+    um `inference_fps` perto de zero numa câmera saudável: loja vazia. Sem ele, os dois
+    casos — câmera parada e loja vazia — teriam a mesma cara."""
+
 
 @dataclass(frozen=True, slots=True)
 class DetectorStats:
@@ -155,3 +160,7 @@ class DetectorStats:
     @property
     def detections(self) -> int:
         return sum(camera.detections for camera in self.cameras)
+
+    @property
+    def gated(self) -> int:
+        return sum(camera.gated for camera in self.cameras)

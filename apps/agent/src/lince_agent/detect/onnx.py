@@ -111,6 +111,7 @@ class OnnxDetector:
         *,
         spec: PreprocessSpec = YOLOX,
         session_factory: Callable[[Path, tuple[str, ...]], Any] | None = None,
+        instalados: frozenset[str] | None = None,
     ) -> None:
         # Antes de qualquer outra coisa, inclusive de conferir se o arquivo existe: a
         # recusa por licença não pode depender de o arquivo estar no disco.
@@ -140,10 +141,13 @@ class OnnxDetector:
         # O provider pedido não é o provider obtido: um box com o driver quebrado aceita
         # `CUDAExecutionProvider` na lista e roda em CPU sem dizer nada. Registrar na
         # subida é o que transforma "o box está lento" em "o box caiu para CPU" (§10.10).
-        if provider != options.providers[0]:
+        esperado = provider_esperado(
+            options.providers, _instalados(instalados, session_factory, options.providers)
+        )
+        if provider != esperado:
             log.warning(
                 "provider %s indisponível; a inferência vai rodar em %s",
-                options.providers[0],
+                esperado,
                 provider,
             )
         log.info(
@@ -202,6 +206,45 @@ class OnnxDetector:
         self._session = None
 
 
+def providers_instalados() -> frozenset[str]:
+    """O que a instalação do ONNX Runtime compilou. Import adiado: ver `abre_sessao`."""
+    import onnxruntime as ort
+
+    return frozenset(ort.get_available_providers())
+
+
+def provider_esperado(pedidos: tuple[str, ...], instalados: frozenset[str]) -> str:
+    """O provider que a sessão **deveria** ter pegado: o primeiro pedido que a instalação
+    tem.
+
+    É contra ele que se compara o obtido, e não contra o primeiro da lista. A lista
+    padrão é a mesma para as três imagens do box (CUDA, OpenVINO, CPU), e o box sem
+    placa nem tem o pacote do CUDA: comparar com `pedidos[0]` avisaria "CUDA
+    indisponível" em toda subida de toda loja, e um aviso que sempre aparece ensina a
+    ignorá-lo — justamente o que esconderia a queda de verdade, a do box com placa e
+    driver quebrado, onde o CUDA está instalado e não carrega.
+    """
+    for provider in pedidos:
+        if provider in instalados:
+            return provider
+    return pedidos[0]
+
+
+def _instalados(
+    instalados: frozenset[str] | None,
+    session_factory: Callable[..., Any] | None,
+    pedidos: tuple[str, ...],
+) -> frozenset[str]:
+    """Com uma fábrica de sessão injetada, a instalação é a que a fábrica finge ser:
+    tudo o que foi pedido. Perguntar ao ONNX Runtime de verdade misturaria o pacote da
+    máquina que roda o teste com a sessão falsa do teste."""
+    if instalados is not None:
+        return instalados
+    if session_factory is not None:
+        return frozenset(pedidos)
+    return providers_instalados()
+
+
 def abre_sessao(model_path: Path, providers: tuple[str, ...]):
     """Abre a sessão do ONNX Runtime. O detector e a pose usam esta função.
 
@@ -237,7 +280,7 @@ def abre_sessao(model_path: Path, providers: tuple[str, ...]):
     return ort.InferenceSession(str(model_path), providers=pedidos)
 
 
-def _resolve_input_size(shape: list[Any], configurado: int, model_path: Path) -> int:
+def _resolve_input_size(shape: list[Any], configurado: int | None, model_path: Path) -> int:
     """Confere o `input_size` da configuração contra o que o próprio `.onnx` declara.
 
     Um modelo de 416 rodando com `input_size=640` não estoura: a grade de âncoras não
@@ -248,12 +291,18 @@ def _resolve_input_size(shape: list[Any], configurado: int, model_path: Path) ->
     # Exportação com lote ou lado dinâmico traz string ou None no lugar do número.
     laterais = [valor for valor in shape[2:] if isinstance(valor, int) and valor > 0]
     if not laterais:
+        if configurado is None:
+            raise ModelError(
+                f"{model_path.name} tem entrada dinâmica e a configuração não diz o lado. "
+                "Informe detection.input_size (ou --input-size): sem ele não há grade de "
+                "âncoras para decodificar"
+            )
         return configurado
 
     if len(set(laterais)) != 1:
         raise ModelError(f"{model_path.name} declara entrada não quadrada {shape}")
     declarado = laterais[0]
-    if declarado != configurado:
+    if configurado is not None and declarado != configurado:
         raise ModelError(
             f"{model_path.name} declara entrada de {declarado} e a configuração diz "
             f"{configurado}. Ajuste DetectionOptions.input_size — decodificar com o "

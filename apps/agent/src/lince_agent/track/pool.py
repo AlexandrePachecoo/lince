@@ -141,6 +141,16 @@ class TrackerPool:
             self._resets.setdefault(camera_id, 0)
         return self._trackers[camera_id]
 
+    def tem_tracks(self, camera_id: str) -> bool:
+        """Se a câmera tem algum track vivo — confirmado, tentativo ou perdido.
+
+        Perdido também conta: é o portão de movimento que pergunta, e um track só morre
+        num `update`. Fechar o portão com um perdido na memória o congelaria lá, e a
+        primeira pessoa a aparecer herdaria um track com minutos de extrapolação.
+        """
+        tracker = self._trackers.get(camera_id)
+        return tracker is not None and tracker.tem_tracks
+
     def tracks(self, camera_id: str):
         """Tracks vivos de uma câmera, sem avançar nada. Serve à ferramenta visual."""
         tracker = self._trackers.get(camera_id)

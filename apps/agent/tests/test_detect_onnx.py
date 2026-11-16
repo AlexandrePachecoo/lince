@@ -18,7 +18,7 @@ import pytest
 from deteccoes import frame
 
 from lince_agent.config import DetectionOptions
-from lince_agent.detect.onnx import ModelError, OnnxDetector, model_version
+from lince_agent.detect.onnx import ModelError, OnnxDetector, model_version, provider_esperado
 
 LADO = 640
 ANCORAS = 80 * 80 + 40 * 40 + 20 * 20
@@ -65,9 +65,16 @@ def modelo_falso(tmp_path: Path) -> Path:
     return caminho
 
 
-def detector(tmp_path: Path, sessao: SessaoFalsa, **kwargs) -> OnnxDetector:
+def detector(
+    tmp_path: Path, sessao: SessaoFalsa, *, instalados: frozenset[str] | None = None, **kwargs
+) -> OnnxDetector:
     opcoes = DetectionOptions(enabled=True, model_path=modelo_falso(tmp_path), **kwargs)
-    return OnnxDetector(modelo_falso(tmp_path), opcoes, session_factory=lambda *_args: sessao)
+    return OnnxDetector(
+        modelo_falso(tmp_path),
+        opcoes,
+        session_factory=lambda *_args: sessao,
+        instalados=instalados,
+    )
 
 
 def saida_com_pessoa(ancora: int, *, objectness: float = 0.9, prob: float = 0.8) -> np.ndarray:
@@ -190,11 +197,70 @@ def test_avisa_quando_cai_para_o_segundo_provider(tmp_path: Path, caplog):
     assert "CUDAExecutionProvider" in caplog.text
 
 
+CPU_INTEL = frozenset({"OpenVINOExecutionProvider", "CPUExecutionProvider"})
+"""O que o pacote `onnxruntime-openvino` compila: a imagem do box sem placa (ADR-012)."""
+
+
+def test_box_sem_o_pacote_do_cuda_nao_avisa_queda_que_nao_houve(tmp_path: Path, caplog):
+    """A lista padrão é a mesma nas três imagens. No mini PC o CUDA nem está instalado,
+    e rodar em OpenVINO é o caminho previsto: avisar "CUDA indisponível" a cada subida de
+    toda loja ensinaria a ignorar o aviso — o mesmo que avisa o box com placa e driver
+    quebrado."""
+    with caplog.at_level("WARNING"):
+        detector(
+            tmp_path,
+            SessaoFalsa(provider="OpenVINOExecutionProvider"),
+            providers=DetectionOptions().providers,
+            instalados=CPU_INTEL,
+        )
+    assert "indisponível" not in caplog.text
+
+
+def test_openvino_instalado_que_cai_para_cpu_avisa(tmp_path: Path, caplog):
+    """O OpenVINO instalado que não inicializa (CPU sem as instruções que ele exige,
+    biblioteca faltando na imagem) é a mesma queda silenciosa do CUDA, só mais barata:
+    a loja roda mais devagar e ninguém sabe por quê."""
+    with caplog.at_level("WARNING"):
+        detector(
+            tmp_path,
+            SessaoFalsa(provider="CPUExecutionProvider"),
+            providers=DetectionOptions().providers,
+            instalados=CPU_INTEL,
+        )
+    assert "OpenVINOExecutionProvider" in caplog.text
+    assert "CUDAExecutionProvider" not in caplog.text
+
+
+def test_provider_esperado_e_o_primeiro_pedido_que_a_instalacao_tem():
+    pedidos = DetectionOptions().providers
+    assert provider_esperado(pedidos, CPU_INTEL) == "OpenVINOExecutionProvider"
+    assert provider_esperado(pedidos, frozenset({"CPUExecutionProvider"})) == (
+        "CPUExecutionProvider"
+    )
+    tudo = frozenset(pedidos)
+    assert provider_esperado(pedidos, tudo) == "CUDAExecutionProvider"
+
+
+def test_provider_esperado_sem_nada_instalado_aponta_o_primeiro_pedido():
+    """Sem interseção, `abre_sessao` recusa antes; mas a função não pode devolver
+    `None` para quem a chamar sozinha, e o primeiro pedido é o que a mensagem deve citar."""
+    assert provider_esperado(("CUDAExecutionProvider",), frozenset()) == "CUDAExecutionProvider"
+
+
 def test_entrada_declarada_divergente_da_configuracao_e_recusada(tmp_path: Path):
     """Um modelo de 416 com `input_size=640` não estoura: a grade de âncoras não bate e
     o decode recusa — mas só no primeiro frame, com as câmeras já no ar."""
     with pytest.raises(ModelError, match="declara entrada de 416"):
-        detector(tmp_path, SessaoFalsa(shape=[1, 3, 416, 416]))
+        detector(tmp_path, SessaoFalsa(shape=[1, 3, 416, 416]), input_size=640)
+
+
+def test_sem_lado_na_configuracao_usa_o_que_o_modelo_declara(tmp_path: Path):
+    """O padrão (ADR-012). O modelo é do box e o documento é da loja: o box sem placa
+    roda o tiny de 416, o com placa roda o s de 640, e a nuvem manda o mesmo documento
+    para os dois. Exigir o número no documento faria um deles recusar a subida."""
+    unidade = detector(tmp_path, SessaoFalsa(shape=[1, 3, 416, 416]))
+    info = unidade.info()
+    assert info is not None and info.input_size == 416
 
 
 def test_entrada_nao_quadrada_e_recusada(tmp_path: Path):
@@ -205,9 +271,18 @@ def test_entrada_nao_quadrada_e_recusada(tmp_path: Path):
 def test_entrada_dinamica_usa_a_configuracao(tmp_path: Path):
     """Exportação com lado dinâmico traz string no lugar do número. Aí a configuração é
     a única fonte, e não há o que conferir."""
-    unidade = detector(tmp_path, SessaoFalsa(shape=["batch", 3, "height", "width"]))
+    unidade = detector(
+        tmp_path, SessaoFalsa(shape=["batch", 3, "height", "width"]), input_size=LADO
+    )
     info = unidade.info()
     assert info is not None and info.input_size == LADO
+
+
+def test_entrada_dinamica_sem_lado_na_configuracao_e_recusada(tmp_path: Path):
+    """Sem número declarado nem configurado não há grade de âncoras: recusar na subida
+    é o que separa isto de um agente que detecta caixas plausíveis e erradas."""
+    with pytest.raises(ModelError, match="entrada dinâmica"):
+        detector(tmp_path, SessaoFalsa(shape=["batch", 3, "height", "width"]))
 
 
 def test_modelo_de_varias_entradas_e_recusado(tmp_path: Path):
@@ -303,7 +378,9 @@ def test_o_arquivo_abre_e_declara_a_entrada_esperada(model_path: Path):
     try:
         info = unidade.info()
         assert info is not None
-        assert info.input_size == LADO
+        # Sem `input_size` na configuração, o lado é o que o arquivo declara: 640 no
+        # YOLOX-s, 416 no tiny e no nano — os três de `scripts/modelo.sh`.
+        assert info.input_size == (416 if model_path.stem in {"yolox_tiny", "yolox_nano"} else LADO)
         assert info.provider.endswith("ExecutionProvider")
         assert info.model_version.startswith(model_path.stem)
     finally:

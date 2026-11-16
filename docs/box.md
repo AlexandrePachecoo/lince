@@ -1,25 +1,47 @@
 # O box da loja — instalação e operação
 
-O box é o desktop com GPU que fica no estoque do mercado e roda o agente da borda (§3
-da [arquitetura](arquitetura.md)). Este documento é o passo a passo de quem vai montar
-um, do zero, e o que olhar depois que ele estiver de pé.
+O box é o mini PC que fica no mini market e roda o agente da borda (§3 da
+[arquitetura](arquitetura.md)). Este documento é o passo a passo de quem vai montar um,
+do zero, e o que olhar depois que ele estiver de pé.
 
-Do repositório, o box recebe **três coisas e nada mais**:
+Há dois boxes, e o padrão é o **sem placa de vídeo** (ADR-012): um mini PC Intel, com o
+YOLOX-tiny rodando no OpenVINO. O **com placa NVIDIA** continua suportado, e as seções
+abaixo marcam o que é só dele.
+
+Do repositório, o box recebe **três coisas e nada mais** (quatro, no box com placa):
 
 ```
 /opt/lince/
-├── docker-compose.yml     ← infra/box/docker-compose.yml
-├── .env                   ← a partir de infra/box/.env.example
+├── docker-compose.yml       ← infra/box/docker-compose.yml
+├── docker-compose.gpu.yml   ← infra/box/docker-compose.gpu.yml   (só com placa)
+├── .env                     ← a partir de infra/box/.env.example
 └── modelos/
-    └── yolox_s.onnx
+    └── yolox_tiny.onnx      (yolox_s.onnx, com placa)
 ```
 
-A imagem do agente vem pronta do registry (`ghcr.io/alexandrepachecoo/lince-agent`),
-publicada pelo CI a cada tag `agente-vX.Y.Z`. O box não compila nada e não tem o código.
+A imagem do agente vem pronta do registry, publicada pelo CI a cada tag `agente-vX.Y.Z`:
+`ghcr.io/alexandrepachecoo/lince-agent-cpu` no box sem placa e
+`ghcr.io/alexandrepachecoo/lince-agent` no com placa. O número de versão é o mesmo nas
+duas. O box não compila nada e não tem o código.
 
 ---
 
 ## 1. Hardware
+
+**Box sem placa (o padrão):**
+
+| Item | Mínimo | Por quê |
+|---|---|---|
+| CPU | **Intel** x86, classe N100/N150 ou melhor, 4 núcleos | O OpenVINO é da Intel e é ele que faz o YOLOX-tiny caber em 3 câmeras (de 20% a 50% mais rápido que a CPU pura, medido). AMD roda, sem esse ganho. **O modelo exato sai do benchmark** — ver abaixo |
+| RAM | 8 GB (16 com folga) | O buffer circular de 30 s fica em RAM, por câmera (§3.5) |
+| Disco | SSD, 20 GB livres para o Lince | A imagem de CPU é bem menor que a de CUDA; o resto é folga para clipes esperando a internet voltar |
+
+Antes de comprar o modelo de mini PC para as lojas, rode o benchmark num exemplar dele,
+com o vídeo real da loja piloto (`apps/agent/tools/README.md`, "Medir o detector no box
+sem placa"). A coluna `câmeras` com o tiny tem que dar folga sobre 3: ela não conta o
+decode nem o tracking, que dividem a mesma CPU.
+
+**Box com placa NVIDIA:**
 
 | Item | Mínimo | Por quê |
 |---|---|---|
@@ -27,6 +49,11 @@ publicada pelo CI a cada tag `agente-vX.Y.Z`. O box não compila nada e não tem
 | Driver NVIDIA | **580 ou mais novo** | Exigência do CUDA 13. Com driver mais velho o provider de CUDA não carrega e a inferência roda em CPU sem erro (§10.10) |
 | RAM | 16 GB | O buffer circular de 30 s fica em RAM, por câmera (§3.5). O número real por câmera é pendência da §10.8 |
 | Disco | SSD, 20 GB livres para o Lince | A imagem carrega CUDA e cuDNN e passa de alguns GB; o resto é folga para clipes esperando a internet voltar |
+
+**Os dois:**
+
+| Item | Mínimo | Por quê |
+|---|---|---|
 | Rede | cabo na mesma rede do DVR/câmeras | Wi-Fi no box é a forma mais barata de transformar R-13 em rotina |
 | Energia | nobreak | R-6. Um apagão derruba as câmeras de qualquer jeito, mas a oscilação que não derruba as câmeras derruba um PC sem nobreak |
 
@@ -36,7 +63,14 @@ visita à loja para apertar o botão.
 
 ## 2. Sistema
 
-Ubuntu 24.04 LTS. Depois da instalação limpa:
+Ubuntu 24.04 LTS. Depois da instalação limpa, no box sem placa só o Docker:
+
+```bash
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker "$USER"  # logout/login depois disto
+```
+
+No box com placa, o driver e o NVIDIA Container Toolkit também:
 
 ```bash
 # driver NVIDIA (o ubuntu-drivers escolhe o recomendado; confira que é >= 580)
@@ -71,7 +105,7 @@ sudo tailscale up --ssh --hostname "lince-<loja>"
 ```
 
 `--ssh` liga o Tailscale SSH: dá para entrar no box pela tailnet sem abrir porta nenhuma
-no roteador da loja, que é o que mercado de bairro nunca vai ter (§3.8).
+no roteador da loja, que é o que mini market de condomínio nunca vai ter (§3.8).
 
 ## 4. O Lince
 
@@ -79,18 +113,32 @@ no roteador da loja, que é o que mercado de bairro nunca vai ter (§3.8).
 sudo mkdir -p /opt/lince/modelos && sudo chown "$USER" /opt/lince /opt/lince/modelos
 cd /opt/lince
 
-# os dois arquivos do repositório (do commit/tag que a loja vai rodar)
+# os arquivos do repositório (do commit/tag que a loja vai rodar)
 curl -fsSLO https://raw.githubusercontent.com/AlexandrePachecoo/lince/main/infra/box/docker-compose.yml
 curl -fsSL  https://raw.githubusercontent.com/AlexandrePachecoo/lince/main/infra/box/.env.example -o .env
 chmod 600 .env
 $EDITOR .env        # LINCE_VERSAO, LINCE_API_URL, LINCE_BOOTSTRAP_TOKEN
 
-# o modelo, conferido pelo checksum — o mesmo do scripts/modelo.sh
+# o modelo do box sem placa, conferido pelo checksum — o mesmo do scripts/modelo.sh
+curl -fL -o modelos/yolox_tiny.onnx \
+  https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.onnx
+echo "427cc366d34e27ff7a03e2899b5e3671425c262ea2291f88bb942bc1cc70b0f7  modelos/yolox_tiny.onnx" \
+  | sha256sum -c
+```
+
+No box com placa, o override da GPU e o YOLOX-s no lugar do tiny:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/AlexandrePachecoo/lince/main/infra/box/docker-compose.gpu.yml
+echo 'COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml' >> .env   # todo `docker compose` passa a usar os dois
 curl -fL -o modelos/yolox_s.onnx \
   https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.onnx
 echo "c5c2d13e59ae883e6af3b45daea64af4833a4951c92d116ec270d9ddbe998063  modelos/yolox_s.onnx" \
   | sha256sum -c
 ```
+
+O lado de entrada do modelo (416 no tiny, 640 no s) sai do próprio arquivo: trocar o
+modelo não pede mudança nenhuma na configuração da loja na nuvem.
 
 Se o pacote da imagem no GitHub estiver **privado**, o box precisa de login no registry
 com um token de leitura (`read:packages`):
@@ -145,11 +193,26 @@ O agente sobe, vai à nuvem buscar a configuração da loja e começa a puxar as
 Sem nuvem e sem cache local ele **não sobe** — de propósito (§5.4): um agente sem câmera
 pareceria saudável no heartbeat e nunca alertaria.
 
-## 5. Conferir que a placa está sendo usada
+## 5. Conferir que a inferência está onde deveria
 
-Esta é a parte que não se pode pular. Quase tudo que dá errado com GPU **não dá erro**:
-o agente cai para CPU como foi desenhado para cair (§3.1, §3.2), e a loja passa a operar
-a uma fração da taxa sem ninguém perceber.
+Esta é a parte que não se pode pular. Quase tudo que dá errado aqui **não dá erro**: o
+agente cai para o próximo provider da lista como foi desenhado para cair (§3.2), e a
+loja passa a operar a uma fração da taxa sem ninguém perceber.
+
+No box sem placa, o log de subida tem que dizer OpenVINO, e a linha `[detecção]` do
+agente não pode ter `descartados` subindo sem parar:
+
+```bash
+docker compose logs agente | grep "carregado em"   # "modelo yolox_tiny@427cc366d34e carregado em OpenVINOExecutionProvider"
+```
+
+| Sintoma | Causa provável | O que fazer |
+|---|---|---|
+| provider é `CPUExecutionProvider`, com aviso "OpenVINOExecutionProvider indisponível" | CPU sem as instruções que o OpenVINO exige, ou imagem errada | `docker compose config \| grep image` tem que dizer `lince-agent-cpu` |
+| `descartados` subindo o tempo todo | o mini PC não dá conta das câmeras | ligar o portão de movimento na configuração da loja (`detection.portao_movimento`), ou o YOLOX-nano |
+| `could not select device driver "nvidia"` no `up` | o `.env` aponta para o `docker-compose.gpu.yml` num box sem placa | tirar o `COMPOSE_FILE` do `.env` |
+
+No box com placa:
 
 ```bash
 # a inferência: o log de subida diz qual provider do ONNX Runtime pegou
@@ -197,10 +260,11 @@ depende de o agente expor um sinal de saúde local que hoje não existe.
 
 ---
 
-## Na máquina de desenvolvimento com GPU
+## Na máquina de desenvolvimento
 
 O mesmo compose, com a imagem construída do código local e o agente na rede do host —
-para alcançar a API do `pnpm dev` e as câmeras do `pnpm rtsp:up` em `localhost`:
+para alcançar a API do `pnpm dev` e as câmeras do `pnpm rtsp:up` em `localhost`. Sem
+placa, que é o box de referência:
 
 ```bash
 cd infra/box
@@ -213,13 +277,21 @@ ENV
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
+Na máquina com placa NVIDIA, o override da GPU **por último**, para o Dockerfile CUDA
+vencer o de CPU do override de desenvolvimento:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.gpu.yml up --build
+```
+
 O porquê de cada diferença está no cabeçalho de `infra/box/docker-compose.dev.yml`.
 
-Sem Docker, direto pelo `uv`, a GPU pede o outro grupo de dependências — o padrão é o
-ONNX Runtime de CPU, e os dois não convivem no mesmo ambiente (`pyproject.toml`):
+Sem Docker, direto pelo `uv`, a GPU e o OpenVINO pedem o outro grupo de dependências —
+o padrão é o ONNX Runtime de CPU pura, e os três não convivem no mesmo ambiente
+(`pyproject.toml`):
 
 ```bash
 cd apps/agent
-uv sync --no-group cpu --group gpu
+uv sync --no-group cpu --group gpu          # ou --group openvino
 uv run --no-group cpu --group gpu python -m lince_agent ...   # o `uv run` puro voltaria para o grupo cpu
 ```

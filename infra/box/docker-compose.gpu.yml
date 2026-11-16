@@ -1,0 +1,29 @@
+# O box COM placa NVIDIA, por cima do docker-compose.yml (que sozinho é o box sem
+# placa, ADR-012):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# Troca três coisas, e só três: a imagem (CUDA 13 + cuDNN 9 + `onnxruntime-gpu`, de
+# apps/agent/Dockerfile), o modelo padrão (o YOLOX-s, que na placa cabe com folga) e a
+# reserva da placa. Exige driver >= 580 e o NVIDIA Container Toolkit no host
+# (docs/box.md).
+
+services:
+  agente:
+    image: ${LINCE_IMAGEM:-ghcr.io/alexandrepachecoo/lince-agent}:${LINCE_VERSAO:?defina LINCE_VERSAO em .env}
+    # Para o override de desenvolvimento: com os três arquivos, quem constrói é o
+    # Dockerfile CUDA. Fora do desenvolvimento a imagem é puxada e isto não é usado.
+    build:
+      dockerfile: apps/agent/Dockerfile
+    environment:
+      LINCE_MODEL_PATH: /modelos/${LINCE_MODELO:-yolox_s.onnx}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            # `video` é o NVDEC. Só `gpu` deixaria o driver decidir pelas capacidades
+            # da imagem; declarar aqui é a segunda trava da armadilha descrita no
+            # Dockerfile — sem `video`, o decode cai para CPU em silêncio (R-4).
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility, video]
