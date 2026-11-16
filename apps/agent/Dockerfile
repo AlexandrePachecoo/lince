@@ -93,7 +93,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-default-groups --group gpu --group dev
 
 COPY packages/shared/schemas /src/packages/shared/schemas
-COPY infra/box/docker-compose.yml infra/box/docker-compose.dev.yml /src/infra/box/
+COPY infra/box/docker-compose.yml infra/box/docker-compose.dev.yml infra/box/.env.example /src/infra/box/
 COPY apps/agent/Dockerfile apps/agent/config.exemplo.json ./
 # tools/ fica de fora de propósito, também neste estágio. São scripts offline
 # (export e benchmark) e não vão para a loja; copiá-los aqui não os leva à

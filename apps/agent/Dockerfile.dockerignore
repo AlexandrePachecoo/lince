@@ -16,5 +16,8 @@
 !apps/agent/Dockerfile
 !infra/box/docker-compose.yml
 !infra/box/docker-compose.dev.yml
+# O `.env.example`, e só ele: é o arquivo que o instalador copia, sem valor real
+# dentro, e tests/test_box.py confere o que ele pede. O `.env` de verdade continua fora.
+!infra/box/.env.example
 **/__pycache__
 **/*.pyc

@@ -133,6 +133,26 @@ class HttpCloudClient:
         """
         return self._json_request("POST", urljoin(self._base_url, "v1/agents/heartbeat"), payload)
 
+    def post_register(self, bootstrap_token: str) -> CloudResponse:
+        """Troca o token de bootstrap pela credencial (§5.1).
+
+        **Sem `Authorization`**, mesmo que este cliente tenha um token: o registro é a
+        única rota que se autentica pelo corpo, e mandar junto uma credencial antiga
+        seria entregá-la a quem estiver do outro lado de um `LINCE_API_URL` trocado.
+
+        O token vai no corpo e nunca na URL — é o que mantém o `_descreve` das falhas
+        de rede, que cita a URL, sem segredo nenhum.
+        """
+        requisicao = _requisicao(
+            urljoin(self._base_url, "v1/agents/register"),
+            data=json.dumps(
+                {"schema_version": 1, "bootstrap_token": bootstrap_token}, separators=(",", ":")
+            ).encode("utf-8"),
+            method="POST",
+            headers={"User-Agent": self._user_agent, "Accept": _JSON, "Content-Type": _JSON},
+        )
+        return self._enviar(requisicao, timeout_s=self._timeout_s)
+
     def get_config(self, *, etag: str | None = None) -> CloudResponse:
         """Configuração da loja (§5.2), condicionada ao `ETag` que o agente já tem.
 

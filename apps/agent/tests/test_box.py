@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from lince_agent import __main__ as cli
 from lince_agent.config import ClipOptions, SupervisionOptions
 
 RAIZ = Path(__file__).resolve().parents[3]
@@ -104,6 +105,48 @@ def test_clipes_ficam_num_volume_que_sobrevive_ao_reinicio(box):
     assert any(clipes == d or clipes.startswith(d + "/") for d in destinos_persistentes), (
         f"--clips-dir {clipes} não está dentro de nenhum volume nomeado"
     )
+
+
+def test_a_credencial_do_registro_mora_no_volume_que_sobrevive(box):
+    """O agente guarda a credencial ao lado dos clipes, e ela é entregue UMA vez
+    (§5.1). Fora de um volume nomeado, a primeira atualização de imagem a apagaria: o
+    box voltaria sem credencial, com um token de bootstrap que a nuvem já recusa."""
+    agente = box["services"]["agente"]
+    comando = agente["command"]
+    assert "--credencial" not in comando, "o teste abaixo vale para o caminho padrão"
+    args = cli.build_parser().parse_args(["--config-nuvem", *comando])
+    credencial = str(cli._caminho_da_credencial(args))
+
+    volumes_nomeados = set(box["volumes"])
+    persistentes = [d for o, d, _ in _montagens(agente) if o in volumes_nomeados]
+
+    assert any(credencial.startswith(d + "/") for d in persistentes), (
+        f"{credencial} não está dentro de nenhum volume nomeado"
+    )
+
+
+def test_o_compose_entrega_o_token_de_instalacao_e_nao_obriga_nenhum(box):
+    """`${VAR:?}` no token de bootstrap impediria o box JÁ registrado de subir sem ele
+    — e o `.env` de uma loja pode perdê-lo numa edição qualquer. No token de agente,
+    desfaria o registro. Quem recusa subir sem credencial é o agente, com mensagem."""
+    ambiente = box["services"]["agente"]["environment"]
+
+    assert ambiente["LINCE_BOOTSTRAP_TOKEN"] == "${LINCE_BOOTSTRAP_TOKEN:-}"
+    assert ambiente["LINCE_AGENT_TOKEN"] == "${LINCE_AGENT_TOKEN:-}"
+
+
+def test_o_env_de_exemplo_pede_o_token_de_instalacao_e_nao_a_credencial():
+    """É o arquivo que o instalador copia. Com `LINCE_AGENT_TOKEN` nele, o valor de
+    exemplo venceria o registro (`--api-token` tem precedência) e o box subiria com um
+    token que a nuvem nunca viu."""
+    linhas = [
+        linha.split("=", 1)[0]
+        for linha in (BOX / ".env.example").read_text(encoding="utf-8").splitlines()
+        if linha and not linha.startswith("#")
+    ]
+
+    assert "LINCE_BOOTSTRAP_TOKEN" in linhas
+    assert "LINCE_AGENT_TOKEN" not in linhas
 
 
 def test_modelo_vem_de_uma_montagem_so_leitura_no_caminho_que_o_agente_le(box):

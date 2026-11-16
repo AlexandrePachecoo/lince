@@ -61,7 +61,7 @@ cd apps/agent && uv run ruff check src tests tools && uv run ruff format --check
 
 | Componente | Situação |
 |---|---|
-| `apps/agent` | Estágios 1 a 6 (§3.1 a §3.6) ligados por `runtime.py`. N câmeras com zonas próprias, vindas do `GET /v1/agents/config` com `ETag`/`304`, poll de 30 s, cache local e troca a quente. Heartbeat da §5.3 sobe a cada 30 s |
+| `apps/agent` | Estágios 1 a 6 (§3.1 a §3.6) ligados por `runtime.py`. N câmeras com zonas próprias, vindas do `GET /v1/agents/config` com `ETag`/`304`, poll de 30 s, cache local e troca a quente. Heartbeat da §5.3 sobe a cada 30 s. Na primeira subida troca o token de bootstrap pela credencial e a guarda no box (§5.1) |
 | `apps/api` | As três rotas de agente (`config`, `register`, `heartbeat`), o caminho do evento (`POST /v1/events` com URL pré-assinada e `PATCH /v1/events/{event_id}`) e o lado humano da §4.5: login, fila de triagem, evento avulso por `GET /v1/events/{event_id}`, decisão, URL de leitura do clipe com auditoria, cadastro de usuário e o token de instalação do box (`POST /v1/lojas/{store_id}/bootstrap-token`, §5.1). Mais a métrica de falso positivo por câmera/dia do R-1 (`GET /v1/metricas/falso-positivo`) e o aviso no celular por Web Push, com agrupamento por câmera e teto diário por loja (§4.6, R-12). Falta download de modelo e WebSocket |
 | `apps/dashboard` | O ciclo de triagem da §4.5 em Vite + React: login, fila por cursor, evento com o clipe rodando e a decisão em três botões — os dois toques da NFR-9 —, mais a tela de falso positivo por câmera (R-1), o botão de avisos no celular (service worker + manifesto instalável) e a tela `/box`, onde o admin gera o token de instalação. Falta WebSocket e as telas de usuário |
 | `packages/shared` | JSON Schema dos dois contratos: agente ↔ nuvem (§5) e dashboard ↔ nuvem (§4.5) |
@@ -295,6 +295,27 @@ decidiu ali é o que fazer com um segredo que aparece uma vez:
   nenhum do navegador. Nome de variável digitado errado não dá erro: dá um box sem
   credencial.
 
+O lado do agente do mesmo registro é `registro.py` e `credencial.py`, e o que manda
+neles é o token ser de **uso único** e a credencial ser entregue **uma vez**:
+
+- **A ordem na subida é `--api-token`, credencial guardada, token de bootstrap.** A
+  guardada vem antes do bootstrap porque o token fica no `.env` para sempre e a nuvem o
+  recusa do segundo uso em diante: tentá-lo a cada subida mataria o box no primeiro
+  reinício.
+- **Confere que dá para gravar antes de gastar o token** (`pode_gravar`), escrevendo um
+  arquivo de verdade. Volume só-leitura descoberto depois da troca é credencial perdida.
+- **Escrita atômica com `fsync` e `0600` desde a criação.** O `config_cache` não faz
+  `fsync` porque o que ele guarda a nuvem devolve de novo; a credencial, não.
+- **Recusa da nuvem não se tenta de novo; falha de rede, poucas vezes.** Depois disso o
+  agente sai com erro em vez de ficar de pé e mudo — o Docker reinicia, e o log diz o
+  motivo.
+- **`401` em regime não dispara registro.** O token já foi gasto, e um agente que se
+  reprovisionasse sozinho esconderia a causa. Continua sendo retry lento (§5.4).
+- **`--config-nuvem` sem credencial nenhuma não sobe.** Com um cache de configuração no
+  disco ele subiria, detectaria e não entregaria nada: uma loja que parece instalada.
+- **O compose não obriga nenhuma das duas variáveis**; quem recusa é o agente, com a
+  mensagem que diz onde gerar o token.
+
 O aviso no celular (§4.5) é Web Push, e não WhatsApp: grátis, sem aprovação de terceiro,
 e o toque abre `/eventos/:id` com o vídeo rodando — o primeiro dos dois toques da NFR-9. O
 que se vigia nele não é se chegou, é **quantas vezes o celular toca**, porque é isso que faz
@@ -330,10 +351,9 @@ Onde encostar em cada coisa:
 - **WhatsApp (§4.3)**, se um dia vier, entra como segundo canal do mesmo `Notificador`:
   a decisão de notificar (`alerta`) já é independente do canal. É aí que o envio em
   processo vira job durável (BullMQ), porque WhatsApp cobra e precisa de retry.
-- **Registro do agente no lado do agente (§5.1)** é o outro lado do
-  `POST /v1/agents/register`, que já existe na API: trocar um token de bootstrap por
-  credencial na subida, em vez do `--api-token` semeado. O token já sai do dashboard
-  (`/box`), na forma da linha `LINCE_BOOTSTRAP_TOKEN=...` que o agente vai ler.
+- **Rotação de credencial e reprovisionamento (§5.1)** são o que falta do registro: a
+  nuvem ainda não comanda a troca da credencial, e cada registro cria um `Agente` novo
+  sem desativar o anterior da loja.
 - **Download de modelo (§5.2)** substitui o caminho local em `DetectionOptions.model_path`.
   O `model_version` já é nome + checksum, no formato que o ADR-006 quer.
 - **Supressão de duplicados (§4.6)** já vale para o aviso no celular (`alerta`), mas não
@@ -400,7 +420,7 @@ uv run python -m lince_agent --config config.exemplo.json \
 # o mesmo documento, agora puxado da nuvem a cada 30 s (§5.2), com cache local para
 # reiniciar sem internet (§5.4). `--config`, `--config-nuvem` e `--camera` se excluem:
 uv run python -m lince_agent --config-nuvem --api-url http://localhost:3000 \
-  --model models/yolox_s.onnx --dry-run --stats
+  --api-token dev-agent-token-local-only --model models/yolox_s.onnx --dry-run --stats
 
 # detecção e tracking contra vídeo com pessoas de verdade (cam3):
 uv run python -m lince_agent --camera rtsp://localhost:8554/cam3 \
@@ -668,6 +688,9 @@ Não reintroduza nenhuma destas — cada uma custou depuração e tem teste guar
   é o caminho **saudável** e o mais frequente de todos — 2 880 vezes por dia, por loja.
   Tratá-lo como exceção põe o agente em backoff exponencial por estar tudo bem, e a loja
   para de receber calibração sem um erro em lugar nenhum.
+- **Variável vazia do compose não é ausência.** `${LINCE_AGENT_TOKEN:-}` entrega `""`,
+  e `os.environ.get` devolve a string vazia, não `None`. Lida como token, ela venceria a
+  credencial guardada e o box subiria sem `Authorization`. Por isso o `or None` nas flags.
 - **`classify_response` não serve ao poll de configuração.** Ela é do envio de evento e
   diverge em dois pontos que doem: `304` cairia em `RETRY`, e `404` significa "evento
   desconhecido, reposte" no envio e "esta nuvem não conhece este agente" no poll. Por

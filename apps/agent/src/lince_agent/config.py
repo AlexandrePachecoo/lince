@@ -644,8 +644,10 @@ class CloudOptions:
 
     api_url: str = "http://localhost:3000"
     token: str | None = None
-    """Bearer estático por enquanto. O provisionamento por token de bootstrap e a
-    rotação da §5.1 dependem do `POST /v1/agents/register`, que ainda não existe."""
+    """A credencial de longa duração do agente. No box ela sai do registro por token de
+    bootstrap e fica em `credencial.json` (`registro.py`, `credencial.py`); em
+    desenvolvimento pode vir pronta em `--api-token`. A rotação comandada pela nuvem da
+    §5.1 ainda não existe."""
 
     timeout_s: float = 10.0
     upload_timeout_s: float = 120.0
