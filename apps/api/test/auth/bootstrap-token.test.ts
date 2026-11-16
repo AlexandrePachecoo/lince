@@ -46,3 +46,17 @@ test("criaTokenBootstrap expira TTL_HORAS à frente do momento da criação", as
   assert.ok(expiraEm.getTime() >= antes + ttlMs);
   assert.ok(expiraEm.getTime() <= depois + ttlMs);
 });
+
+test("criaTokenBootstrap sem autor grava a linha sem autor, e não um autor inventado", async () => {
+  // O caminho do scripts/seed.ts. Um autor fictício na trilha ("sistema", "seed") seria
+  // indistinguível de um usuário com esse nome quando alguém for investigar.
+  const { lojaId } = await semeiaLoja();
+
+  const { token } = await criaTokenBootstrap(prismaTeste, lojaId);
+
+  const registro = await prismaTeste.tokenBootstrap.findUniqueOrThrow({
+    where: { tokenHash: hashToken(token) },
+  });
+  assert.equal(registro.criadoPorId, null);
+  assert.equal(registro.criadoPorEmail, null);
+});

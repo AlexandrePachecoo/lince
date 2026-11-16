@@ -73,6 +73,10 @@ const validaNotificacaoPush = ajv.compile(
   carregaSchema("@lince/shared/schemas/notificacao.v1.json"),
 );
 
+const validaBootstrapToken = ajv.compile(
+  carregaSchema("@lince/shared/schemas/bootstrap-token.v1.json"),
+);
+
 export type ResultadoValidacao = { valido: true } | { valido: false; erros: ErrorObject[] };
 
 function resultado(
@@ -163,4 +167,9 @@ export function validaRequisicaoPushRemocao(corpo: unknown): ResultadoValidacao 
 /** O conteúdo que a API cifra e o service worker mostra. */
 export function validaNotificacao(documento: unknown): ResultadoValidacao {
   return resultado(validaNotificacaoPush, documento);
+}
+
+/** Resposta do `POST /v1/lojas/{store_id}/bootstrap-token`. */
+export function validaRespostaBootstrapToken(documento: unknown): ResultadoValidacao {
+  return resultado(validaBootstrapToken, documento);
 }

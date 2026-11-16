@@ -398,3 +398,29 @@ body {
   border: 1px solid var(--confirmar);
   background: transparent;
 }
+
+/* O token de instalação do box. Quebra em qualquer caractere porque é uma linha de ~90
+   caracteres sem espaço: sem isso ela estoura a largura do celular e o fim — a parte que
+   distingue um token do outro — fica fora da tela. `user-select: all` faz um toque
+   selecionar a linha inteira, que é o caminho de quem não conseguiu usar o botão. */
+.segredo {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--borda);
+  border-radius: 0.6rem;
+}
+
+.segredo p {
+  margin: 0;
+}
+
+.segredo__valor {
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  background: var(--superficie);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+  user-select: all;
+}

@@ -15,6 +15,7 @@ import eventsCreateRoutes from "./routes/events/create.js";
 import eventsDetalheRoutes from "./routes/events/detalhe.js";
 import eventsListarRoutes from "./routes/events/listar.js";
 import eventsTriagemRoutes from "./routes/events/triagem.js";
+import lojasBootstrapTokenRoutes from "./routes/lojas/bootstrap-token.js";
 import metricasFalsoPositivoRoutes from "./routes/metricas/falso-positivo.js";
 import pushChaveRoutes from "./routes/push/chave.js";
 import pushInscricoesRoutes from "./routes/push/inscricoes.js";
@@ -83,6 +84,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   await app.register(usuariosCriarRoutes);
   await app.register(usuariosListarRoutes);
   await app.register(usuariosAlterarRoutes);
+  await app.register(lojasBootstrapTokenRoutes);
 
   return app;
 }

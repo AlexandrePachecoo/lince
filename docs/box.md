@@ -103,9 +103,16 @@ A imagem não carrega credencial nem modelo, e o código já é público; tornar
 público (Settings do pacote no GitHub → *Change visibility*) dispensa esse passo em
 todo box.
 
-O token do agente (`LINCE_AGENT_TOKEN`) hoje é provisionado à mão: o
-`POST /v1/agents/register` existe na API, mas o lado do agente que troca o token de
-bootstrap pela credencial ainda não (§5.1).
+O token do agente (`LINCE_AGENT_TOKEN`) hoje é provisionado à mão. As duas pontas da
+nuvem já existem — o admin da loja gera o token de bootstrap no dashboard, em `/box`, e o
+`POST /v1/agents/register` o troca por credencial —, mas o lado do agente que faz essa
+troca na subida ainda não (§5.1). Até lá, o token de `/box` se troca por `curl`, e o
+`token` da resposta é o `LINCE_AGENT_TOKEN`:
+
+```bash
+curl -s -X POST "$LINCE_API_URL/v1/agents/register" -H 'content-type: application/json' \
+  -d '{"schema_version":1,"bootstrap_token":"<token de /box>"}'
+```
 
 ### Subir
 

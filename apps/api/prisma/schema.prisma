@@ -140,6 +140,14 @@ model TokenBootstrap {
   usadoEm     DateTime? @map("usado_em")
   criadoEm    DateTime  @default(now()) @map("criado_em")
 
+  // Quem gerou. A linha do token já é a trilha dele -- quando nasceu, para qual loja,
+  // se e quando foi trocado por credencial --, e o autor é o que faltava para ela
+  // responder "quem pôs um box nesta loja". Texto e cópia do e-mail, sem FK, pelo mesmo
+  // motivo de Auditoria.usuarioId: a trilha não pode perder o autor quando o cadastro
+  // muda. Nulo é o token do scripts/seed.ts, que não tem autor.
+  criadoPorId    String? @map("criado_por_id")
+  criadoPorEmail String? @map("criado_por_email")
+
   loja Loja @relation(fields: [lojaId], references: [id])
 
   @@index([lojaId])

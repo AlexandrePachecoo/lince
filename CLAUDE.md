@@ -62,8 +62,8 @@ cd apps/agent && uv run ruff check src tests tools && uv run ruff format --check
 | Componente | Situação |
 |---|---|
 | `apps/agent` | Estágios 1 a 6 (§3.1 a §3.6) ligados por `runtime.py`. N câmeras com zonas próprias, vindas do `GET /v1/agents/config` com `ETag`/`304`, poll de 30 s, cache local e troca a quente. Heartbeat da §5.3 sobe a cada 30 s |
-| `apps/api` | As três rotas de agente (`config`, `register`, `heartbeat`), o caminho do evento (`POST /v1/events` com URL pré-assinada e `PATCH /v1/events/{event_id}`) e o lado humano da §4.5: login, fila de triagem, evento avulso por `GET /v1/events/{event_id}`, decisão, URL de leitura do clipe com auditoria e cadastro de usuário. Mais a métrica de falso positivo por câmera/dia do R-1 (`GET /v1/metricas/falso-positivo`) e o aviso no celular por Web Push, com agrupamento por câmera e teto diário por loja (§4.6, R-12). Falta download de modelo e WebSocket |
-| `apps/dashboard` | O ciclo de triagem da §4.5 em Vite + React: login, fila por cursor, evento com o clipe rodando e a decisão em três botões — os dois toques da NFR-9 —, mais a tela de falso positivo por câmera (R-1) e o botão de avisos no celular (service worker + manifesto instalável). Falta WebSocket e as telas de usuário |
+| `apps/api` | As três rotas de agente (`config`, `register`, `heartbeat`), o caminho do evento (`POST /v1/events` com URL pré-assinada e `PATCH /v1/events/{event_id}`) e o lado humano da §4.5: login, fila de triagem, evento avulso por `GET /v1/events/{event_id}`, decisão, URL de leitura do clipe com auditoria, cadastro de usuário e o token de instalação do box (`POST /v1/lojas/{store_id}/bootstrap-token`, §5.1). Mais a métrica de falso positivo por câmera/dia do R-1 (`GET /v1/metricas/falso-positivo`) e o aviso no celular por Web Push, com agrupamento por câmera e teto diário por loja (§4.6, R-12). Falta download de modelo e WebSocket |
+| `apps/dashboard` | O ciclo de triagem da §4.5 em Vite + React: login, fila por cursor, evento com o clipe rodando e a decisão em três botões — os dois toques da NFR-9 —, mais a tela de falso positivo por câmera (R-1), o botão de avisos no celular (service worker + manifesto instalável) e a tela `/box`, onde o admin gera o token de instalação. Falta WebSocket e as telas de usuário |
 | `packages/shared` | JSON Schema dos dois contratos: agente ↔ nuvem (§5) e dashboard ↔ nuvem (§4.5) |
 | `infra/box` | O box da loja (§3.8): imagem do agente em `apps/agent/Dockerfile` (CUDA 13 + cuDNN 9 + ffmpeg com NVDEC + `onnxruntime-gpu`), compose com agente e Redis local, override de desenvolvimento, e o passo a passo em `docs/box.md`. O CI constrói a imagem, roda a suíte dentro dela e publica no GHCR a cada tag `agente-vX.Y.Z`. Falta atualização automática com rollback (R-7) |
 
@@ -279,6 +279,22 @@ O que sustenta o número:
   dia" passaria a significar duas coisas na mesma resposta, e o número não teria como ser
   auditado depois. Com uma loja por fuso o caso nunca aparece.
 
+O token de instalação do box (§5.1) é gerado pelo admin da loja em `/box`, e o que se
+decidiu ali é o que fazer com um segredo que aparece uma vez:
+
+- **Gerar vence o token anterior da loja que ainda não foi usado.** Quem pede o segundo
+  perdeu o primeiro, e o primeiro continuar valendo é uma credencial solta por 24 h. Vence
+  adiantando `expiraEm`, sem apagar: a recusa sai "expirado" (gere outro) e não "não
+  reconhecido" (confira a cópia), e a linha continua dizendo quem gerou.
+- **Só a credencial humana gera, e só admin da loja.** Um box que emitisse token
+  fabricaria agentes para a própria loja, e desativá-lo não encerraria o incidente. E o
+  token vira um box, que puxa a configuração com as senhas RTSP dentro.
+- **O autor fica na linha do token** (`criadoPorId`/`criadoPorEmail`, sem FK), e não na
+  tabela de auditoria: a linha já diz quando nasceu, para qual loja e se virou agente.
+- **A tela mostra a linha do `.env`, e não o token solto**, e não o guarda em lugar
+  nenhum do navegador. Nome de variável digitado errado não dá erro: dá um box sem
+  credencial.
+
 O aviso no celular (§4.5) é Web Push, e não WhatsApp: grátis, sem aprovação de terceiro,
 e o toque abre `/eventos/:id` com o vídeo rodando — o primeiro dos dois toques da NFR-9. O
 que se vigia nele não é se chegou, é **quantas vezes o celular toca**, porque é isso que faz
@@ -316,7 +332,8 @@ Onde encostar em cada coisa:
   processo vira job durável (BullMQ), porque WhatsApp cobra e precisa de retry.
 - **Registro do agente no lado do agente (§5.1)** é o outro lado do
   `POST /v1/agents/register`, que já existe na API: trocar um token de bootstrap por
-  credencial na subida, em vez do `--api-token` semeado.
+  credencial na subida, em vez do `--api-token` semeado. O token já sai do dashboard
+  (`/box`), na forma da linha `LINCE_BOOTSTRAP_TOKEN=...` que o agente vai ler.
 - **Download de modelo (§5.2)** substitui o caminho local em `DetectionOptions.model_path`.
   O `model_version` já é nome + checksum, no formato que o ADR-006 quer.
 - **Supressão de duplicados (§4.6)** já vale para o aviso no celular (`alerta`), mas não
