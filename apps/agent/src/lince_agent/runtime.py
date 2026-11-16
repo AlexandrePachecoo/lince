@@ -40,7 +40,7 @@ from lince_agent.clip.buffer import ClipBuffer
 from lince_agent.clip.recorder import ClipRecorder
 from lince_agent.clip.state import BufferStats, ClipResult, ClipStatus, RecorderStats
 from lince_agent.clip.store import ClipStore
-from lince_agent.config import AgentConfig, CameraConfig
+from lince_agent.config import AgentConfig, CameraConfig, valida_entrada_do_modelo
 from lince_agent.config_diff import Diff, Veredito, classifica
 from lince_agent.detect.detector import Detector, NullDetector
 from lince_agent.detect.state import DetectionResult, DetectorStats
@@ -216,6 +216,7 @@ class AgentRuntime:
         )
 
         self._detector = detector or _monta_detector(config)
+        _confere_entrada(config, self._detector)
         self._deteccao = DetectorWorker(
             self._detector,
             options=config.detection,
@@ -692,6 +693,24 @@ def _versao_da_pose(pose: Pose | None) -> str | None:
     if not callable(info):
         return None
     return getattr(info(), "model_version", None)
+
+
+def _confere_entrada(config: AgentConfig, detector: Detector) -> None:
+    """O frame de cada câmera contra o lado que o modelo **de fato** consome.
+
+    Com `detection.input_size` no documento, o `AgentConfig` já conferiu na carga. Sem
+    ele — o padrão, porque o modelo é do box (ADR-012) —, o lado só existe depois de o
+    `.onnx` abrir, e é aqui que a mesma recusa acontece: antes de qualquer câmera
+    subir, e não uma vez por frame num log que ninguém lê.
+    """
+    info = detector.info()
+    if info is None:
+        return
+    try:
+        valida_entrada_do_modelo(config.cameras, info.input_size)
+    except ValueError:
+        detector.close()
+        raise
 
 
 def _monta_detector(config: AgentConfig) -> Detector:

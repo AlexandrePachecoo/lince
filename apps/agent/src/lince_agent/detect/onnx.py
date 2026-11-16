@@ -280,7 +280,7 @@ def abre_sessao(model_path: Path, providers: tuple[str, ...]):
     return ort.InferenceSession(str(model_path), providers=pedidos)
 
 
-def _resolve_input_size(shape: list[Any], configurado: int, model_path: Path) -> int:
+def _resolve_input_size(shape: list[Any], configurado: int | None, model_path: Path) -> int:
     """Confere o `input_size` da configuração contra o que o próprio `.onnx` declara.
 
     Um modelo de 416 rodando com `input_size=640` não estoura: a grade de âncoras não
@@ -291,12 +291,18 @@ def _resolve_input_size(shape: list[Any], configurado: int, model_path: Path) ->
     # Exportação com lote ou lado dinâmico traz string ou None no lugar do número.
     laterais = [valor for valor in shape[2:] if isinstance(valor, int) and valor > 0]
     if not laterais:
+        if configurado is None:
+            raise ModelError(
+                f"{model_path.name} tem entrada dinâmica e a configuração não diz o lado. "
+                "Informe detection.input_size (ou --input-size): sem ele não há grade de "
+                "âncoras para decodificar"
+            )
         return configurado
 
     if len(set(laterais)) != 1:
         raise ModelError(f"{model_path.name} declara entrada não quadrada {shape}")
     declarado = laterais[0]
-    if declarado != configurado:
+    if configurado is not None and declarado != configurado:
         raise ModelError(
             f"{model_path.name} declara entrada de {declarado} e a configuração diz "
             f"{configurado}. Ajuste DetectionOptions.input_size — decodificar com o "

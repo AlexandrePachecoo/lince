@@ -365,7 +365,7 @@ def test_model_liga_o_estagio_com_os_padroes_da_arquitetura(tmp_path):
 
     assert opcoes.enabled is True
     assert opcoes.model_path == modelo
-    assert opcoes.input_size == 640
+    assert opcoes.input_size is None, "o lado é o que o .onnx declara: o modelo é do box"
     assert opcoes.providers == (
         "CUDAExecutionProvider",
         "OpenVINOExecutionProvider",

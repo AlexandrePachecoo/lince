@@ -324,9 +324,16 @@ class DetectionOptions:
     """Arquivo `.onnx`. Hoje vem da configuração local; o `GET /v1/models/current` do
     §5.2 vai entregar este arquivo com checksum e versão (ADR-006)."""
 
-    input_size: int = 640
-    """Lado do quadrado que o modelo consome. É conferido contra a forma declarada no
-    próprio `.onnx` na subida — divergir aqui decodifica caixas plausíveis e erradas."""
+    input_size: int | None = None
+    """Lado do quadrado que o modelo consome. `None` — o padrão — é "o que o `.onnx`
+    declara", e é o certo quase sempre: o arquivo do modelo é do box, não da loja
+    (§5.2), e o box sem placa roda o YOLOX-tiny de 416 enquanto o com placa roda o s de
+    640 (ADR-012). Um número fixo vindo do documento da nuvem faria um dos dois recusar
+    a subida.
+
+    Quando o documento diz um número, ele é conferido contra a forma declarada no
+    `.onnx` — divergir decodifica caixas plausíveis e erradas. Só um `.onnx` de entrada
+    dinâmica *precisa* do número, e sem ele é recusado na subida."""
 
     providers: tuple[str, ...] = (
         "CUDAExecutionProvider",
@@ -395,7 +402,7 @@ class DetectionOptions:
     def __post_init__(self) -> None:
         if self.enabled and self.model_path is None:
             raise ValueError("detecção habilitada exige model_path")
-        if self.input_size <= 0 or self.input_size % 32:
+        if self.input_size is not None and (self.input_size <= 0 or self.input_size % 32):
             raise ValueError(
                 f"input_size deve ser múltiplo positivo de 32, recebi {self.input_size}: "
                 "é o maior stride da grade de âncoras"
@@ -422,6 +429,26 @@ class DetectionOptions:
             # Zero faria toda avaliação do portão abrir como vigia: o portão ligado e
             # nunca fechado, que é o pior dos dois mundos — paga o custo e não poupa nada.
             raise ValueError(f"vigia_s deve ser positivo, recebi {self.vigia_s}")
+
+
+def valida_entrada_do_modelo(cameras: tuple[CameraConfig, ...], lado: int) -> None:
+    """Recusa câmera cujo frame é menor que a entrada do modelo.
+
+    Reduzir é o `preproc` do YOLOX; ampliar daria um borrão que o modelo nunca viu, e o
+    `preprocess` recusa — uma vez por frame, num log que ninguém lê, com o agente
+    ingerindo e nunca detectando. Por isso a recusa vem na subida.
+    """
+    for camera in cameras:
+        if not camera.detect:
+            continue
+        maior = max(camera.decode.width, camera.decode.height)
+        if maior < lado:
+            raise ValueError(
+                f"câmera {camera.camera_id} decodifica em "
+                f"{camera.decode.width}x{camera.decode.height}, e o modelo consome {lado}: "
+                f"o maior lado precisa ser pelo menos {lado}. Ajuste DecodeOptions.width/"
+                f"height — o ffmpeg já escala no filtro que existe (§3.1)"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -771,18 +798,14 @@ class AgentConfig:
         if not self.detection.enabled:
             return
 
-        lado = self.detection.input_size
+        # Sem número no documento, o lado é o que o `.onnx` declara, e o arquivo só é
+        # aberto pelo runtime: a conferência do tamanho acontece lá, com o mesmo
+        # `valida_entrada_do_modelo`, antes de qualquer câmera subir.
+        if self.detection.input_size is not None:
+            valida_entrada_do_modelo(self.cameras, self.detection.input_size)
         for camera in self.cameras:
             if not camera.detect:
                 continue
-            maior = max(camera.decode.width, camera.decode.height)
-            if maior < lado:
-                raise ValueError(
-                    f"câmera {camera.camera_id} decodifica em "
-                    f"{camera.decode.width}x{camera.decode.height}, e o modelo consome {lado}: "
-                    f"o maior lado precisa ser pelo menos {lado}. Ajuste DecodeOptions.width/"
-                    f"height — o ffmpeg já escala no filtro que existe (§3.1)"
-                )
             if camera.decode.pixel_format is not PixelFormat.BGR24:
                 raise ValueError(
                     f"câmera {camera.camera_id} entrega {camera.decode.pixel_format} e o "

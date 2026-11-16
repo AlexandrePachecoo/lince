@@ -179,8 +179,24 @@ def test_frame_menor_que_o_modelo_derruba_a_subida(tmp_path):
         agente(
             tmp_path,
             cameras=(camera,),
-            detection=DetectionOptions(enabled=True, model_path=tmp_path / "m.onnx"),
+            detection=DetectionOptions(
+                enabled=True, model_path=tmp_path / "m.onnx", input_size=640
+            ),
         )
+
+
+def test_sem_lado_no_documento_a_conferencia_espera_o_modelo_abrir(tmp_path):
+    """Sem `input_size`, o lado só existe depois de o `.onnx` abrir — quem confere é o
+    runtime (`_confere_entrada`). Recusar aqui com um 640 suposto barraria o box sem
+    placa, que roda o tiny de 416 sobre um frame 640x480 menor que 640x640."""
+    camera = CameraConfig(
+        camera_id="cam1", url="rtsp://x", decode=DecodeOptions(width=480, height=360)
+    )
+    agente(
+        tmp_path,
+        cameras=(camera,),
+        detection=DetectionOptions(enabled=True, model_path=tmp_path / "m.onnx"),
+    )
 
 
 def test_formato_planar_derruba_a_subida_com_deteccao_ligada(tmp_path):

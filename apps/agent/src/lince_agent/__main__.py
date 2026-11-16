@@ -228,8 +228,9 @@ def build_parser() -> argparse.ArgumentParser:
     estagio2.add_argument(
         "--input-size",
         type=int,
-        default=640,
-        help="lado da entrada do modelo; conferido contra o que o .onnx declara",
+        default=None,
+        help="lado da entrada do modelo. Sem ele, o que o .onnx declara — 640 no YOLOX-s, "
+        "416 no tiny e no nano. Com ele, é conferido contra o arquivo",
     )
     estagio2.add_argument(
         "--provider",
