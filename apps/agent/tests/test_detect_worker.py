@@ -316,3 +316,120 @@ def test_null_detector_nao_detecta_e_se_declara_desligado():
     assert stats.info is None
     assert stats.frames_inferred == 1
     assert stats.detections == 0
+
+
+# --- portão de movimento (ADR-012) ------------------------------------------------
+
+
+def _cena(sequence: int, *, pessoa_em: int | None = None):
+    """Frame com conteúdo: o `frame()` dos dublês é preto e nunca muda."""
+    import numpy as np
+
+    from lince_agent.config import PixelFormat
+    from lince_agent.ffmpeg.rawframe import Frame
+
+    imagem = np.zeros((480, 640, 3), dtype=np.uint8)
+    if pessoa_em is not None:
+        imagem[200:360, pessoa_em : pessoa_em + 60] = 200
+    return Frame(imagem.tobytes(), 640, 480, PixelFormat.BGR24, sequence, sequence / 3)
+
+
+def _com_portao(detector, *, tem_track=None, **opcoes) -> DetectorWorker:
+    return DetectorWorker(
+        detector,
+        options=DetectionOptions(queue_size=64, fps_window=8, portao_movimento=True, **opcoes),
+        tem_track=tem_track,
+        clock=Relogio(),
+    )
+
+
+def _drena(unidade: DetectorWorker) -> None:
+    while unidade.tick():
+        pass
+
+
+def test_portao_desligado_infere_tudo():
+    """O padrão. Um box com GPU que ninguém reconfigurou não pode passar a pular frame."""
+    detector = DetectorFalso()
+    unidade = worker(detector, queue_size=16)
+    for sequencia in range(1, 11):
+        unidade.submit("cam1", frame(sequencia))
+    _drena(unidade)
+    assert len(detector.vistos) == 10
+    assert unidade.stats().gated == 0
+
+
+def test_portao_poupa_a_loja_vazia_e_conta_o_que_poupou():
+    """`poupados` é o que separa "câmera parada" de "loja vazia" quando `inference_fps`
+    cai para perto de zero. Sem o contador, os dois teriam a mesma cara no `--stats`."""
+    detector = DetectorFalso()
+    unidade = _com_portao(detector)
+    for sequencia in range(10):  # 3 s de loja vazia: só a vigia do primeiro frame
+        unidade.submit("cam1", _cena(sequencia))
+    _drena(unidade)
+
+    camera = unidade.stats().cameras[0]
+    assert len(detector.vistos) == 1
+    assert (camera.frames_inferred, camera.gated) == (1, 9)
+
+
+def test_portao_abre_quando_alguem_entra():
+    detector = DetectorFalso()
+    unidade = _com_portao(detector)
+    unidade.submit("cam1", _cena(0))
+    unidade.submit("cam1", _cena(1))
+    unidade.submit("cam1", _cena(2, pessoa_em=100))
+    _drena(unidade)
+    assert [visto.sequence for visto in detector.vistos] == [0, 2]
+
+
+def test_portao_fica_aberto_enquanto_o_tracking_tem_alguem():
+    """A pessoa parada escolhendo não mexe. Quem segura o portão é o track dela."""
+    detector = DetectorFalso()
+    vivos = {"cam1": True}
+    unidade = _com_portao(detector, tem_track=lambda camera: vivos[camera])
+    for sequencia in range(10):
+        unidade.submit("cam1", _cena(sequencia, pessoa_em=100))
+    _drena(unidade)
+    assert len(detector.vistos) == 10
+
+    vivos["cam1"] = False
+    for sequencia in range(10, 13):
+        unidade.submit("cam1", _cena(sequencia, pessoa_em=100))
+    _drena(unidade)
+    assert len(detector.vistos) == 10
+
+
+def test_portao_que_falha_infere_em_vez_de_fechar():
+    """Portão fechado com alguém na loja não deixa rastro. Na dúvida, abre: o outro lado
+    do erro custa uma inferência."""
+    detector = DetectorFalso()
+
+    def tem_track_quebrado(_camera: str) -> bool:
+        raise RuntimeError("tracking em estado inválido")
+
+    unidade = _com_portao(detector, tem_track=tem_track_quebrado)
+    unidade.submit("cam1", _cena(0))
+    unidade.submit("cam1", _cena(1))
+    _drena(unidade)
+    assert len(detector.vistos) == 2
+
+
+def test_reconfigure_liga_o_portao_e_repassa_os_limiares_ao_detector():
+    """O portão é `A_QUENTE` (§5.2): ligá-lo pela nuvem vale a partir do frame seguinte,
+    sem reiniciar o agente. E o detector continua recebendo os limiares dele."""
+    detector = DetectorFalso()
+    unidade = worker(detector, queue_size=16)
+    unidade.submit("cam1", _cena(0))
+    unidade.submit("cam1", _cena(1))
+    _drena(unidade)
+    assert len(detector.vistos) == 2
+
+    novas = DetectionOptions(queue_size=16, fps_window=8, portao_movimento=True)
+    unidade.reconfigure(novas)
+    for sequencia in range(2, 6):
+        unidade.submit("cam1", _cena(sequencia))
+    _drena(unidade)
+
+    assert detector.reconfiguracoes == [novas]
+    assert len(detector.vistos) == 3  # a primeira avaliação do portão abre como vigia

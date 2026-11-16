@@ -287,6 +287,10 @@ _DETECTION: dict[str, Conversor] = {
     "classes": _lista(_inteiro),
     "queue_size": _inteiro,
     "fps_window": _inteiro,
+    "portao_movimento": _booleano,
+    "movimento_min": _numero,
+    "movimento_retencao_s": _numero,
+    "vigia_s": _numero,
 }
 
 _TRACKING: dict[str, Conversor] = {

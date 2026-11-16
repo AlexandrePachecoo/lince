@@ -244,6 +244,12 @@ def build_parser() -> argparse.ArgumentParser:
     estagio2.add_argument("--score-threshold", type=float, default=padrao.score_threshold)
     estagio2.add_argument("--iou-threshold", type=float, default=padrao.iou_threshold)
     estagio2.add_argument(
+        "--portao-movimento",
+        action="store_true",
+        help="só infere com movimento ou track vivo na câmera (ADR-012): o que faz três "
+        "câmeras caberem num PC sem placa. Os limiares do portão vêm do documento",
+    )
+    estagio2.add_argument(
         "--no-detect",
         action="store_true",
         help="ignora o modelo e roda com NullDetector, como uma câmera inelegível (R-3)",
@@ -401,6 +407,7 @@ def _monta_deteccao(args: argparse.Namespace) -> DetectionOptions:
         providers=tuple(args.providers) if args.providers else padrao.providers,
         score_threshold=args.score_threshold,
         iou_threshold=args.iou_threshold,
+        portao_movimento=args.portao_movimento,
     )
 
 
@@ -474,6 +481,7 @@ FLAGS_DO_DOCUMENTO = {
     "input_size": "--input-size",
     "score_threshold": "--score-threshold",
     "iou_threshold": "--iou-threshold",
+    "portao_movimento": "--portao-movimento",
     "track_high_threshold": "--track-high-threshold",
     "no_detect": "--no-detect",
     "no_track": "--no-track",
@@ -825,7 +833,8 @@ def _format_deteccao(stats: DetectorStats) -> str:
     modelo = "?" if info is None else f"{info.model_version} em {info.provider}"
     por_camera = "  ".join(
         f"{camera.camera_id}={camera.inference_fps:4.2f} fps "
-        f"({camera.detections} caixas, {camera.dropped} descartados)"
+        f"({camera.detections} caixas, {camera.dropped} descartados, "
+        f"{camera.gated} poupados)"
         for camera in stats.cameras
     )
     return (

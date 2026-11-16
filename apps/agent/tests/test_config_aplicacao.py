@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-from deteccoes import DetectorFalso
+from deteccoes import DetectorFalso, frame
 from regras import CAIXA, PASSO_S, caminho, opcoes
 from test_runtime import Agente, ClienteMudo, _ate
 
@@ -284,6 +284,32 @@ def test_limiar_de_deteccao_chega_ao_detector(tmp_path):
         )
 
         assert [o.score_threshold for o in detector.reconfiguracoes] == [0.55]
+    finally:
+        montado.runtime.stop(timeout=5.0)
+
+
+def test_portao_de_movimento_liga_a_quente_e_o_agente_passa_a_poupar(tmp_path):
+    """O portão vem da nuvem e é `A_QUENTE`: liga sem reiniciar o box. A prova de que a
+    troca chegou ao `DetectorWorker` — e não só ao detector, que é onde os outros
+    limiares moram — é o agente passar a poupar frames da loja vazia."""
+    detector = DetectorFalso()
+    montado = Agente(tmp_path, detector=detector, regras=opcoes())
+    try:
+        montado.runtime.start()
+        diff = montado.runtime.aplica_config(
+            replace(
+                montado.config,
+                config_version="v2",
+                detection=replace(montado.config.detection, portao_movimento=True),
+            )
+        )
+        assert diff.veredito is Veredito.A_QUENTE
+
+        # Loja vazia: frames pretos, iguais, sem ninguém para o tracking segurar.
+        for sequencia in range(1, 7):
+            montado.alimenta_frame("cam1", frame(sequencia))
+        assert _ate(lambda: montado.runtime.health().detector.gated >= 1)
+        assert detector.reconfiguracoes[-1].portao_movimento is True
     finally:
         montado.runtime.stop(timeout=5.0)
 

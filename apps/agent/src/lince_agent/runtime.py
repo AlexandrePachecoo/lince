@@ -220,6 +220,7 @@ class AgentRuntime:
             self._detector,
             options=config.detection,
             on_result=self._ao_detectar,
+            tem_track=self._tem_track,
             clock=clock,
         )
 
@@ -464,6 +465,10 @@ class AgentRuntime:
         if self._detecta.get(camera_id, True):
             self._deteccao.submit(camera_id, frame)
 
+    def _tem_track(self, camera_id: str) -> bool:
+        """Para o portão de movimento. Roda na thread de detecção, como o tracking."""
+        return self._config.tracking.enabled and self._tracking.tem_tracks(camera_id)
+
     def _ao_detectar(self, resultado: DetectionResult) -> None:
         """Dá identidade às caixas do frame. Roda na thread de detecção.
 
@@ -609,7 +614,7 @@ class AgentRuntime:
         leituras seguintes pegam o objeto novo inteiro. Não existe estado meio trocado —
         que é o que aconteceria mutando os campos um a um.
         """
-        self._detector.reconfigure(nova.detection)
+        self._deteccao.reconfigure(nova.detection)
         self._tracking.reconfigure(nova.tracking)
 
         antigas = {camera.camera_id: camera.rules for camera in anterior.cameras}

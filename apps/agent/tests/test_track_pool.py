@@ -230,3 +230,28 @@ def test_stats_agregadas_somam_as_cameras():
     stats = unidade.stats()
     assert stats.ativos == 2
     assert stats.criados == 2
+
+
+# --- o que o portão de movimento pergunta (ADR-012) -------------------------------
+
+
+def test_tem_tracks_conta_o_perdido_ate_ele_morrer():
+    """O portão de movimento fecha só quando isto é falso, e um track só morre num
+    `update`. Se o perdido não contasse, o portão fecharia com ele vivo na memória, e a
+    próxima pessoa herdaria minutos de extrapolação do Kalman."""
+    unidade = pool(max_perdido_s=1.0)
+    assert unidade.tem_tracks("cam1") is False
+
+    caminha(unidade, "cam1", 4)
+    unidade.update(frame("cam1", (), sequence=5, at=4 * PASSO_S))
+    assert unidade.stats().cameras[0].perdidos == 1
+    assert unidade.tem_tracks("cam1") is True
+
+    unidade.update(frame("cam1", (), sequence=6, at=4 * PASSO_S + 2.0))
+    assert unidade.tem_tracks("cam1") is False
+
+
+def test_tem_tracks_e_por_camera():
+    unidade = pool()
+    caminha(unidade, "cam1", 3)
+    assert (unidade.tem_tracks("cam1"), unidade.tem_tracks("cam2")) == (True, False)

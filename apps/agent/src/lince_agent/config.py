@@ -370,6 +370,28 @@ class DetectionOptions:
     """Inferências consideradas no cálculo de `inference_fps`. Janela, e não média
     desde a subida, para uma degradação recente aparecer no heartbeat."""
 
+    portao_movimento: bool = False
+    """Só infere quando a câmera mostra movimento ou tem track vivo (ADR-012,
+    `detect/movimento.py`). É o que faz três câmeras caberem num mini PC sem placa: a
+    loja passa a maior parte do dia vazia.
+
+    Desligado por padrão porque muda o que `inference_fps` significa — com o portão, uma
+    câmera saudável numa loja vazia reporta perto de zero — e quem lê o heartbeat de um
+    box com GPU não pode passar a ver isso sem ter pedido."""
+
+    movimento_min: float = 0.005
+    """Fração das amostras do frame que precisa mudar para contar como movimento. 0,5%
+    de 80x60 amostras são 24: uma pessoa ao fundo de um quadro 640x480 cobre mais que
+    isso, e ruído de câmera barata à noite, menos. **A validar com vídeo de loja.**"""
+
+    movimento_retencao_s: float = 2.0
+    """Por quanto tempo o portão continua aberto depois do último movimento, mesmo sem
+    track. Cobre quem entrou e ainda não foi confirmado pelo tracking."""
+
+    vigia_s: float = 5.0
+    """Com o portão fechado, uma inferência a cada `vigia_s` mesmo assim. É o que acha
+    a pessoa que já estava imóvel no quadro quando o portão começou a olhar."""
+
     def __post_init__(self) -> None:
         if self.enabled and self.model_path is None:
             raise ValueError("detecção habilitada exige model_path")
@@ -390,6 +412,16 @@ class DetectionOptions:
             raise ValueError(f"queue_size deve ser positivo, recebi {self.queue_size}")
         if self.fps_window < 2:
             raise ValueError(f"fps_window precisa de ao menos 2 amostras, recebi {self.fps_window}")
+        if not 0.0 <= self.movimento_min <= 1.0:
+            raise ValueError(f"movimento_min deve estar entre 0 e 1, recebi {self.movimento_min}")
+        if self.movimento_retencao_s < 0:
+            raise ValueError(
+                f"movimento_retencao_s não pode ser negativo, recebi {self.movimento_retencao_s}"
+            )
+        if self.vigia_s <= 0:
+            # Zero faria toda avaliação do portão abrir como vigia: o portão ligado e
+            # nunca fechado, que é o pior dos dois mundos — paga o custo e não poupa nada.
+            raise ValueError(f"vigia_s deve ser positivo, recebi {self.vigia_s}")
 
 
 @dataclass(frozen=True, slots=True)

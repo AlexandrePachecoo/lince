@@ -366,8 +366,29 @@ def test_model_liga_o_estagio_com_os_padroes_da_arquitetura(tmp_path):
     assert opcoes.enabled is True
     assert opcoes.model_path == modelo
     assert opcoes.input_size == 640
-    assert opcoes.providers[0] == "CUDAExecutionProvider", "o box da loja tem GPU (§3.1)"
-    assert opcoes.providers[-1] == "CPUExecutionProvider", "e cai para CPU (§10.10)"
+    assert opcoes.providers == (
+        "CUDAExecutionProvider",
+        "OpenVINOExecutionProvider",
+        "CPUExecutionProvider",
+    ), "placa se houver, OpenVINO no mini PC Intel (ADR-012), CPU por último (§10.10)"
+    assert opcoes.portao_movimento is False
+
+
+def test_portao_movimento_liga_pela_linha_de_comando(tmp_path):
+    modelo = tmp_path / "yolox_tiny.onnx"
+    args = cli.build_parser().parse_args(
+        ["--camera", "rtsp://x/y", "--model", str(modelo), "--portao-movimento"]
+    )
+    assert cli._monta_deteccao(args).portao_movimento is True
+
+
+def test_portao_movimento_junto_com_config_e_erro(tmp_path):
+    """Com documento, o portão é dele (é `A_QUENTE`, vem da nuvem). A flag ignorada em
+    silêncio deixaria alguém acreditando que ligou o portão num box que roda sem ele."""
+    parser = cli.build_parser()
+    args = parser.parse_args(["--config", str(escreve_config(tmp_path)), "--portao-movimento"])
+    with pytest.raises(SystemExit):
+        cli._monta_config(parser, args)
 
 
 def test_provider_repetido_define_a_ordem_de_preferencia(tmp_path):
@@ -439,6 +460,22 @@ def test_linha_de_deteccao_mostra_modelo_fila_e_camera():
 
     for pedaço in ("yolox_s@abc123", "CUDAExecutionProvider", "1/8", "saida", "2.97", "41", "2"):
         assert pedaço in linha
+
+
+def test_linha_da_deteccao_mostra_os_frames_poupados_pelo_portao():
+    """Com o portão de movimento, `inference_fps` perto de zero é loja vazia, não câmera
+    parada. É o `poupados` ao lado que diz qual dos dois."""
+    stats = DetectorStats(
+        enabled=True,
+        info=DetectorInfo(
+            model_version="yolox_tiny@abc123",
+            input_size=416,
+            provider="OpenVINOExecutionProvider",
+            classes=(0,),
+        ),
+        cameras=(CameraDetectionStats(camera_id="porta", frames_inferred=3, gated=87),),
+    )
+    assert "87 poupados" in cli._format_deteccao(stats)
 
 
 # --- estágio 3: tracking ----------------------------------------------------
