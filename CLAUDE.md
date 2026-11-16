@@ -1,15 +1,25 @@
 # lince — orientações para trabalhar neste repositório
 
-Detecção de possível furto em mercados de bairro, reaproveitando o CFTV existente.
-O sistema **não decide nada sozinho**: produz um alerta com clipe curto e um humano
+Detecção de possível furto em **mini markets autônomos de condomínio**: loja sem
+funcionário, 2 a 3 câmeras, pagamento no totem, e um mini PC sem placa de vídeo. O
+sistema **não decide nada sozinho**: produz um alerta com clipes curtos e um humano
 confirma ou descarta.
+
+**O foco mudou** — antes eram mercados de bairro com ~20 câmeras e box com GPU. A
+§0 da arquitetura diz o que mudou e por quê, e a §11 diz o que do código se aproveita
+e em que ordem o resto muda. O código abaixo, no "Estado atual", ainda é o do foco
+anterior: travessia de linha por track, e imagem do box com CUDA.
 
 Leia [`docs/arquitetura.md`](docs/arquitetura.md) antes de escrever código —
 especialmente a §7 (riscos). O maior risco do projeto não é a arquitetura, é a taxa
 de falso positivo, e isso muda como cada decisão de implementação deve ser tomada.
 
-Princípio organizador: **a borda decide, a nuvem administra.** Vídeo nunca sai da
-loja; o que sobe é o evento (JSON) e o clipe de ~15 s.
+Princípio organizador: **a borda vê e suspeita; a nuvem confere a venda; um humano
+decide.** Vídeo nunca sai da loja; o que sobe é a sessão (JSON) e, só quando nenhuma
+venda a explica, os clipes curtos dela. As três decisões que mais mudam o código daqui
+para frente: a unidade de análise é a **sessão** da loja, não o track (ADR-010); a
+venda é conferida **na nuvem** pelo conector do fornecedor do totem (ADR-011); e **CPU
+é o alvo**, não o fallback (ADR-012).
 
 ---
 

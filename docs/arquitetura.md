@@ -1,69 +1,105 @@
-# Arquitetura — Sistema de Detecção de Furtos em Varejo
+# Arquitetura — Detecção de Furto em Mini Markets Autônomos de Condomínio
 
-**Status:** arquitetura pretendida; a borda (§3) e as rotas de agente da §5 já existem
+**Status:** arquitetura pretendida, revista para o novo foco de produto. Boa parte da borda
+(§3) e da nuvem (§4, §5) já é código do foco anterior e continua valendo; o que muda está
+marcado e o plano de transição está na §11
 **Escopo:** MVP / v1
-**Última atualização:** 2026-08-25
+**Última atualização:** 2026-11-16
 
 > Este documento descreve a arquitetura **pretendida**, e continua sendo o alvo, não o
-> retrato. Parte dela já é código — o pipeline da §3, o contrato da §5 e as rotas de
-> agente da §4.1 —, e parte segue sem uma linha escrita: triagem, dashboard, notificação
-> e distribuição de modelo. O estado por componente vive no `CLAUDE.md`, que é atualizado
-> a cada fatia; este documento não é o lugar de acompanhar progresso.
+> retrato. O estado por componente vive no `CLAUDE.md`, que é atualizado a cada fatia;
+> este documento não é o lugar de acompanhar progresso.
 >
 > Todos os limiares numéricos aqui são **hipóteses de projeto**, não medições. Onde
-> aparece "a validar por benchmark", o número existe para dimensionar decisões e
-> precisa ser confirmado com hardware e vídeo reais antes de virar contrato. Nenhum
-> deles foi confirmado ainda: até hoje o sistema nunca viu vídeo de loja real, e é
-> disso que dependem nove das doze pendências da §10.
+> aparece "a validar por benchmark", o número existe para dimensionar decisões e precisa
+> ser confirmado com hardware e vídeo reais antes de virar contrato. Até hoje o sistema
+> nunca viu vídeo de loja real.
+
+---
+
+## 0. O que mudou em relação à versão anterior
+
+A versão anterior mirava **mercados de bairro**: ~20 câmeras, 6 a 10 relevantes, loja
+cheia, caixa com funcionário e um box com GPU. O foco agora é o **mini market autônomo
+de condomínio**: loja pequena, sem funcionário, 2 a 3 câmeras, pagamento no totem de
+autoatendimento, e o hardware tem que ser um PC fraco, com placa de vídeo fraca ou sem
+placa nenhuma.
+
+A mudança de cliente muda o problema em quatro pontos, e é deles que sai o resto do
+documento:
+
+| O que mudou | Consequência na arquitetura |
+|---|---|
+| **Existe registro de venda.** O totem sabe o que foi pago e quando | A suspeita visual é conferida contra a venda antes de virar alerta (§3.5, §4.7). É a maior alavanca contra falso positivo que o projeto já teve — no foco anterior a integração com PDV estava fora de escopo |
+| **Quase sempre há uma pessoa (ou um grupo) por vez** | A unidade de análise deixa de ser o *track* e passa a ser a **sessão**: da loja ocupada à loja vazia (§3.4). Isso dispensa re-identificação entre câmeras e rebaixa o risco de troca de ID (R-2) |
+| **2 a 3 câmeras e nenhuma GPU garantida** | CPU vira o alvo, não o fallback: modelo menor, inferência só com movimento, OpenVINO em CPU Intel (§3.2, §3.8) |
+| **Ninguém na loja para abordar** | O alerta não precisa chegar em 15 s; precisa chegar certo. O orçamento de latência relaxa para minutos e paga a espera pela venda (§3.7) |
+
+O que **não** mudou: o sistema não decide nada sozinho, vídeo contínuo nunca sai da loja
+nem é gravado, configuração é puxada pela borda, e toda decisão passa por triagem humana.
 
 ---
 
 ## 1. Visão geral e princípio organizador
 
-O sistema detecta situações de possível furto em mercados de bairro reaproveitando
-as câmeras de CFTV já instaladas na loja. Uma loja típica tem ~20 câmeras, das quais
-6 a 10 são relevantes para IA (saída, caixas, gôndolas específicas).
+O sistema detecta situações de possível furto em mini markets autônomos de condomínio,
+reaproveitando as câmeras já instaladas (ou 2 a 3 câmeras IP baratas, quando não há).
+Os comportamentos-alvo, em ordem de viabilidade:
 
-O sistema **não decide nada sozinho**. Ele produz um *alerta* composto de metadados
-do evento e um clipe curto de vídeo, e um humano confirma ou descarta. Isso é
-requisito de produto e de conformidade, não um detalhe de implementação: não existe
-caminho no sistema em que uma detecção automática produza consequência sem passar
-por triagem humana.
+1. **Saiu sem pagar** — a sessão teve interação com produto e nenhuma venda aconteceu.
+2. **Pegou produto e não pagou** — o mesmo caso visto do lado do produto: a mão entrou
+   na geladeira ou na gôndola e não houve venda. Na arquitetura, 1 e 2 são **uma regra
+   só** (§3.4, Regra S): "saiu sem passar no totem" sem ter pegado nada não é furto, é
+   morador que olhou e desistiu.
+3. **Pegou N e pagou menos que N** — divergência de quantidade. É o mais difícil, e
+   entra em fases: primeiro como **informação na triagem e métrica**, só depois como
+   alerta (§3.4, Regra D).
+
+O sistema **não decide nada sozinho**. Ele produz um *alerta* com os metadados da
+sessão e clipes curtos, e um humano confirma ou descarta. Isso é requisito de produto e
+de conformidade: não existe caminho no sistema em que uma detecção automática produza
+consequência sem triagem humana. Num condomínio isso pesa mais que num mercado de
+bairro: quem é apontado é um vizinho (R-10).
 
 ### Princípio organizador
 
-**A borda decide, a nuvem administra.**
+**A borda vê e suspeita; a nuvem confere a venda; um humano decide.**
 
-- O vídeo **nunca sai da loja**. O que sobe é o evento (JSON, poucos KB) e o clipe
-  do evento (~15 s).
-- A borda é autônoma: com a internet caída, ela continua ingerindo, detectando,
-  avaliando regras e gerando clipes. A nuvem é o plano de controle e de
-  administração, não o caminho crítico da detecção.
+- O vídeo **nunca sai da loja**. O que sobe é a sessão (JSON, poucos KB) e, **só quando
+  a suspeita sobrevive à conferência da venda**, os clipes curtos dela.
+- A borda é autônoma: com a internet caída, ela continua ingerindo, detectando, montando
+  sessões e cortando clipes. A nuvem é o plano de controle, administração e conciliação.
+- A venda é conferida **na nuvem**, porque é lá que ela chega: as plataformas de
+  autoatendimento entregam venda por webhook ou API na nuvem delas, não na rede da loja.
+  E o dado de venda não precisa ir para o box (minimização, R-9).
 - A nuvem detém a verdade sobre *configuração* (zonas, limiares, câmeras, usuários,
-  versão de modelo) e sobre o *histórico* (eventos, triagens, auditoria).
+  versão de modelo, conectores de venda) e sobre o *histórico* (sessões, alertas,
+  triagens, auditoria).
 
 ### Consequências diretas do princípio
 
 | Consequência | Implicação prática |
 |---|---|
-| Vídeo contínuo nunca é gravado nem transmitido | Buffer circular em RAM; só o clipe do evento é persistido |
-| Custo de nuvem é quase independente do número de câmeras | Nuvem escala com nº de *eventos*, não com nº de *frames* |
-| Link da loja não é ponto único de falha da detecção | Fila local + reenvio idempotente |
-| CAPEX por loja | Cada loja precisa de um box com GPU |
+| Vídeo contínuo nunca é gravado nem transmitido | Buffer circular em RAM; só os recortes em torno de momentos da sessão são persistidos, e só até a conciliação |
+| Clipe de cliente honesto nunca sobe | A subida do clipe é **condicionada** à decisão da nuvem (§3.5). O recorte provisório é apagado da loja assim que a venda é encontrada |
+| Custo de nuvem quase independente do número de câmeras | Nuvem escala com nº de *sessões*, não de *frames* |
+| Link da loja não é ponto único de falha da detecção | Fila local + reenvio idempotente; sem link, a conciliação espera, a detecção não |
+| CAPEX por loja baixo | Mini PC sem GPU (§3.8) |
 
 ### Requisitos não funcionais que dirigem a arquitetura
 
 | # | Requisito | Onde é resolvido |
 |---|---|---|
-| NFR-1 | Evento → alerta no celular em ≤ 15 s | Orçamento de latência (§3.7); upload direto do clipe para R2 |
-| NFR-2 | ≤ 3 alertas falsos por câmera por dia | Motor de regras + supressão + calibração por câmera (§3.4, §3.6) |
-| NFR-3 | Nunca gravar vídeo contínuo | Buffer circular em RAM, sem escrita em disco fora do clipe (§3.5) |
-| NFR-4 | Sem dado biométrico no MVP | Modelo só emite caixas de "pessoa"/"objeto"; sem embedding facial (§9) |
-| NFR-5 | Inferência implantável em nuvem **ou** on-premise sem mudar código | Serviço em container, configuração 100% externa (§3, ADR-001) |
-| NFR-6 | Isolamento estrito entre tenants | `tenant_id` obrigatório em toda query; credencial de agente escopada à loja (§4.4) |
-| NFR-7 | Clipes só por URL assinada de expiração curta | R2 com presigned URL; download registrado em auditoria (§4.3, §6) |
+| NFR-1 | Fim da sessão → alerta no celular em ≤ 3 min | Janela de conciliação + upload direto do clipe (§3.7). **Era 15 s**: sem ninguém na loja para abordar, chegar certo vale mais que chegar rápido |
+| NFR-2 | ≤ 3 alertas falsos **por loja** por dia | Conferência com a venda + regras por sessão + supressão (§3.4, §4.6). **Era por câmera**: o alerta agora nasce da sessão, que atravessa câmeras |
+| NFR-3 | Nunca gravar vídeo contínuo | Buffer circular em RAM; recortes provisórios só em torno de momentos da sessão (§3.5) |
+| NFR-4 | Sem dado biométrico | Modelos só emitem caixas de pessoa e juntas do corpo; sem embedding facial, sem re-identificação (§9) |
+| NFR-5 | Inferência implantável em nuvem **ou** on-premise sem mudar código | Serviço em container, configuração 100% externa (ADR-001) |
+| NFR-6 | Isolamento estrito entre tenants | `tenant_id` obrigatório em toda query; credencial de agente e de conector escopada à loja |
+| NFR-7 | Clipes só por URL assinada de expiração curta | R2 com presigned URL; emissão registrada em auditoria |
 | NFR-8 | Funcionar com internet instável | Fila local durável + backoff + idempotência (§3.6, §5.4) |
 | NFR-9 | Triagem em ≤ 2 toques no celular | PWA com fila de triagem e ações primárias fixas (§4.5) |
+| NFR-10 | **Rodar em mini PC sem GPU com 3 câmeras** | Modelo pequeno, portão de movimento, OpenVINO (§3.2, §3.8) |
 
 ---
 
@@ -73,9 +109,14 @@ por triagem humana.
 
 ```mermaid
 flowchart TB
-    subgraph LOJA["Loja (on-premise)"]
-        CAM["Câmeras CFTV existentes<br/>RTSP, ~20 instaladas<br/>6-10 relevantes"]
-        AGENTE["Agente da loja<br/>container Docker + GPU"]
+    subgraph LOJA["Mini market (on-premise)"]
+        CAM["Câmeras IP<br/>RTSP, 2-3 por loja"]
+        AGENTE["Agente da loja<br/>container Docker<br/>mini PC, sem GPU"]
+        TOTEM["Totem de autoatendimento<br/>maquininha"]
+    end
+
+    subgraph PLAT["Plataforma de venda<br/>(fornecedor do totem)"]
+        VENDAS["API / webhook de vendas"]
     end
 
     subgraph NUVEM["Nuvem (control plane)"]
@@ -83,176 +124,176 @@ flowchart TB
         R2[("Cloudflare R2<br/>clipes")]
     end
 
-    OP["Gerente / Operador<br/>celular, no corredor"]
-    ADM["Admin da rede"]
-    WA["WhatsApp<br/>provedor de mensagens"]
+    OP["Operador da rede de mini markets<br/>celular, remoto"]
+    ADM["Admin"]
 
     CAM -->|"RTSP substream<br/>somente leitura"| AGENTE
-    AGENTE -->|"evento JSON + heartbeat"| API
+    TOTEM -->|"venda"| VENDAS
+    VENDAS -->|"webhook ou poll<br/>instante, nº de itens, valor"| API
+    AGENTE -->|"sessão JSON + heartbeat"| API
     AGENTE -->|"config e modelo (pull 30s)"| API
-    AGENTE -->|"upload do clipe<br/>URL pré-assinada"| R2
-    API -->|"notificação"| WA
-    WA -->|"alerta"| OP
-    API <-->|"WebSocket + HTTPS"| OP
-    API <--> ADM
+    API -->|"subir clipe? sim/não"| AGENTE
+    AGENTE -->|"upload do clipe, só sob suspeita<br/>URL pré-assinada"| R2
+    API -->|"Web Push"| OP
     OP -->|"triagem: confirmar /<br/>falso positivo / inconclusivo"| API
     R2 -->|"clipe via URL assinada<br/>expiração curta"| OP
+    API <--> ADM
 
     style LOJA fill:#eef4ff,stroke:#3b6ea5
     style NUVEM fill:#f2fff2,stroke:#3a8c3a
+    style PLAT fill:#fff8e8,stroke:#b58a2a
 ```
 
-O vídeo bruto existe apenas dentro da caixa `LOJA`. A única mídia que cruza a
-fronteira é o clipe de ~15 s do evento.
+O vídeo bruto existe apenas dentro da caixa `LOJA`. A única mídia que cruza a fronteira
+são os clipes de uma sessão que **continuou suspeita depois de conferida a venda**.
+
+O totem não fala com o agente. A venda entra pela nuvem, pelo conector do fornecedor
+(§4.7). Um totem que só funcionasse falando com o box obrigaria uma integração por
+modelo de maquininha dentro da loja, que é o trabalho que tirou o PDV do escopo da
+versão anterior.
 
 ### 2.2 Diagrama de componentes
 
 ```mermaid
 flowchart LR
-    subgraph EDGE["Agente da loja — docker compose"]
+    subgraph EDGE["Agente da loja — docker compose, mini PC"]
         direction TB
 
-        subgraph PIPE["Pipeline de 5 estágios (pipes and filters)"]
+        subgraph PIPE["Pipeline (pipes and filters)"]
             direction TB
-            S1["1. Ingestão<br/>1 ffmpeg por câmera<br/>NVDEC quando disponível"]
-            S2["2. Detecção<br/>YOLO, amostragem 3 fps"]
-            S3["3. Tracking<br/>ByteTrack ou equivalente"]
-            S4["4. Motor de regras<br/>máquina de estados por track"]
-            S5["5. Clipe<br/>buffer circular 30s em RAM<br/>corte ffmpeg -c copy"]
-            S1 -->|"frames decodificados<br/>fila em memória"| S2
-            S2 -->|"detecções"| S3
-            S3 -->|"tracks"| S4
-            S4 -->|"gatilho de evento"| S5
+            S1["1. Ingestão<br/>1 ffmpeg por câmera<br/>decode em CPU / QSV"]
+            S1b["Portão de movimento<br/>diferença de frames, barato"]
+            S2["2. Detecção<br/>YOLOX-nano/tiny, OpenVINO<br/>só com movimento ou track ativo"]
+            S3["3. Tracking<br/>ByteTrack por câmera"]
+            S3b["Pose (opcional)<br/>só perto de zona de produto"]
+            S4["4a. Sessão<br/>ocupação da loja inteira"]
+            S5["4b. Regras da sessão<br/>interação com produto, totem, saída"]
+            S6["5. Recorte provisório<br/>buffer 30s em RAM<br/>corte -c copy por momento"]
+            S1 --> S1b --> S2 --> S3
+            S3 --> S3b
+            S3 --> S4
+            S3b --> S4
+            S4 --> S5
+            S5 -->|"momento relevante"| S6
         end
 
         SUP["Supervisor / uploader"]
-        QL[("Fila local durável<br/>SQLite ou Redis")]
-        RD[("Redis local")]
+        QL[("Fila local durável<br/>Redis")]
         TS["Tailscale<br/>acesso remoto"]
-        UPD["Atualizador de imagem<br/>watchtower ou script"]
 
-        S5 --> QL
-        S4 --> QL
+        S5 -->|"sessão encerrada"| QL
+        S6 -->|"recortes pendentes"| QL
         QL --> SUP
-        RD -.-> QL
     end
 
     subgraph CLOUD["Control plane"]
         direction TB
         APIF["API Fastify<br/>não recebe vídeo"]
-        PG[("PostgreSQL<br/>Prisma")]
-        BQ["BullMQ + Redis"]
-        W1["Worker: WhatsApp"]
-        W2["Worker: thumbnail"]
-        W3["Worker: relatório diário"]
-        W4["Worker: expurgo / retenção"]
-        WS["Gateway WebSocket"]
+        CONC["Conciliador<br/>sessão × venda"]
+        CONV["Conectores de venda<br/>um por fornecedor"]
+        PG[("PostgreSQL")]
+        PUSH["Web Push"]
         APIF --> PG
-        APIF --> BQ
-        BQ --> W1
-        BQ --> W2
-        BQ --> W3
-        BQ --> W4
-        APIF --> WS
+        CONV --> PG
+        CONC --> PG
+        CONC --> PUSH
     end
 
     R2[("Cloudflare R2")]
     PWA["Dashboard React PWA"]
-    WA["WhatsApp API"]
+    FORN["Plataforma de venda"]
 
-    SUP -->|"POST /v1/events<br/>POST /v1/heartbeat"| APIF
-    SUP -->|"GET /v1/config (30s)<br/>GET /v1/model"| APIF
+    SUP -->|"POST /v1/sessoes<br/>POST /v1/agents/heartbeat"| APIF
+    SUP -->|"GET /v1/sessoes/{id}<br/>subir ou descartar"| APIF
+    SUP -->|"GET /v1/agents/config (30s)"| APIF
     SUP -->|"PUT clipe (presigned)"| R2
+    FORN -->|"webhook / poll"| CONV
     TS -.->|"suporte / debug"| EDGE
-    UPD -.-> EDGE
-    W1 --> WA
-    WS <--> PWA
     APIF <--> PWA
     R2 -->|"GET assinado"| PWA
 ```
 
-### 2.3 Sequência: do gatilho ao alerta no celular
+### 2.3 Sequência: da saída da loja ao alerta no celular
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant R as Motor de regras (borda)
-    participant C as Estágio de clipe (borda)
+    participant S as Sessão (borda)
+    participant C as Recorte (borda)
     participant Q as Fila local
     participant A as API (nuvem)
-    participant S as R2
-    participant B as BullMQ
+    participant V as Conector de venda
+    participant R as R2
     participant D as Dashboard PWA
-    participant W as WhatsApp
 
-    R->>C: gatilho (track_id, câmera, t0, regra)
-    C->>C: corta buffer circular<br/>pré-roll 5s + pós-roll 10s (-c copy)
-    Note over C: espera o pós-roll completar<br/>antes do corte
-    C->>Q: enfileira evento (event_id UUID gerado na borda)
-    Q->>A: POST /v1/events (idempotente por event_id)
-    A->>A: dedup + supressão + persiste
-    A-->>Q: 202 + upload_url pré-assinada
-    A->>B: enfileira notificação
-    par Alerta imediato
-        A-->>D: WebSocket: novo evento (sem clipe ainda)
-        B->>W: mensagem para os números da loja
-    and Upload do clipe
-        Q->>S: PUT clipe (presigned)
-        Q->>A: PATCH /v1/events/{id} clip_uploaded
-        A-->>D: WebSocket: clipe disponível
+    Note over S,C: durante a sessão
+    S->>C: momento relevante (mão na geladeira, totem, saída)
+    C->>C: corta pré 5s + pós 5s (-c copy)<br/>guarda em disco, provisório
+    Note over S: loja fica vazia por T s
+    S->>Q: sessão encerrada (session_id UUID da borda)
+    Q->>A: POST /v1/sessoes (idempotente por session_id)
+    A-->>Q: 202 decisão: aguardar, consultar em 30 s
+    V->>A: venda (instante, itens) — webhook
+    A->>A: concilia: venda dentro da janela da sessão?
+    alt venda encontrada e quantidade compatível
+        Q->>A: GET /v1/sessoes/{id}
+        A-->>Q: descartar
+        Q->>Q: apaga recortes provisórios
+    else janela vence sem venda (ou quantidade diverge, fase 4)
+        A->>A: cria alerta + supressão
+        A-->>D: Web Push (sem clipe, sem imagem)
+        Q->>A: GET /v1/sessoes/{id}
+        A-->>Q: subir, com URLs pré-assinadas
+        Q->>R: PUT clipes
+        Q->>A: PATCH /v1/sessoes/{id} clipes enviados
     end
     D->>A: triagem (confirmar / falso positivo / inconclusivo)
-    A->>A: registra decisão + alimenta dataset
 ```
 
-O alerta é emitido **antes** de o clipe terminar de subir. O gerente recebe a
-notificação e, ao abrir, o clipe já deve estar disponível — ou aparece um estado
-"processando" explícito. Isso protege o NFR-1 quando o link da loja está lento.
+O aviso no celular sai **antes** de os clipes terminarem de subir, como na versão
+anterior. A diferença é o que acontece antes dele: a nuvem espera a venda.
 
 ---
 
 ## 3. Detalhamento da borda
 
-Um agente por loja. Container Docker rodando em um desktop com GPU dentro da loja.
-O agente é um pipeline de 5 estágios com filas entre eles (*pipes and filters*):
-cada estágio tem uma responsabilidade única, consome de uma fila e produz em outra,
-e pode ser instrumentado e substituído isoladamente.
+Um agente por loja, em container Docker, num **mini PC sem GPU** dentro da loja (§3.8).
+O agente é um pipeline de estágios com filas entre eles (*pipes and filters*): cada
+estágio tem uma responsabilidade única, consome de uma fila e produz em outra, e pode
+ser instrumentado e substituído isoladamente.
 
-**Container por loja, não por câmera.** Todas as câmeras compartilham o mesmo
-processo de inferência para não replicar o modelo na VRAM. As câmeras entram no
-mesmo batch de inferência quando possível.
+**Container por loja, não por câmera** (ADR-007). As câmeras compartilham o mesmo
+processo e a mesma sessão de inferência, para não carregar o modelo três vezes na RAM.
 
-```mermaid
-flowchart TB
-    subgraph ST["Estados do motor de regras por track"]
-        direction LR
-        N["NOVO"] --> L["EM_LOJA"]
-        L --> CX["NO_CAIXA<br/>acumulando tempo"]
-        CX --> L
-        L -->|"cruza linha de saída"| AV["AVALIANDO"]
-        CX -->|"cruza linha de saída"| AV
-        AV -->|"tempo no caixa >= N s"| OK["DESCARTADO<br/>sem evento"]
-        AV -->|"tempo no caixa < N s"| EV["EVENTO"]
-        L -->|"track perdido > T s"| EXP["EXPIRADO"]
-        CX -->|"track perdido > T s"| EXP
-    end
-```
+**Cobertura é requisito de instalação.** Com 2 a 3 câmeras, cada uma tem papel fixo, e
+a loja só é elegível se o checklist de qualificação (R-3) fechar:
+
+| Câmera | O que precisa enxergar | Para quê |
+|---|---|---|
+| **A — porta e totem** | A porta inteira e a tela/bancada do totem | Entrada, saída e tempo no totem. Numa loja pequena cabem no mesmo quadro, e é o arranjo preferido |
+| **B — produtos** | As portas das geladeiras e a frente das gôndolas | Interação com produto |
+| **C — opcional** | O que A e B não cobrem; numa fase futura, o totem visto de cima (Regra D) | Cobertura sem ponto cego |
+
+A regra de ouro da instalação: **não pode haver lugar na área de venda onde uma pessoa
+fique invisível para todas as câmeras.** A sessão (§3.4) termina quando ninguém é visto
+em nenhuma câmera; um ponto cego encerra a sessão com alguém dentro da loja.
 
 ### 3.1 Estágio 1 — Ingestão
 
 **Responsabilidade.** Um processo `ffmpeg` por câmera lendo o **substream** RTSP
-(640x480). Decode em hardware via NVDEC quando disponível, com fallback para CPU.
-Entrega frames decodificados com *timestamp* monotônico da borda.
+(640x480 ou próximo). Decode em CPU, ou em hardware (Intel Quick Sync via VAAPI/QSV,
+NVDEC quando houver placa NVIDIA) quando disponível. Entrega frames decodificados com
+*timestamp* monotônico da borda.
 
-Usar o substream é deliberado: o mainstream (1080p+) multiplicado por 6–10 câmeras
-consome banda de rede interna, VRAM e ciclos de decode sem ganho proporcional de
-acurácia na escala de uma pessoa em quadro. O clipe entregue ao operador também vem
-do substream — resolução suficiente para triagem, não para perícia.
+Usar o substream é deliberado: resolução suficiente para triagem e para uma pessoa a
+poucos metros, e decode barato. Três substreams SD a 15 fps cabem no decode em software
+de um mini PC da classe N100; **a validar por benchmark**. Se não couberem, a primeira
+alavanca é configurar a própria câmera para entregar menos fps no substream — decode é
+gasto em todo frame que chega, não só nos que vão para a inferência.
 
-**Ponto crítico:** o decode acontece em **todos** os frames que chegam (~15 fps por
-câmera, a confirmar pelo que as câmeras da loja realmente entregam). A amostragem
-de 3 fps do estágio 2 economiza **inferência**, não decode. Portanto o
-dimensionamento de CPU/NVDEC deve ser feito sobre a taxa cheia.
+**Ponto crítico:** a amostragem do estágio 2 economiza **inferência**, não decode. O
+dimensionamento de CPU para decode deve ser feito sobre a taxa cheia que a câmera
+entrega.
 
 **Falhas esperadas**
 
@@ -263,541 +304,695 @@ dimensionamento de CPU/NVDEC deve ser feito sobre a taxa cheia.
 | Câmera muda de IP (DHCP) | Falha de conexão tratada como offline; resolução manual via configuração |
 | Corrupção de pacotes / pixelação | Frames inválidos descartados; taxa de descarte vai no heartbeat |
 | Relógio da câmera fora de sincronia | Timestamp de referência é o da borda, nunca o da câmera |
+| **Uma câmera da loja offline** | **A sessão fica cega num pedaço da loja.** Sessões abertas enquanto alguma câmera está offline são marcadas `cobertura_parcial`, e a Regra S não alerta sobre elas sem conferência de venda (§3.4) |
 
 ### 3.2 Estágio 2 — Detecção
 
-**Responsabilidade.** Rodar YOLO sobre os frames amostrados a 3 fps e emitir caixas
-de pessoas e objetos com confiança. O modelo responde apenas **onde estão pessoas e
-objetos** — não avalia intenção, não classifica comportamento, não identifica
-indivíduos.
+**Responsabilidade.** Rodar o detector de pessoas sobre frames amostrados e emitir
+caixas com confiança. O modelo responde apenas **onde estão as pessoas** — não avalia
+intenção, não classifica comportamento, não identifica indivíduos.
 
-A amostragem de 3 fps é o equilíbrio entre custo de inferência e não perder o
-instante da travessia da linha de saída (~333 ms entre frames avaliados). Se a
-validação mostrar que travessias rápidas escapam, a mitigação é aumentar a taxa
-apenas nas câmeras de saída, não globalmente. **A validar por benchmark.**
+**CPU é o alvo, não o fallback.** Na versão anterior, a medição numa máquina sem GPU
+fechou a questão para o lado oposto: YOLOX-s a 640 custa ~450 ms por frame em CPU, ou
+seja ~2 fps para **uma** câmera, e com o tracking na mesma thread a taxa cai para
+~1,15 fps (§10). Isso não sustenta nem uma câmera. Três decisões juntas mudam a conta:
 
-**Runtime: ONNX Runtime, modelo como arquivo `.onnx`** (ADR-009). O modelo vira um
-artefato único e versionável, que é exatamente o que o `GET /v1/models/current` do
-§5.2 distribui com checksum e o que o ADR-006 precisa para fazer rollback. O fallback
-de GPU deixa de ser código e vira uma lista ordenada de *execution providers* em
-configuração — não existe `if gpu` em lugar nenhum, o que mantém o §3.9 verdadeiro. O
-provider que de fato pegou vai no heartbeat, porque pedido não é obtido: um box com o
-driver quebrado aceita `CUDAExecutionProvider` na lista e roda em CPU calado.
+1. **Modelo menor.** YOLOX-nano ou YOLOX-tiny, entrada 416. Pelos números publicados do
+   YOLOX, o nano faz ~1 GFLOP e o tiny ~6,5 GFLOPs, contra ~27 do s a 640: de 4 a 25
+   vezes menos conta. Numa loja pequena, bem iluminada, com uma pessoa a poucos metros
+   da câmera, o recall de modelo pequeno é o caso favorável — mas é **hipótese a validar
+   com vídeo de mini market real**, e a escolha entre nano e tiny sai desse benchmark.
+   Continua YOLOX, pela licença (Apache-2.0, ADR-009) e pela convenção de
+   pré-processamento já implementada e testada.
+2. **Portão de movimento.** A loja passa a maior parte do dia vazia. Antes do detector,
+   uma diferença de frames em escala de cinza reduzida (custo desprezível) decide se há
+   o que olhar. A inferência roda quando há movimento **ou** quando há track ativo na
+   câmera — uma pessoa parada escolhendo na geladeira mexe pouco, e o track ativo é o
+   que impede o portão de cegá-la. Com o portão fechado, a câmera ainda passa por uma
+   inferência de vigia a cada poucos segundos, para que uma pessoa imóvel desde o início
+   não fique invisível.
+3. **OpenVINO em CPU Intel.** O ONNX Runtime tem o `OpenVINOExecutionProvider`. A troca é
+   de configuração, na mesma lista ordenada de *execution providers* que já existe — não
+   há `if gpu` nem `if intel` no código (§3.9). O provider que de fato pegou continua
+   indo no heartbeat, porque pedido não é obtido.
 
-**A licença do runtime não é a licença do modelo.** O ONNX Runtime é MIT, mas pesos
-exportados da linhagem Ultralytics são AGPL-3.0 — para um SaaS comercial isso exigiria
-licença enterprise ou abrir o código. O default do agente é YOLOX (Apache-2.0). Trocar
-o modelo alvo é trocar a licença junto, e a convenção de pré-processamento também:
-YOLOX preenche o letterbox no canto superior esquerdo, em BGR e sem normalizar,
-enquanto a linhagem YOLOv5/v8 centraliza, usa RGB e normaliza. Nenhuma dessas
-diferenças levanta erro — todas produzem caixas plausíveis e deslocadas.
+**A taxa de amostragem continua 3 fps por câmera ativa** (ADR-005). Com o portão de
+movimento, o custo médio é muito menor que 3 fps × 3 câmeras; o custo de pico, com a
+loja ocupada, é o que dimensiona o hardware. **A validar por benchmark** no mini PC de
+referência.
 
-**O letterbox não redimensiona.** O ffmpeg do estágio 1 já tem um filtro `scale` na
-cadeia, então o agente exige que o maior lado do frame seja exatamente a entrada do
-modelo e só preenche o resto com cinza. No caso de referência (640x480 para um modelo
-de 640) são 160 linhas e nada mais. É o que dispensa OpenCV do box inteiro, e a
-divergência é recusada na subida em vez de uma vez por frame.
+**A placa de vídeo continua suportada, como opcional.** Uma loja com GPU NVIDIA usa a
+imagem com CUDA e o provider de CUDA; nada mais muda.
+
+**A licença do runtime não é a licença do modelo.** O ONNX Runtime e o OpenVINO são
+permissivos, mas pesos da linhagem Ultralytics são AGPL-3.0. Trocar o modelo alvo é
+trocar a licença junto, e a convenção de pré-processamento também (`PreprocessSpec`).
 
 **Falhas esperadas**
 
 | Falha | Comportamento |
 |---|---|
-| Fila de entrada crescendo (GPU saturada) | Descarte de frames mais antigos (política *drop oldest*); profundidade de fila vai no heartbeat |
-| GPU indisponível / driver caiu | Fallback para CPU em taxa reduzida **ou** parada do estágio com alerta técnico — decisão a fechar após benchmark |
-| Inferência levanta exceção | Contada em `errors` e seguida em frente; a thread é uma só para o agente (ADR-007), e morrer nela apagaria a detecção da loja inteira |
-| Câmera inadequada para IA (R-3) | Marcada como inelegível: continua ingerindo e alimentando o buffer do clipe, sem gastar inferência |
-| Oclusão, contraluz, aglomeração | Detecções perdidas; é aceito como perda de recall, tratado no estágio 3 |
+| Fila de entrada crescendo (CPU saturada) | Descarte do frame mais antigo; profundidade e descartes no heartbeat |
+| Portão de movimento fechado com alguém parado | Inferência de vigia periódica; track ativo mantém o portão aberto |
+| Mudança de luz (porta abrindo, lâmpada) abre o portão | Custo de inferência desperdiçado, não erro; a contagem de aberturas sem pessoa vai no heartbeat |
+| Inferência levanta exceção | Contada em `errors` e seguida em frente; a thread é uma só para o agente (ADR-007) |
 | Modelo novo pior que o anterior | Rollback de versão comandado pela nuvem (ADR-006) |
 
 ### 3.3 Estágio 3 — Tracking
 
-**Responsabilidade.** ByteTrack ou equivalente, associando detecções entre frames e
-atribuindo um ID persistente por pessoa **dentro daquela câmera**. Sem
-re-identificação entre câmeras e sem qualquer característica biométrica: o ID é
-local, efêmero e descartado ao fim do track.
+**Responsabilidade.** ByteTrack com filtro de Kalman e atribuição ótima, associando
+detecções entre frames e atribuindo um ID por pessoa **dentro daquela câmera**. Sem
+re-identificação entre câmeras e sem característica biométrica: o ID é local, efêmero e
+descartado ao fim do track.
 
-**Este é o estágio mais frágil do sistema inteiro** (ver §7). Um track que troca de
-ID no meio do percurso quebra a premissa do motor de regras: a pessoa "some" no
-caixa e "nasce" na linha de saída sem histórico, produzindo falso positivo.
+**O risco deste estágio caiu.** No mercado de bairro, uma troca de ID num cruzamento de
+pessoas fazia alguém "nascer" na saída sem histórico, e isso era a causa raiz mais
+provável de falso positivo. No mini market, a regra não depende mais da história de
+**um** track (§3.4): ela depende da sessão inteira. Uma troca de ID dentro da sessão não
+muda o que a sessão viu.
 
-**A escolha do tracker segue aberta.** O R-2 manda avaliar alternativa com dado real
-antes de fechar, e por isso não há ADR: o que existe é ByteTrack com filtro de Kalman e
-atribuição ótima (`scipy.optimize.linear_sum_assignment`), suficiente para produzir os
-dados que a decisão exige.
+As lições já pagas continuam valendo, porque a 3 fps a física é a mesma:
 
-**Rodar a 3 fps muda dois parâmetros que toda implementação de referência trata como
-constantes**, e errar qualquer um dos dois é silencioso:
-
-- **O `dt` do filtro é tempo real, não "um frame".** A fila do §3.2 descarta o frame
-  mais antigo quando a inferência não acompanha, então o intervalo entre frames que
-  chegam ao tracking varia com a carga do box. Com `dt` fixo, a extrapolação de
-  velocidade erra exatamente quando o box está saturado.
-- **Os limiares de IoU precisam ser mais frouxos.** Uma pessoa a 1,4 m/s, com 1,70 m
-  ocupando 200 px, percorre ~55 px entre frames a 3 fps; sobre uma caixa de 80 px de
-  largura isso dá **IoU de 0,19**. Os 0,3 a 0,5 usuais assumem 30 fps e fariam o agente
-  perder justamente quem anda rápido — que numa loja é quem está saindo. Quem sustenta a
-  associação é a previsão do Kalman, não a sobreposição das caixas cruas.
-
-Pelo mesmo motivo, **toda janela de tempo é configurada em segundos**, não em frames.
-
-**Detecção fraca nunca cria track.** O §3.2 baixou o piso do detector para 0,10 para
-alimentar a segunda passada de associação do ByteTrack, que oferece as caixas duvidosas
-**apenas** a tracks já existentes. É o que trata a oclusão curta — a pessoa que passa
-atrás de uma gôndola continua sendo a mesma pessoa — sem deixar uma sombra virar gente.
-
-**O filtro do tempo mínimo de vida não mora aqui.** O tracker expõe `age_s` e `hits`; o
-limiar é configuração por câmera e é o §3.4 que decide (ADR-002).
+- **O `dt` do filtro é tempo real, não "um frame".** A fila do §3.2 descarta, e com o
+  portão de movimento os intervalos variam ainda mais.
+- **Os limiares de IoU precisam ser mais frouxos** que os das implementações de
+  referência, que assumem 30 fps. Uma pessoa andando tem IoU de ~0,19 entre caixas cruas
+  consecutivas a 3 fps.
+- **Detecção fraca nunca cria track**; só continua um existente.
+- **Toda janela de tempo é configurada em segundos**, não em frames.
 
 **Falhas esperadas**
 
 | Falha | Comportamento |
 |---|---|
-| Troca de ID (*ID switch*) em cruzamento de pessoas | Falso positivo ou falso negativo; sem mitigação automática no v1. A atribuição é ótima e não gulosa justamente para reduzir a frequência |
-| Reconexão da câmera no meio de um track | Todos os tracks daquela câmera são encerrados: a câmera pode ter sido reposicionada, e um track com a posição da cena antiga associaria a primeira pessoa que aparecesse no lugar errado |
-| Track perdido por oclusão longa | Track expira; reaparição vira track novo |
-| Fragmentação em corredor cheio | Múltiplos tracks curtos para a mesma pessoa |
-| Objetos estáticos detectados como pessoa | Filtro por tempo mínimo de vida do track antes de valer para regra |
+| Troca de ID | Sem efeito na Regra S, que olha a sessão; ruído na contagem de interações da Regra D |
+| Reconexão da câmera no meio de um track | Tracks daquela câmera encerrados; a sessão continua se outra câmera ainda vê alguém |
+| Track perdido por oclusão | Track expira; reaparição vira track novo — na mesma sessão |
+| Objeto estático detectado como pessoa | Tempo mínimo de vida antes de contar como ocupação; uma sessão que "nunca fecha" vai no heartbeat como alerta técnico |
 
-### 3.4 Estágio 4 — Motor de regras
+### 3.4 Estágio 4 — Sessão e regras
 
-**Responsabilidade.** Máquina de estados por track, avaliando zonas e tempos. As
-zonas são polígonos e linhas desenhados sobre o frame no dashboard: linha de saída,
-área de caixa, gôndola monitorada.
+O estágio tem duas metades: a **sessão**, que diz quando a loja esteve ocupada e o que
+aconteceu nela, e as **regras**, que dizem se ela é suspeita. A numeração é a mesma do
+motor de regras do foco anterior porque o código cita §3.4 para ele, e é dele que este
+estágio descende.
 
-**Regra principal do MVP:** pessoa cruza a linha de saída sem ter permanecido na
-zona do caixa por mais de N segundos.
+#### A sessão
 
-O motor é **separado do modelo** (ADR-002). Zonas, tempos e limiares são
-configuração versionada em banco, por câmera. Recalibrar uma loja é mudar
-configuração — não retreinar rede, não republicar imagem.
+**Responsabilidade.** Transformar o que as câmeras veem em **sessões**: o intervalo em
+que a loja está ocupada, de quando alguém aparece a quando a loja fica vazia. **É a
+decisão central desta revisão** (ADR-010).
 
-Detalhes que a implementação precisa resolver:
+O motivo é o que o comportamento-alvo exige: "pegou produto e não pagou" junta duas
+câmeras — a mão na geladeira aparece na câmera B, o totem e a porta na câmera A. Ligar
+as duas exigiria saber que a pessoa da B é a mesma da A, que é re-identificação entre
+câmeras — fora do escopo pelo risco de tracking e por ser a porta para biometria (§9). A
+sessão contorna isso: numa loja de condomínio, quase sempre há uma pessoa por vez, e
+então "a pessoa" e "a loja ocupada" são a mesma coisa. Quando não são — uma família, dois
+vizinhos —, a sessão trata o grupo como uma unidade. Isso tem um custo, e ele é assumido
+na Regra S (§3.4).
 
-- **Direção da travessia.** A linha de saída é orientada; cruzar de dentro para fora
-  dispara, o inverso não.
-- **Ponto de referência do track.** A travessia é avaliada sobre um ponto do
-  *bounding box* (base central é o candidato natural). **A validar por benchmark.**
-- **Debounce de travessia.** Track oscilando sobre a linha não pode gerar N eventos.
-- **Tempo mínimo de vida do track** antes de ele ser elegível a gerar evento.
+```mermaid
+stateDiagram-v2
+    [*] --> VAZIA
+    VAZIA --> OCUPADA: pessoa confirmada em qualquer câmera
+    OCUPADA --> OCUPADA: acumula interações, tempo no totem,<br/>pico de ocupação, câmeras vistas
+    OCUPADA --> ESVAZIANDO: ninguém visível em nenhuma câmera
+    ESVAZIANDO --> OCUPADA: alguém reaparece antes de T_vazia
+    ESVAZIANDO --> ENCERRADA: T_vazia s sem ninguém
+    ENCERRADA --> VAZIA: sessão vai para a fila (§3.6)
+```
+
+O que a sessão acumula, e que vai no payload:
+
+| Campo | De onde vem | Uso |
+|---|---|---|
+| `inicio`, `fim` | Primeira e última pessoa vista | Janela de conciliação com a venda |
+| `ocupacao_max` | Maior número de tracks simultâneos na loja (ver nota) | Distinguir pessoa sozinha de grupo |
+| `interacoes[]` | Estágio 5: cada entrada em zona de produto, com câmera, zona e instante | Regra S e Regra D |
+| `tempo_totem_s` | Tempo acumulado na zona do totem | Regra S sem conector de venda |
+| `travessias` | Entradas e saídas pela linha da porta | Coerência da sessão; heartbeat |
+| `cobertura_parcial` | Alguma câmera offline durante a sessão | A Regra S fica mais conservadora |
+| `recortes[]` | Estágio 6: os momentos cortados, ainda na loja | O que a nuvem pode pedir para subir |
+
+**Ocupação sem re-identificação.** A mesma pessoa pode aparecer em duas câmeras ao mesmo
+tempo, então somar tracks das câmeras superestima. `ocupacao_max` é o maior número de
+tracks **numa mesma câmera** no mesmo instante — um limite inferior honesto. Para decidir
+"sozinho ou em grupo" ele basta; para contar pessoas, não.
+
+**Encerramento.** `T_vazia` (candidato: 20 s) protege contra a pessoa agachada atrás da
+gôndola que some de todas as câmeras por alguns segundos. Curto demais parte uma visita
+em duas — e a segunda metade, sem venda, vira suspeita. Longo demais junta o morador
+seguinte na sessão anterior. **A validar com vídeo real.**
 
 **Falhas esperadas**
 
 | Falha | Comportamento |
 |---|---|
-| Track nasce já fora do caixa (ID switch) | Falso positivo — causa raiz mais provável de FP no v1 |
-| Zonas desenhadas erradas ou câmera reposicionada | Falso positivo em massa naquela câmera; detectável por taxa anômala |
-| Cliente sai sem comprar (só olhou) | Falso positivo legítimo da regra; é limitação conhecida do MVP |
-| Funcionário circulando pela saída | Falso positivo recorrente; mitigável por zona de exclusão ou janela de horário |
+| Ponto cego encerra a sessão com alguém dentro | Visita partida em duas; mitigação é instalação (cobertura total) e `T_vazia` |
+| Dois moradores em visitas sobrepostas | Uma sessão só; uma venda pode conciliar a sessão de quem não pagou. **Falso negativo assumido** (§3.4) |
+| Repositor ou faxineira | Sessão longa, muitas interações, sem venda. Tratado por **modo reposição** (§3.4) |
+| Sessão que nunca fecha (objeto detectado como pessoa) | Teto de duração; ao atingi-lo, a sessão fecha e o heartbeat abre alerta técnico |
 
-### 3.5 Estágio 5 — Clipe
+#### As regras da sessão
 
-**Responsabilidade.** Manter um buffer circular dos últimos 30 s por câmera **em
-RAM** e, no gatilho, cortar pré-roll de 5 s + pós-roll de 10 s com `ffmpeg` em modo
-`copy` — sem re-encode.
+**Responsabilidade.** Detectar os momentos que importam dentro da sessão e, ao fim dela,
+dizer se ela é suspeita **do ponto de vista da câmera**. A palavra final sobre a venda é
+da nuvem (§4.7).
 
-O modo `copy` é o que torna o corte barato o suficiente para caber no orçamento de
-latência: nenhum frame é recodificado. O custo é que o corte se alinha ao keyframe
-mais próximo, então o clipe pode começar um pouco antes do pré-roll pedido. Isso é
-aceitável — clipe um pouco maior não atrapalha triagem.
+O motor continua **separado do modelo** (ADR-002): zonas, tempos e limiares são
+configuração versionada por câmera. Recalibrar uma loja é mudar configuração.
 
-O buffer é **exclusivamente em RAM**. Não há gravação contínua em disco em nenhum
-ponto do sistema (NFR-3). O único arquivo de vídeo que existe é o clipe do evento,
-e ele é apagado do disco local após o upload ser confirmado.
+##### Zonas
+
+| Zona | Forma | O que detecta |
+|---|---|---|
+| `porta` | Linha orientada | Entrada e saída da loja |
+| `totem` | Polígono | Tempo na frente do totem |
+| `produto` | Polígono, com um **sinal** configurado | Interação com produto (abaixo) |
+| `exclusao` | Polígono | Área ignorada (vitrine, reflexo, corredor do prédio visível pela porta) |
+
+##### Interação com produto
+
+É o sinal que separa "olhou e foi embora" de "pegou alguma coisa". Cada zona de produto
+escolhe **como** detectá-lo, do mais barato ao mais caro, porque o que funciona numa
+geladeira não funciona numa gôndola aberta:
+
+| Sinal | Como | Custo | Onde serve |
+|---|---|---|---|
+| `porta_geladeira` | Mudança de pixels num polígono fixo sobre a porta da geladeira, com pessoa presente na câmera | Desprezível, sem modelo | Geladeiras de porta de vidro. É o sinal mais forte e mais barato do sistema |
+| `pulso` | A pose (RTMPose, já integrada) coloca o punho dentro do polígono | Uma inferência de pose por pessoa perto da zona | Gôndolas abertas, cestos, expositores |
+| `presenca` | A base da caixa da pessoa fica na frente da zona por ≥ N s | Nenhum além do tracking | Fallback, quando a pose não é viável; o mais fraco dos três |
+
+A pose **só roda para tracks perto de uma zona de produto** com sinal `pulso`. Em CPU,
+pose para todo mundo o tempo todo não cabe; pose para uma pessoa de cada vez, só quando
+ela está na frente da gôndola, deve caber. **A validar por benchmark.**
+
+O "gesto da bolsa" do piloto anterior (§11) continua desligado por padrão e **não gera
+alerta**: no dataset de furto encenado, ele não separa furto de compra normal.
+
+##### Regra S — sessão sem venda
+
+Cobre os comportamentos 1 e 2 do §1. Na borda, a sessão é **candidata** quando teve ao
+menos uma interação com produto. Sem interação, a sessão termina ali: morador que entrou,
+olhou e saiu não é furto, e alertar sobre isso é falso positivo por definição.
+
+O que acontece com a candidata depende de a loja ter conector de venda:
+
+| Loja | Quem decide | Critério |
+|---|---|---|
+| **Com conector** (o caso-alvo) | A nuvem (§4.7) | Nenhuma venda na janela `[inicio - margem, fim + espera]` → alerta |
+| **Sem conector** | A borda, como no foco anterior | `tempo_totem_s < N` → alerta, marcado `sem_venda_conferida` |
+
+A loja sem conector existe para não travar uma instalação enquanto o fornecedor não
+libera a API, mas é a versão fraca da regra: estar na frente do totem não é ter pago. Os
+alertas dela levam marca própria e a métrica do R-1 os separa — misturá-los à regra
+conferida esconderia, na média, justamente a loja que precisa do conector.
+
+**Falso negativo assumido:** numa sessão em grupo, uma venda concilia a sessão inteira,
+inclusive a de quem não pagou. Separar exigiria saber qual pessoa estava no totem e qual
+na geladeira, entre câmeras — de novo re-identificação. O caso é aceito no v1, e a
+frequência de sessões com `ocupacao_max > 1` vai na métrica para dizer se ele importa.
+
+**Modo reposição.** Repositor e faxineira produzem exatamente a assinatura de furto:
+muitas interações e nenhuma venda. O operador liga o modo pelo dashboard (ou ele vem de
+uma janela de horário configurada), e sessões nesse intervalo não alertam. Mais simples
+que reconhecer o funcionário, e sem biometria.
+
+##### Regra D — divergência de quantidade (por fases)
+
+Cobre o comportamento 3: pegou dois, pagou um. **Não entra como alerta no v1.** Contar
+itens na mão de alguém por câmera de teto, em CPU, não é confiável, e um alerta não
+confiável é o caminho mais curto para o R-1.
+
+O que entra é a **coleta**:
+
+- Cada sessão já sobe `interacoes[]`. A nuvem já recebe `itens` da venda.
+- O alerta da Regra S e o evento conciliado mostram os dois números na triagem
+  ("4 interações · 1 item pago") como **informação para o humano**, não como acusação.
+- A métrica guarda a divergência por sessão. Com algumas semanas de triagem, dá para
+  medir se "interações − itens ≥ k" separa furto de compra normal — do mesmo jeito que
+  `tools/avalia_gesto.py` mediu o gesto da bolsa e o reprovou.
+
+Só se essa medição aprovar a Regra D vira alerta. Se não aprovar, o caminho seguinte é
+**uma câmera dedicada sobre o totem**, contando os produtos que passam pela bancada
+contra os itens da venda — o que exige um detector de "produto na mão" treinado com
+dataset próprio, hoje fora de escopo (§9).
 
 **Falhas esperadas**
 
 | Falha | Comportamento |
 |---|---|
-| RAM insuficiente para 30 s × N câmeras | Dimensionamento do box; buffer por câmera com teto rígido |
-| Gatilho perto do início do buffer | Pré-roll entregue menor que 5 s; registrado no evento |
-| Pós-roll ainda não existe no momento do gatilho | Aguarda 10 s antes de cortar — custo explícito no orçamento de latência |
-| Corte falha (keyframe ausente, container inválido) | Evento sobe **sem** clipe, marcado como `clip_failed`; triagem fica prejudicada mas o alerta não se perde |
-| Reinício do container | Buffer em RAM é perdido; eventos em voo sem clipe |
+| Zona de produto mal desenhada | Interação nunca detectada: falso negativo silencioso. A taxa de sessões com zero interação **e** venda conciliada denuncia (§4.7) |
+| Morador abre a geladeira, desiste e fecha | Interação sem retirada; sessão candidata, e a ausência de venda vira alerta. Falso positivo legítimo da regra, e o motivo de a Regra S precisar da triagem |
+| Câmera reposicionada | Zonas fora do lugar; detectável por taxa anômala e recusado na subida quando a resolução muda (§10) |
+
+### 3.5 Estágio 5 — Recorte provisório
+
+**Responsabilidade.** Manter um buffer circular dos últimos 30 s por câmera **em RAM** e,
+a cada momento relevante da sessão, cortar pré-roll e pós-roll com `ffmpeg` em modo
+`copy`, sem re-encode. O corte continua sendo o do foco anterior; o que muda é **quando**
+ele acontece e **o que se faz com ele**.
+
+**Por que cortar durante a sessão, e não no fim.** Uma visita dura minutos. Quando a
+loja esvazia, a mão na geladeira já saiu do buffer de 30 s há muito tempo. Então os
+recortes nascem no instante de cada momento — interação com produto, passagem pelo
+totem, saída — e esperam a decisão da nuvem no disco.
+
+**Por que provisório.** Toda compra honesta também tem interação com produto. Se os
+recortes subissem sempre, a nuvem guardaria o vídeo de todo morador que comprou um
+refrigerante, o que viola a minimização (R-9) e o próprio princípio da §1. Os recortes
+ficam **na loja** até a nuvem responder:
+
+- **`descartar`** (venda encontrada) → os arquivos são apagados do disco.
+- **`subir`** (suspeita mantida) → sobem por URL pré-assinada e são apagados após a
+  confirmação, como hoje.
+- **Sem resposta** (link caído) → ficam até o TTL local (candidato: 6 h), e então são
+  apagados com registro. A sessão continua na fila; perde-se o vídeo, não o alerta.
+
+**Teto por sessão.** No máximo K recortes (candidato: 4), de no máximo ~10 s cada:
+priorizando a última interação com produto, a passagem pelo totem (ou a falta dela) e a
+saída. Uma sessão de reposição não pode encher o disco.
+
+**Vários clipes por alerta.** O contrato passa de um clipe por evento para uma lista
+(§5.2). O dashboard os toca em sequência, e o primeiro toque continua abrindo o alerta
+com o vídeo já rodando (NFR-9). Concatenar na borda pareceu mais simples, mas a
+concatenação em `copy` exige parâmetros idênticos de codec, e duas câmeras de modelos
+diferentes na mesma loja quebrariam isso em silêncio.
+
+O buffer é **exclusivamente em RAM** e não há gravação contínua em disco em nenhum ponto
+(NFR-3). O que existe em disco são recortes de momentos, com vida curta.
+
+**Falhas esperadas**
+
+| Falha | Comportamento |
+|---|---|
+| Momento perto do início do buffer | Pré-roll menor; registrado no recorte |
+| Corte falha (keyframe ausente, container inválido) | A sessão segue sem aquele recorte, marcado `falhou`; o alerta não se perde |
+| Disco cheio | Descarta o recorte provisório mais antigo; sessões sobrevivem sem vídeo |
+| Reinício do container | Buffer em RAM perdido; recortes já em disco e sessões na fila sobrevivem |
 
 ### 3.6 Fila local e envio
 
-Cada evento nasce com um **UUID gerado na borda**. Esse ID é a chave de
-idempotência: reenviar o mesmo evento nunca cria duplicata na nuvem.
+A fila local é a do foco anterior (ADR-004): **Redis no próprio box**, com AOF, ZSET
+como agenda de backoff, lease por script Lua, TTL e fila morta. O que muda é o que passa
+por ela.
 
-A fila local guarda o evento antes do envio. Com a internet caída, o pipeline
-continua rodando normalmente: detecta, avalia regras, gera clipe e acumula na fila.
+Cada sessão nasce com um **UUID gerado na borda** (`session_id`), que é a chave de
+idempotência: reenviar a mesma sessão nunca cria duplicata na nuvem.
 
-**Decidido: Redis no próprio box** (ADR-004), fechando a pendência §10.9. Custo
-assumido: com `appendonly yes` e o `appendfsync everysec` padrão, uma queda de
-energia leva junto até ~1 s de fila. Na prática é o último evento antes do apagão —
-e um apagão na loja já derruba as câmeras junto. Em troca, o compose do box não
-ganha mais um mecanismo de persistência e o estado sobrevive a restart do agente,
-que é o caso comum (atualização da imagem, §3.8).
+| Item | Ciclo |
+|---|---|
+| **Sessão** | `POST /v1/sessoes` → `202` com `decisao: aguardar` e quando consultar |
+| **Consulta da decisão** | `GET /v1/sessoes/{id}` agendada no mesmo ZSET, até `subir` ou `descartar` |
+| **Recortes** | Só entram na agenda de envio depois de `subir`; com `descartar`, são apagados |
 
-Estruturas, e o porquê de cada uma:
+A consulta da decisão é **puxada pela borda**, como tudo o mais (ADR-003). A nuvem nunca
+abre conexão com a loja, então "pode apagar o vídeo" também é uma resposta a uma
+pergunta da borda, nunca um comando empurrado.
 
-| Chave | Tipo | Papel |
-|---|---|---|
-| `…:event:{id}` | HASH | payload congelado e o estado do item |
-| `…:events` / `…:clips` | ZSET | agenda: `event_id` → quando pode sair |
-| `…:births` | ZSET | nascimento, para o TTL |
-| `…:dead` | ZSET | fila morta, aparada por posto |
-
-ZSET e não LIST porque **o backoff é um agendamento**: com lista, adiar um item
-exigiria segurá-lo na memória do processo, e uma queda perderia justamente o evento
-que estava sendo reenviado. A reserva de um item é um script Lua que empurra o score
-para frente em vez de remover — se o agente cair no meio de uma tentativa, o lease
-vence e o evento volta sozinho.
-
-- **Ordem de envio:** eventos primeiro, clipes depois. O metadado é pequeno e
-  destrava o alerta; o clipe é grande e pode esperar.
-- **TTL:** evento na fila além de um limite (candidato: 24 h) é descartado com
-  registro — alertar sobre um furto de ontem tem valor operacional baixo e ocupa a
-  fila de triagem.
-- **Teto de disco:** o clipe pendente ocupa disco local; ao atingir o teto,
-  descarta-se o clipe mais antigo (o evento sobrevive sem clipe).
+- **Ordem de envio:** sessões primeiro, depois consultas, depois recortes.
+- **TTL da sessão** (candidato: 24 h) e **TTL do recorte provisório** (candidato: 6 h)
+  são distintos: o JSON da sessão é pequeno e ainda serve à métrica no dia seguinte; o
+  vídeo de um morador não deve ficar no disco da loja esperando indefinidamente.
 
 ### 3.7 Orçamento de latência (hipótese)
 
-NFR-1 exige ≤ 15 s do evento até o alerta no celular. Alocação proposta:
+NFR-1 exige ≤ 3 min do fim da sessão até o alerta no celular.
 
 | Etapa | Orçamento proposto |
 |---|---|
-| Amostragem + inferência + tracking + regra | a validar por benchmark |
-| Espera do pós-roll (fixo, por definição) | 10 s |
-| Corte do clipe (`-c copy`) | a validar por benchmark |
-| POST do evento + resposta da API | a validar por benchmark |
-| Enfileiramento e envio do WhatsApp | a validar por benchmark |
+| `T_vazia` (fechamento da sessão) | ~20 s, fixo por definição |
+| POST da sessão | a validar por benchmark |
+| **Espera pela venda** (janela de conciliação) | candidato: 90 s após o fim da sessão |
+| Consulta da decisão pela borda | até o intervalo de consulta (candidato: 15 s) |
+| Upload dos recortes | a validar; o push sai antes |
 
-Os 10 s de pós-roll consomem dois terços do orçamento e são incompressíveis sem
-mudar o requisito de produto. **A folga real do sistema é pequena** — daí a decisão
-de disparar o alerta antes do upload do clipe (§2.3). Se o benchmark mostrar que não
-cabe, as alavancas são: reduzir o pós-roll, ou notificar em dois tempos (aviso
-imediato no gatilho + clipe depois).
+A espera pela venda é o maior pedaço, e depende de quanto o webhook do fornecedor
+atrasa — o primeiro dado a medir quando houver um conector (§10). Ela é o preço de
+alertar certo, e num mini market sem funcionário ninguém ia abordar o morador na porta
+de qualquer jeito: o alerta serve para o operador decidir depois, com o vídeo.
 
-### 3.8 Composição do agente
+### 3.8 Composição do agente e hardware de referência
 
-Implementado em `apps/agent/Dockerfile` e `infra/box/docker-compose.yml`; instalação e
-operação em [`docs/box.md`](box.md).
+**Box de referência: mini PC x86 sem GPU**, classe Intel N100/N150 ou superior, 8 GB de
+RAM (16 GB com folga), SSD de 128 GB ou mais, rede cabeada. Intel por causa do OpenVINO
+e do Quick Sync. **O modelo exato sai do benchmark** (§10); a hipótese a derrubar é "3
+câmeras com sessão e pose sob demanda num N100".
 
-No `docker-compose` do box da loja:
+No `docker-compose` do box:
 
-- **agente** — imagem CUDA 13 + cuDNN 9 + ffmpeg do Ubuntu (com NVDEC) + o agente com
-  `onnxruntime-gpu`. Versão fixa por loja no `.env`, nunca `latest` (R-7).
-- **redis** — fila local (ADR-004), com AOF e sem porta publicada na rede da loja.
+- **agente** — imagem **CPU** com ffmpeg, `onnxruntime` com OpenVINO e o agente. Versão
+  fixa por loja no `.env`, nunca `latest` (R-7). A imagem CUDA atual
+  (`apps/agent/Dockerfile`) continua existindo como variante para box com placa NVIDIA.
+- **redis** — fila local (ADR-004), com AOF e sem porta publicada.
 
 Fora do compose, por decisão:
 
-- **tailscale** — acesso remoto para suporte sem mexer no roteador da loja. Mercado
-  de bairro não tem IP fixo nem alguém para abrir porta no NAT. Instalado **no host**,
-  não em container: é a porta de entrada para consertar o box, e não pode depender do
-  Docker que talvez seja o que quebrou (R-6).
-- **atualização da imagem** — a previsão era watchtower ou script próprio. O watchtower
-  saiu de manutenção (repositório arquivado em dez/2025) e não confere saúde nem volta
-  atrás, que é o que o R-7 pede. Por ora a atualização é manual, por versão; o script
-  próprio depende de o agente expor um sinal de saúde local.
+- **tailscale** — no host, não em container: é a porta para consertar o box, e não pode
+  depender do Docker que talvez seja o que quebrou (R-6). Condomínio também não tem IP
+  fixo nem alguém para abrir porta no roteador.
+- **atualização da imagem** — manual, por versão, até existir sinal de saúde local que
+  permita rollback automático (R-7).
 
 ### 3.9 Portabilidade nuvem / on-premise (NFR-5)
 
-O serviço de inferência é o mesmo artefato nos dois modos. Nada de `if cloud`. O que
-muda é **configuração externa**: endpoint da API, origem dos streams, presença de
-GPU, credenciais. O container não sabe onde está rodando. Isso mantém aberta a opção
-de operar lojas pequenas com processamento centralizado sem bifurcar a base de
-código.
+O serviço de inferência é o mesmo artefato nos dois modos. Nada de `if cloud`, `if gpu`
+ou `if intel`. O que muda é **configuração externa**: endpoint da API, origem dos
+streams, lista de providers, credenciais.
 
 ---
 
 ## 4. Detalhamento do control plane
 
-A nuvem administra: cadastro, configuração, histórico, notificação e triagem. **Ela
-não recebe vídeo em nenhum momento.**
+A nuvem administra cadastro, configuração, histórico, notificação, triagem — e agora
+**conciliação com a venda**. **Ela não recebe vídeo de sessão que não seja suspeita.**
 
 ### 4.1 API — Node.js (Fastify + Prisma)
 
-Responsável por: autenticação e autorização, CRUD de lojas/usuários/câmeras/zonas,
-recepção de eventos e heartbeats dos agentes, emissão de URLs pré-assinadas, fila de
-triagem, relatórios e auditoria.
-
-A API é o único ponto que fala com o PostgreSQL. O agente nunca toca o banco.
+Autenticação e autorização, CRUD de lojas/usuários/câmeras/zonas, recepção de sessões e
+heartbeats, recepção de vendas pelos conectores, conciliação, emissão de URLs
+pré-assinadas, fila de triagem, métricas e auditoria. É o único ponto que fala com o
+PostgreSQL.
 
 ### 4.2 PostgreSQL
 
 Fonte da verdade de configuração e histórico. Toda tabela com dado de tenant carrega
-`tenant_id`, e o acesso é sempre filtrado por ele (NFR-6). Isolamento por linha com
-`tenant_id` obrigatório é a estratégia do v1; RLS no Postgres fica como
-endurecimento posterior.
+`tenant_id`, e o acesso é sempre filtrado por ele (NFR-6).
 
-### 4.3 BullMQ + Redis
+### 4.3 Trabalho assíncrono
 
-Trabalho assíncrono, para manter a API previsível:
-
-| Job | Função |
-|---|---|
-| `whatsapp.send` | Envia o alerta aos números da loja; retry com backoff |
-| `clip.thumbnail` | Gera thumbnail do clipe após o upload |
-| `report.daily` | Relatório diário por loja |
-| `retention.purge` | Expurgo de clipes e dados vencidos conforme política |
-| `camera.health` | Avalia heartbeats ausentes e abre alerta técnico |
+O v1 segue sem BullMQ, como hoje: Web Push é em processo e a decisão de notificar é
+gravada antes do envio (R-11). A conciliação, porém, precisa de um relógio — "a janela
+desta sessão venceu" — e esse relógio não pode morar só na memória do processo, senão
+um reinício da API esqueceria as sessões esperando venda. O v1 resolve com uma varredura
+periódica sobre o Postgres (`sessoes WHERE decisao = 'aguardar' AND janela_ate < now()`),
+que é durável por construção. BullMQ entra quando houver um segundo canal pago
+(WhatsApp) ou um job que precise de retry próprio.
 
 ### 4.4 Cloudflare R2
 
-Armazena os clipes. O agente sobe o clipe **direto** para o R2 via URL pré-assinada
-emitida pela API — o vídeo não passa pela API em nenhum momento, o que mantém a API
-sem I/O pesado e o custo de egress previsível.
+Armazena os clipes das sessões suspeitas. O agente sobe direto, por URL pré-assinada; a
+leitura também é por URL assinada de expiração curta, e a emissão é auditada (NFR-7). A
+chave do objeto é determinística a partir de `tenant_id`, dia e `session_id` — e agora
+também do índice do recorte.
 
-Leitura também é só por URL assinada de expiração curta (NFR-7). Todo download é
-registrado no log de auditoria com usuário, evento e horário.
+### 4.5 Dashboard
 
-Chave do objeto inclui `tenant_id` e `event_id`, e nenhum caminho é adivinhável.
+O uso principal agora é o **operador da rede de mini markets**, que cuida de várias
+lojas de longe — não o gerente no corredor. A régua de dois toques (NFR-9) continua: um
+toque abre o alerta com os clipes rodando em sequência; o segundo é a decisão —
+confirmar, falso positivo ou inconclusivo — em botões grandes e fixos, do mesmo peso.
 
-### 4.5 WebSocket e dashboard
+O alerta mostra o que a triagem precisa para não acusar errado: o horário da sessão, se
+havia mais de uma pessoa, as interações por zona e, quando há conector, **"nenhuma venda
+entre HH:MM e HH:MM"** ou **"N interações · M itens pagos"**. A linguagem é sempre
+"possível ocorrência" (R-10).
 
-- **WebSocket** — push de novos eventos para dashboards abertos. Canal por loja;
-  autorização verificada na conexão e na inscrição.
-- **Dashboard React (PWA)** — o uso principal é o celular do gerente, em pé, no
-  corredor. Isso é premissa de design, não detalhe: a fila de triagem precisa abrir
-  o clipe e resolver o evento em **no máximo 2 toques** (NFR-9). Um toque abre o
-  evento com o vídeo já em reprodução; o segundo é a decisão — confirmar, falso
-  positivo ou inconclusivo — em botões grandes e fixos.
-
-Toda triagem é obrigatória e alimenta o dataset de melhoria do modelo. Evento sem
-triagem é dívida operacional visível no dashboard, não um estado silencioso.
+Telas novas que o foco pede: **modo reposição** por loja (liga e desliga, com horário
+programado) e **estado do conector de venda** (última venda recebida — um conector
+parado faz toda sessão virar alerta).
 
 ### 4.6 Supressão de duplicados
 
-Duas camadas:
+1. **Idempotência** — `session_id` gerado na borda impede duplicata por reenvio.
+2. **Teto e agrupamento do aviso** — o que já existe para o Web Push (teto diário por
+   loja, agrupamento por gatilho, nada de tocar o celular por evento velho) continua
+   valendo, agora com a loja como unidade.
+3. **Conector parado não vira rajada.** Se a última venda recebida de uma loja é mais
+   velha que um limite enquanto há sessões com interação, a nuvem para de alertar pela
+   Regra S conferida, abre **alerta técnico de conector** e segura as sessões como
+   pendentes. Sem isso, um webhook quebrado transforma todo morador da tarde em suspeito.
 
-1. **Idempotência** — `event_id` gerado na borda impede duplicata por reenvio.
-2. **Supressão semântica** — na nuvem, eventos da mesma câmera e mesma regra dentro
-   de uma janela curta são agrupados em um único alerta. A janela é configurável por
-   câmera; valor inicial **a validar por benchmark**.
+### 4.7 Conectores de venda e conciliação
 
-A supressão protege diretamente o NFR-2: uma câmera mal calibrada disparando em
-rajada deve produzir um alerta agrupado, não trinta notificações.
+**Esta é a peça nova da nuvem, e a de maior risco de cronograma** (R-14): depende de o
+fornecedor do totem oferecer webhook ou API de vendas.
+
+**Conector** — um por fornecedor, atrás de uma interface única. Cada um recebe (webhook)
+ou busca (poll) as vendas e as normaliza para:
+
+| Campo | Observação |
+|---|---|
+| `store_id` | Mapeado a partir do identificador da loja ou do terminal no fornecedor |
+| `ocorrida_em` | O instante da venda no relógio do fornecedor |
+| `itens` | Quantidade de itens; insumo da Regra D |
+| `valor` | Para a triagem; não decide nada |
+| `id_externo` | Idempotência da venda |
+
+**O que não entra:** nome, CPF, telefone ou qualquer identificação do comprador, mesmo
+que o fornecedor envie. A conciliação não precisa saber quem pagou, só **se** pagou, e
+guardar identidade ao lado do vídeo de uma sessão é o atalho para a acusação nominal que
+o R-10 quer impedir.
+
+**Conciliação** — para cada sessão candidata:
+
+1. Abre a janela `[inicio - margem_antes, fim + espera]`. A margem antes cobre o morador
+   que paga primeiro e pega depois; a espera cobre o atraso do webhook.
+2. Procura venda da loja dentro da janela. **Uma venda concilia uma sessão só**: duas
+   sessões sobrepostas não podem ser absolvidas pela mesma compra.
+3. Encontrou → `descartar`. A sessão fica registrada (é dado para a métrica e para a
+   Regra D), sem vídeo.
+4. Venceu a janela sem venda → alerta, decisão `subir`.
+
+O relógio do fornecedor e o do box não batem. O `clock_skew_s` do heartbeat corrige o
+lado do box; o do fornecedor se mede comparando vendas com passagens pelo totem, e a
+margem da janela é configuração por loja até haver dado.
+
+**Os sinais de saúde que a conciliação dá de graça**, e que entram na métrica:
+
+| Sinal | O que denuncia |
+|---|---|
+| Venda sem nenhuma sessão na janela | Câmera cega, `T_vazia` errado ou relógio desalinhado |
+| Sessão conciliada com zero interações | Zona de produto mal desenhada (falso negativo silencioso) |
+| Proporção de sessões com `ocupacao_max > 1` | Tamanho do falso negativo assumido da Regra S |
 
 ---
 
 ## 5. Contrato entre agente e nuvem
 
-Princípio: **configuração é puxada, nunca empurrada** (ADR-003). A nuvem nunca abre
-conexão para a loja. Isso elimina dependência de IP fixo, VPN ou NAT traversal — o
-agente é sempre o cliente.
+Princípio inalterado: **configuração é puxada, nunca empurrada** (ADR-003). Agora vale
+também para a decisão sobre o vídeo.
 
 ### 5.1 Autenticação
 
-- Provisionamento: token de bootstrap de uso único, gerado no dashboard ao cadastrar
-  a loja, trocado por credencial de longa duração do agente.
-- Credencial escopada a **uma** loja. Um agente comprometido não alcança outro tenant.
-- Rotação de credencial comandada pela nuvem via resposta de configuração.
+Inalterada: token de bootstrap de uso único gerado no dashboard, trocado por credencial
+de longa duração escopada a **uma** loja. O mesmo vale para o conector de venda: a
+credencial de webhook do fornecedor é por tenant, e a venda só concilia sessões das
+lojas desse tenant.
 
 ### 5.2 Endpoints
 
-| Método | Rota | Direção | Descrição |
+| Método | Rota | Direção | Situação |
 |---|---|---|---|
-| `POST` | `/v1/agents/register` | agente → nuvem | Troca token de bootstrap por credencial |
-| `GET` | `/v1/agents/config` | agente → nuvem | Configuração da loja. Poll a cada 30 s, com `ETag`/`version`; resposta vazia (`304`) quando nada mudou |
-| `POST` | `/v1/agents/heartbeat` | agente → nuvem | Telemetria periódica (§5.3) |
-| `POST` | `/v1/events` | agente → nuvem | Envia o evento. Idempotente por `event_id`. Resposta traz `clip_upload_url` |
-| `PUT` | *(URL pré-assinada R2)* | agente → R2 | Upload do clipe. Não passa pela API |
-| `PATCH` | `/v1/events/{event_id}` | agente → nuvem | Confirma upload do clipe ou marca `clip_failed` |
-| `GET` | `/v1/models/current` | agente → nuvem | Versão de modelo alvo + URL assinada de download + checksum |
-| `POST` | `/v1/agents/logs` | agente → nuvem | Envio em lote de logs e diagnóstico (baixa prioridade) |
+| `POST` | `/v1/agents/register` | agente → nuvem | Existe |
+| `GET` | `/v1/agents/config` | agente → nuvem | Existe; o documento ganha `schema_version: 2` (zonas `produto`/`totem`/`exclusao`, sinal por zona, `T_vazia`, modo reposição) |
+| `POST` | `/v1/agents/heartbeat` | agente → nuvem | Existe; ganha portão de movimento, sessões abertas e recortes provisórios |
+| `POST` | `/v1/sessoes` | agente → nuvem | **Novo.** Sessão encerrada; idempotente por `session_id`. Responde a decisão corrente |
+| `GET` | `/v1/sessoes/{id}` | agente → nuvem | **Novo.** `aguardar`, `descartar` ou `subir` (com uma URL pré-assinada por recorte) |
+| `PUT` | *(URL pré-assinada R2)* | agente → R2 | Existe |
+| `PATCH` | `/v1/sessoes/{id}` | agente → nuvem | **Novo**, sucessor do `PATCH /v1/events/{id}`: confirma recortes enviados ou falhos |
+| `POST` | `/v1/vendas/{conector}` | fornecedor → nuvem | **Novo.** Webhook do conector de venda |
+| `GET` | `/v1/models/current` | agente → nuvem | Pendente desde o foco anterior |
 
-O que trafega, resumido:
+`POST /v1/events` continua de pé enquanto houver agente do foco anterior; o evento de
+travessia e o de gesto viram, no novo contrato, sessões com a regra correspondente. A
+migração é uma versão nova do schema em `packages/shared`, nunca uma edição da v1.
 
-- **Sobe:** evento (JSON), clipe (~15 s, substream), heartbeat, logs.
-- **Desce:** configuração (câmeras, zonas, regras, limiares, versão de modelo alvo),
-  binário do modelo, comandos de manutenção.
-- **Nunca trafega:** vídeo contínuo, frames avulsos, imagem de pessoa fora do clipe
-  de um evento, qualquer dado biométrico.
+O que trafega:
+
+- **Sobe:** sessão (JSON), recortes **só sob `subir`**, heartbeat, logs.
+- **Desce:** configuração, modelo, decisão sobre cada sessão.
+- **Entra pelo fornecedor:** venda normalizada, sem identificação do comprador.
+- **Nunca trafega:** vídeo contínuo, frames avulsos, recorte de sessão conciliada, dado
+  biométrico.
 
 ### 5.3 Heartbeat
 
-Enviado periodicamente (candidato: junto ao poll de 30 s). Conteúdo:
+O do foco anterior, mais:
 
 | Campo | Uso |
 |---|---|
-| `agent_version`, `model_version`, `config_version` | Detectar agentes desatualizados ou rollback não aplicado |
-| `queue_depth`, `queue_oldest_age`, `queue_bytes` | Detectar loja com link caído ou fila represada |
-| Por câmera: `status` (`ok` / `reconnecting` / `offline`) | Alerta técnico de câmera offline |
-| Por câmera: `decode_fps`, `inference_fps`, `dropped_frames` | Detectar box saturado ou câmera degradada |
-| Por câmera: `last_frame_at` | Distinguir "stream travado" de "stream ausente" |
-| `gpu_util`, `vram_used`, `cpu`, `ram`, `disk_free`, `temp` | Saúde do hardware da loja |
-| `clock_skew` | Divergência de relógio contra a nuvem |
-| `uptime`, `restarts` | Detectar crash loop |
-
-Ausência de heartbeat por um limite configurado abre alerta técnico de **agente
-offline** — distinto de câmera offline, porque a ação é diferente.
+| Por câmera: `portao_aberto_s`, `aberturas_sem_pessoa` | Custo real do portão de movimento; luz que engana o portão |
+| `sessoes_abertas`, `sessao_mais_longa_s` | Sessão que nunca fecha |
+| `recortes_provisorios`, `recortes_bytes`, `recorte_mais_velho_s` | Decisões que não chegam; disco enchendo |
+| `provider` efetivo (`OpenVINO`, `CPU`, `CUDA`) | Pedido não é obtido |
 
 ### 5.4 Política de retry
 
+A do foco anterior, mais:
+
 | Situação | Política |
 |---|---|
-| `POST /v1/events` falha (rede, `5xx`) | Backoff exponencial com jitter, com teto; evento permanece na fila local |
-| `POST /v1/events` retorna `4xx` de validação | Não reenvia; move para fila morta local e registra em log |
-| Upload do clipe falha | Retry com nova URL pré-assinada (a anterior pode ter expirado); após N tentativas, marca `clip_failed` e preserva o evento |
-| `GET /v1/agents/config` falha | Mantém a última configuração válida em cache local e segue operando |
-| Download de modelo falha ou checksum não bate | Descarta, mantém a versão atual, reporta no heartbeat |
-| Nuvem inteira indisponível | Pipeline continua; fila acumula até TTL/teto de disco (§3.6) |
+| `GET /v1/sessoes/{id}` responde `aguardar` | Reagenda no intervalo indicado pela nuvem; não é falha e não conta backoff |
+| `GET /v1/sessoes/{id}` responde `404` | Repõe a sessão (`POST` de novo), como o `404` do `PATCH` de evento hoje |
+| Recorte provisório vence o TTL sem decisão | Apaga com registro; a sessão segue sem vídeo |
 
-Regra geral: **nenhuma falha de rede pode parar a detecção**. Todo caminho para a
-nuvem é assíncrono em relação ao pipeline.
+Regra geral, inalterada: **nenhuma falha de rede pode parar a detecção**.
 
 ---
 
 ## 6. Modelo de dados em alto nível
-
-Entidades e relações, sem schema completo.
 
 ```mermaid
 erDiagram
     TENANT ||--o{ LOJA : possui
     LOJA ||--o{ USUARIO_LOJA : tem
     USUARIO ||--o{ USUARIO_LOJA : participa
-    LOJA ||--|| AGENTE : opera
+    LOJA ||--o{ AGENTE : opera
     LOJA ||--o{ CAMERA : possui
-    CAMERA ||--o{ ZONA : define
-    CAMERA ||--o{ REGRA_CONFIG : configura
-    CAMERA ||--o{ EVENTO : origina
-    REGRA_CONFIG ||--o{ EVENTO : dispara
-    EVENTO ||--o| CLIPE : referencia
-    EVENTO ||--o| TRIAGEM : resolve
-    EVENTO ||--o{ ENVIO_ALERTA : notifica
+    LOJA ||--o{ SESSAO : registra
+    LOJA ||--o{ VENDA : recebe
+    TENANT ||--o{ CONECTOR_VENDA : configura
+    CONECTOR_VENDA ||--o{ VENDA : entrega
+    SESSAO ||--o| VENDA : conciliada_com
+    SESSAO ||--o{ INTERACAO : contem
+    SESSAO ||--o{ RECORTE : referencia
+    SESSAO ||--o| ALERTA : origina
+    ALERTA ||--o{ TRIAGEM : resolve
     USUARIO ||--o{ TRIAGEM : executa
+    LOJA ||--o{ JANELA_REPOSICAO : define
     AGENTE ||--o{ HEARTBEAT : reporta
-    CAMERA ||--o{ SAUDE_CAMERA : registra
-    MODELO_VERSAO ||--o{ AGENTE : implantado_em
-    LOJA ||--o{ POLITICA_RETENCAO : rege
     USUARIO ||--o{ AUDITORIA : gera
-    TRIAGEM ||--o{ DATASET_ITEM : alimenta
 ```
 
 | Entidade | Papel |
 |---|---|
-| `TENANT` / `LOJA` | Raiz de isolamento. `tenant_id` presente em toda entidade de dado |
-| `USUARIO` / `USUARIO_LOJA` | Usuário e seu papel na loja: admin, gerente, operador |
-| `AGENTE` | O box da loja: credencial, versões instaladas, último heartbeat |
-| `CAMERA` | Câmera RTSP: endereço, substream, se é relevante para IA, estado de saúde |
-| `ZONA` | Geometria sobre o frame: linha de saída (orientada), área de caixa, gôndola |
-| `REGRA_CONFIG` | Regra por câmera com limiares versionados (ex.: N segundos no caixa). Versionada para que um evento antigo saiba sob qual configuração nasceu |
-| `EVENTO` | `event_id` (UUID da borda), câmera, regra, instantes, estado do clipe, agrupamento de supressão |
-| `CLIPE` | Chave no R2, duração, pré/pós-roll efetivos, data de expurgo |
-| `TRIAGEM` | Decisão humana: confirmado / falso positivo / inconclusivo, autor e horário |
-| `ENVIO_ALERTA` | Cada notificação despachada (WhatsApp, WebSocket) e seu resultado |
-| `HEARTBEAT` / `SAUDE_CAMERA` | Séries de telemetria, com retenção própria e curta |
-| `MODELO_VERSAO` | Versão de modelo, checksum, alvo de implantação, histórico de rollback |
-| `POLITICA_RETENCAO` | Prazos por tipo de dado; base do job de expurgo |
-| `AUDITORIA` | Acesso e download de clipes: quem, qual evento, quando, de onde |
-| `DATASET_ITEM` | Referência do evento triado usada para melhoria do modelo |
+| `SESSAO` | `session_id` (UUID da borda), loja, início, fim, ocupação máxima, cobertura parcial, versões de config e modelo, **decisão** (`aguardar`/`descartar`/`subir`) e o motivo |
+| `INTERACAO` | Câmera, zona, sinal e instante. Sobe para toda sessão candidata, mesmo conciliada: é o dataset da Regra D |
+| `RECORTE` | Índice, câmera, momento, chave no R2 e estado (`provisorio`/`pendente`/`enviado`/`falhou`). Só tem chave quando a decisão é `subir` |
+| `VENDA` | Normalizada, sem identidade do comprador; `id_externo` único por conector |
+| `CONECTOR_VENDA` | Fornecedor, credencial do webhook (hash), mapeamento loja ↔ terminal, última venda recebida |
+| `ALERTA` | O que vai para a fila de triagem e para o Web Push; regra (`S`, `S_sem_venda_conferida`, `D`) |
+| `JANELA_REPOSICAO` | Intervalos em que a loja não alerta (modo reposição) |
+| `TRIAGEM` | Append-only, a vigente é a última por `seq` — como hoje |
 
-Notas de modelagem:
-
-- `EVENTO` guarda a **versão da regra e do modelo** vigentes no momento. Sem isso,
-  não é possível interpretar uma taxa histórica de falso positivo.
-- `TRIAGEM` é separada de `EVENTO` porque a decisão é um ato humano auditável, com
-  autor e horário próprios — não um campo mutável do evento.
-- `AUDITORIA` é *append-only*.
+O que já existe e muda de nome ou de papel: o `Evento` atual vira o par `SESSAO` +
+`ALERTA`. As decisões já pagas do caminho do evento — chave primária gerada na borda,
+chave de objeto determinística, reenvio que não reescreve, `404` que manda repor — valem
+sem mudança para a sessão.
 
 ---
 
 ## 7. Riscos
 
-**O maior risco deste projeto não é a arquitetura.** É a robustez do tracking e a
-taxa de falso positivo. Se o gerente receber 30 alertas falsos na primeira semana,
-ele desliga a notificação e o produto morre — independentemente de a arquitetura
-estar correta, do custo estar baixo e da latência caber no orçamento.
-
-Tudo que está descrito acima existe para tornar esse problema *tratável*: separar
-regras do modelo permite recalibrar sem retreinar; a triagem obrigatória gera o
-dataset; a supressão limita o dano de uma câmera mal ajustada; o versionamento de
-modelo permite rollback. Nada disso resolve o problema — apenas dá as alavancas.
+**O maior risco continua sendo a taxa de falso positivo.** Mas, pela primeira vez, existe
+um dado que a câmera não precisa adivinhar: se houve venda. O risco migra de "o tracking
+aguenta?" para "a integração com o fornecedor sai?".
 
 | # | Risco | Severidade | Mitigação |
 |---|---|---|---|
-| R-1 | **Taxa de falso positivo acima do tolerável** (NFR-2). Gerente abandona o produto | **Crítica** | Piloto em loja única antes de escalar; supressão de duplicados; limiares por câmera; teto diário de alertas por câmera com o excedente indo para revisão em lote; medir FP/câmera/dia como métrica número 1 do produto |
-| R-2 | **Tracking frágil** — ID switch em cruzamento de pessoas quebra a premissa da regra | **Crítica** | Tempo mínimo de vida do track; debounce de travessia; coleta de casos difíceis via triagem; avaliar tracker alternativo com dados reais antes de fechar a escolha |
-| R-3 | **Posicionamento das câmeras existentes é inadequado** (ângulo, altura, contraluz na porta) | **Alta** | Checklist de qualificação da loja antes da venda; marcar câmeras como não elegíveis para IA; possibilidade de reposicionar apenas as 2–3 críticas |
-| R-4 | **Hardware da loja insuficiente** para 6–10 câmeras com decode em taxa cheia | **Alta** | Benchmark antes de definir o box de referência; heartbeat com `dropped_frames` e `queue_depth` para detectar saturação em campo; reduzir nº de câmeras ativas como válvula de escape |
-| R-5 | **Orçamento de latência não fecha** (§3.7), sobretudo com link ruim | **Média** | Alerta disparado antes do upload do clipe; medir cada etapa em produção; alavancas: reduzir pós-roll ou notificar em dois tempos |
-| R-6 | **Box da loja falha** (energia, disco, GPU) e ninguém percebe | **Alta** | Alerta de agente offline por ausência de heartbeat; acesso remoto via Tailscale; nobreak recomendado no checklist |
-| R-7 | **Atualização remota quebra a loja** e exige visita presencial | **Alta** | Rollout gradual por lojas; healthcheck pós-atualização com rollback automático de imagem; nunca atualizar todas as lojas ao mesmo tempo |
-| R-8 | **Vazamento de clipe** ou acesso indevido entre tenants | **Alta** | `tenant_id` obrigatório; URL assinada de expiração curta; auditoria de todo download; chave de objeto não adivinhável |
-| R-9 | **Enquadramento LGPD** — imagem de pessoa identificável é dado pessoal, mesmo sem biometria | **Alta** | Minimização (só o clipe do evento); sem reconhecimento facial no v1; retenção curta com expurgo automático; auditoria de acesso; cartazes de aviso e base legal a definir com apoio jurídico |
-| R-10 | **Uso indevido pelo lojista** — tratar alerta como acusação e abordar cliente | **Alta** | Triagem humana obrigatória por design; linguagem do produto sempre "possível ocorrência"; material de treinamento sobre o que o alerta não significa |
-| R-11 | **Desenvolvedor solo** — superfície operacional grande (borda + nuvem + modelo) para uma pessoa | **Média** | Priorizar uma loja piloto; automatizar provisionamento e atualização desde o início; evitar variação por loja |
-| R-12 | **Custo de WhatsApp** cresce com volume de alertas | **Baixa** | Agrupamento de alertas; teto diário por loja; WebSocket como canal primário quando o dashboard está aberto |
-| R-13 | **Internet instável prolongada** — fila estoura TTL e eventos se perdem | **Média** | TTL e teto configuráveis; heartbeat expõe `queue_oldest_age`; clipes são descartados antes dos eventos |
+| R-1 | **Falso positivo acima do tolerável** (NFR-2). O operador abandona o produto | **Crítica** | Conferência com a venda; Regra S só com interação; modo reposição; alertas sem conector marcados à parte; métrica de FP por loja e por regra como número 1 |
+| R-2 | **Tracking frágil** | **Média** *(era Crítica)* | A sessão não depende da história de um track. Continua importando para contar interações (Regra D) |
+| R-3 | **Câmeras mal posicionadas ou com ponto cego** | **Alta** | Checklist de cobertura antes da venda (§3); câmera A com porta e totem no mesmo quadro; `tools/qualifica_camera.py` |
+| R-4 | **Mini PC insuficiente** para 3 câmeras em CPU | **Alta** | Benchmark no box de referência antes de fechar o hardware; portão de movimento; modelo nano; fps do substream na câmera; heartbeat com descartes |
+| R-5 | **Latência da conciliação** acima de 3 min | **Baixa** | Webhook em vez de poll quando o fornecedor oferecer; janela configurável por loja |
+| R-6 | **Box falha e ninguém percebe** | **Alta** | Alerta de agente offline; Tailscale no host; nobreak no checklist |
+| R-7 | **Atualização remota quebra a loja** | **Alta** | Rollout gradual; rollback automático quando houver sinal de saúde local |
+| R-8 | **Vazamento de clipe** | **Alta** | `tenant_id` obrigatório; URL assinada curta; auditoria de emissão; e agora menos clipes: só de sessão suspeita |
+| R-9 | **LGPD** — imagem de morador identificável é dado pessoal | **Alta** | Recorte provisório apagado na conciliação; clipe só de sessão suspeita; venda sem identidade; retenção curta; cartaz de aviso; base legal com apoio jurídico, inclusive o papel do condomínio |
+| R-10 | **Acusação de vizinho** — alerta tratado como prova | **Alta** *(subiu)* | Triagem obrigatória; "possível ocorrência"; a tela mostra o que **não** se sabe (grupo, cobertura parcial, sem venda conferida); sem identificação automática do morador (§9) |
+| R-11 | **Desenvolvedor solo** | **Média** | Reaproveitar o pipeline existente; um conector de venda por vez; uma loja piloto |
+| R-13 | **Internet instável prolongada** | **Média** | TTL distintos para sessão e recorte; sessões sobrevivem sem vídeo |
+| R-14 | **Fornecedor do totem não oferece venda por API** | **Alta** *(novo)* | Validar antes de qualquer código (§11, fase 0); loja sem conector opera na Regra S fraca, marcada à parte; conector por exportação periódica (CSV) como último recurso |
+| R-15 | **Grupo mascara furto** — uma venda concilia a sessão de duas pessoas | **Média** *(novo)* | Assumido no v1; medido por `ocupacao_max`; a Regra D com informação na triagem é o primeiro passo |
+| R-16 | **Repositor e limpeza viram suspeitos** | **Média** *(novo)* | Modo reposição por janela de horário e por botão |
+
+O R-12 (custo de WhatsApp) saiu: o canal é Web Push, sem custo por mensagem.
 
 ---
 
 ## 8. Índice dos ADRs
 
-> Os arquivos em `docs/adr/` ainda não foram criados. Esta seção registra as
-> decisões e reserva a numeração. Cada ADR deve seguir o formato: **contexto,
-> decisão, alternativas consideradas, consequências (incluindo as negativas)**.
-> Alternativa descartada sem motivo escrito não conta como alternativa considerada.
+> Os arquivos em `docs/adr/` ainda não foram criados. Cada ADR deve seguir o formato:
+> **contexto, decisão, alternativas consideradas, consequências (incluindo as
+> negativas)**.
 
-| ADR | Título | Decisão em uma linha | Principal consequência negativa |
-|---|---|---|---|
-| ADR-001 | `0001-processamento-na-borda.md` | Processar na loja em vez de tudo na nuvem: custo mensal ~4x menor, independência do link da loja, enquadramento LGPD mais simples | CAPEX de hardware por loja e parque físico distribuído para manter |
-| ADR-002 | `0002-regras-separadas-do-modelo.md` | O modelo só responde "onde estão pessoas e objetos"; zonas, tempos e limiares são configuração versionada em banco, por câmera | Duas fontes de comportamento (modelo e regras) para depurar quando um evento sai errado |
-| ADR-003 | `0003-configuracao-puxada.md` | O agente consulta a nuvem a cada 30 s; a nuvem nunca inicia conexão com a loja | Latência de até 30 s para uma mudança de configuração chegar; tráfego de poll constante |
-| ADR-004 | `0004-fila-local-no-agente.md` | Fila local durável no agente, em **Redis** no próprio box, para continuar detectando com a internet caída | Estado durável na borda para gerenciar (TTL, teto de disco, fila morta) e ~1 s de fila perdido numa queda de energia (`appendfsync everysec`) |
-| ADR-005 | `0005-amostragem-3fps.md` | Inferência sobre frames amostrados a 3 fps | Risco de perder travessias rápidas da linha de saída; **a validar por benchmark** |
-| ADR-006 | `0006-modelo-versionado-com-rollback.md` | Modelo versionado e distribuído pela nuvem, com rollback | Complexidade de distribuição, checksum e compatibilidade agente↔modelo |
-| ADR-007 | `0007-container-por-loja.md` | Um container de inferência por loja, não por câmera, para não recarregar o modelo na VRAM | Falha do container derruba todas as câmeras da loja de uma vez |
-| ADR-008 | `0008-escopo-fora-do-v1.md` | Exclusões explícitas do v1 (§9) | Lacunas funcionais conhecidas frente a concorrentes |
-| ADR-009 | `0009-inferencia-em-onnx-runtime.md` | Inferência em ONNX Runtime com o modelo como `.onnx` avulso, e modelo de licença permissiva (YOLOX, Apache-2.0) em vez da linhagem Ultralytics (AGPL-3.0) | Pré-processamento e NMS escritos e testados à mão, e a convenção de entrada muda a cada família de modelo — errá-la não dá erro, desloca as caixas |
+| ADR | Decisão em uma linha | Principal consequência negativa |
+|---|---|---|
+| ADR-001 | Processar na loja em vez de na nuvem | Parque físico distribuído para manter — agora com CAPEX baixo (mini PC) |
+| ADR-002 | O modelo só diz onde estão as pessoas (e as juntas); zonas, sinais e limiares são configuração por câmera | Duas fontes de comportamento para depurar |
+| ADR-003 | A borda puxa configuração **e decisão**; a nuvem nunca abre conexão com a loja | A decisão sobre o vídeo chega com a latência do intervalo de consulta |
+| ADR-004 | Fila local em Redis no box | ~1 s de fila perdido numa queda de energia |
+| ADR-005 | Inferência a 3 fps por câmera ativa | Risco de perder travessias rápidas; menor com uma pessoa por vez |
+| ADR-006 | Modelo versionado com rollback | Distribuição, checksum e compatibilidade |
+| ADR-007 | Um container por loja | Falha do container derruba as câmeras todas — que agora são 3 |
+| ADR-008 | Exclusões do v1 (§9) | Lacunas conhecidas |
+| ADR-009 | ONNX Runtime com YOLOX (Apache-2.0) | Pré e pós-processamento escritos à mão |
+| ADR-010 | **A unidade de análise é a sessão da loja, não o track** | Grupo concilia como unidade: falso negativo assumido (R-15) |
+| ADR-011 | **A venda é conferida na nuvem**, pelo conector do fornecedor | A borda não sabe sozinha se uma sessão é suspeita; sem link, não há alerta conferido |
+| ADR-012 | **CPU é o alvo**: modelo pequeno, portão de movimento, OpenVINO | Recall menor que o do YOLOX-s; pessoa imóvel depende da inferência de vigia |
+| ADR-013 | **Recorte provisório com subida condicionada** | Vídeo de cliente honesto existe em disco na loja por alguns minutos |
 
 ---
 
 ## 9. Fora do escopo do v1 (decisão explícita)
 
-Excluído deliberadamente, não esquecido:
-
-| Item | Motivo da exclusão |
+| Item | Motivo |
 |---|---|
-| **Reconhecimento facial e base de reincidentes** | Dado biométrico eleva drasticamente o risco e a exigência de conformidade LGPD, e não é necessário para a regra principal do MVP |
-| **Integração com PDV** | Cruzar travessia com venda registrada reduziria muito o falso positivo, mas exige integração por fornecedor de PDV — trabalho grande para desenvolvedor solo. É a evolução natural do produto |
-| **Detecção de "item saiu da gôndola" por action recognition** | Exige modelo e dataset próprios; não cabe no v1 |
-| **Multi-modelo por loja** | Um único modelo para todas as lojas mantém a distribuição e o rollback simples. Diferenciação por loja é feita nas regras, não no modelo |
-| **Re-identificação entre câmeras** | Depende de tracking robusto dentro de uma câmera, que é justamente o risco R-2 |
+| **Reconhecimento facial e base de reincidentes** | Biometria eleva drasticamente o risco LGPD; num condomínio, vira lista de vizinhos suspeitos |
+| **Ligar a sessão ao morador** (controle de acesso por app/QR, cadastro do condomínio) | É o que o operador mais vai pedir, e o que mais aproxima o produto de uma acusação nominal automática (R-10). Fica para depois de existir base legal escrita e taxa de FP medida. A arquitetura não fecha a porta: seria mais um conector, como o de venda |
+| **Re-identificação entre câmeras** | Substituída pela sessão (ADR-010) |
+| **Regra D como alerta** | Entra como informação e métrica; vira alerta só se a medição aprovar (§3.4) |
+| **Detector de produto na mão / câmera sobre o totem** | Exige dataset e modelo próprios; é o passo seguinte se a Regra D por interações não separar |
+| **Prateleira com balança, RFID** | Hardware na gôndola muda o produto de "reaproveita o CFTV" para "reforma a loja" |
+| **Gesto da bolsa como alerta** | Medido e reprovado no dataset de furto encenado; continua desligado e experimental |
+| **Conferência de estoque × venda** | Útil para dizer **quais** produtos somem, mas é relatório de gestão, não detecção. Candidato forte para logo depois do v1, porque usa o dado de venda que o conector já traz |
+| **WhatsApp** | Web Push cobre o v1 sem custo por mensagem |
 
 ---
 
 ## 10. Pendências que precisam de dado real
 
-Lista viva do que só se resolve com hardware e vídeo da loja piloto:
+1. **API de venda do fornecedor do totem**: existe? webhook ou poll? traz número de
+   itens? qual o atraso? Fecha o R-14 e a janela da §3.7. **É a primeira pendência.**
+2. **Benchmark no mini PC de referência**: YOLOX-nano e tiny a 416 com OpenVINO, 3
+   câmeras, tracking e pose sob demanda. Ponto de partida medido: YOLOX-s a 640 custa
+   ~450 ms por frame em CPU de desenvolvimento e não sustenta uma câmera.
+3. **Recall do modelo pequeno em vídeo de mini market**, contra o YOLOX-s no mesmo vídeo.
+4. **Custo e eficácia do portão de movimento**: quanto tempo a loja passa vazia; quantas
+   aberturas sem pessoa (porta de vidro, reflexo, geladeira acendendo).
+5. **`T_vazia`**: quanto tempo uma pessoa some de todas as câmeras numa visita normal.
+6. **Sinal `porta_geladeira`**: a mudança de pixels separa porta aberta de pessoa
+   passando na frente?
+7. **Pose em CPU** para uma pessoa perto da gôndola: latência e se o punho dentro do
+   polígono marca a retirada.
+8. **Frequência de sessões em grupo** (`ocupacao_max > 1`): o tamanho real do R-15.
+9. **Divergência interações × itens** em sessões triadas: decide a Regra D.
+10. Taxa real de frames entregue pelas câmeras no substream.
+11. RAM do buffer de 30 s × 3 câmeras e disco dos recortes provisórios num dia cheio.
+12. Atualização automática com rollback (R-7), que depende de sinal de saúde local.
 
-1. Taxa real de frames entregue pelas câmeras no substream (base do dimensionamento de decode).
-2. Custo de inferência por frame no box de referência → nº máximo de câmeras por loja.
-3. Latência ponta a ponta medida por etapa (§3.7).
-4. Adequação de 3 fps para a travessia da linha de saída. **Primeiro dado:** a 3 fps a
-   IoU entre caixas cruas consecutivas de uma pessoa andando é ~0,19, o que torna a
-   associação inviável sem a previsão do Kalman e exige limiares mais frouxos que os de
-   qualquer implementação de referência (§3.3). A margem é estreita; se o piloto mostrar
-   troca de ID demais, aumentar a taxa nas câmeras de saída é a primeira alavanca.
-5. Valor inicial de N segundos na zona do caixa, por layout de loja.
-6. Janela de supressão de duplicados.
-7. Taxa de ID switch do tracker escolhido em vídeo real de corredor cheio. Medi-la exige
-   *ground truth*, que só existe com vídeo de loja anotado. O que já é observável sem
-   isso: `criados_por_minuto` e `vida_media_s` por câmera no heartbeat (fragmentação), e
-   o vídeo anotado do `--dump-tracks`, em que cada pessoa tem uma cor e uma troca de ID
-   aparece como a cor mudando no meio do percurso.
-   Pendência irmã: a segunda passada de associação (detecções fracas) ainda não foi
-   exercitada em condição real — no vídeo de teste, bem iluminado, ela nunca dispara. O
-   ganho dela só aparece com oclusão e contraluz de loja.
-8. Consumo de RAM do buffer circular de 30 s × N câmeras.
-9. ~~Escolha final entre SQLite e Redis para a fila local.~~ **Fechada: Redis** (§3.6, ADR-004).
-10. Comportamento do estágio de detecção quando a GPU cai: fallback em CPU ou parada
-    com alerta. O mecanismo já existe (lista de providers, §3.2) e o provider efetivo é
-    reportado; falta a política. **Primeiro dado real, numa máquina de desenvolvimento
-    sem GPU:** YOLOX-s a 640 custa ~450 ms por frame em CPU, ou seja ~2 fps para **uma**
-    câmera, contra os 3 fps amostrados. O fallback em CPU não é degradação suave — não
-    sustenta nem uma câmera, e o descarte começa imediatamente. Com o estágio 3 ligado na
-    mesma thread, a taxa medida cai para ~1,15 fps e a fila fica permanentemente cheia:
-    o intervalo entre frames rastreados passa de 0,8 s, e nesse regime o tracking opera
-    muito fora do ponto de projeto. Reforça a leitura de que o fallback em CPU deveria
-    ser **parada com alerta técnico**, não operação degradada.
-11. Rolls de clipe por câmera. Hoje o `ClipRecorder` tem um pré/pós-roll para o
-    agente inteiro e a subida falha se as câmeras divergirem. Uma câmera de saída com
-    GOP longo pode precisar de outra tolerância que a do corredor (§3.4) — resolver
-    exige passar as opções por câmera no `attach`.
-12. ~~Compose do box da loja (§3.8).~~ **Fechada:** agente + redis em
-    `infra/box/`, tailscale no host (docs/box.md). Fica aberta a atualização automática
-    com rollback (R-7), que depende de um sinal de saúde local do agente.
+---
+
+## 11. Plano de transição
+
+### O que se aproveita
+
+| Componente | Destino |
+|---|---|
+| Ingestão, buffer, corte `-c copy`, reconexão (§3.1, §3.5) | **Mantém.** Muda quem chama o corte e o destino do arquivo |
+| Detecção ONNX, `PreprocessSpec`, lista de providers (§3.2) | **Mantém**; acrescenta OpenVINO e modelo menor |
+| Tracking (§3.3) | **Mantém**, sem mudança |
+| Pose (RTMPose) | **Mantém**; passa a rodar sob demanda perto de zona de produto |
+| Motor de regras por track (`rules/`) | **Adapta**: a linha e as zonas viram insumo da sessão; a decisão sobe para a sessão |
+| Gesto da bolsa | **Mantém desligado**, experimental |
+| Fila local, backoff, idempotência, registro, credencial, heartbeat, config com ETag e troca a quente | **Mantém** |
+| API: auth, triagem, auditoria, Web Push, métrica, bootstrap | **Mantém**; a métrica muda de câmera para loja e regra |
+| API: caminho do evento | **Adapta** para sessão + decisão |
+| Conectores de venda e conciliação | **Novo** |
+| Dashboard | **Mantém** o ciclo de triagem; acrescenta lista de clipes, modo reposição e estado do conector |
+| Imagem do box | **Nova variante CPU**; a CUDA vira opcional |
+
+### Fases
+
+| Fase | Entrega | Critério de saída |
+|---|---|---|
+| **0 — Validação** | Conversa com operadores e fornecedor do totem; vídeo de 1–2 lojas; mini PC comprado | Sabe-se se há API de venda (R-14) e há vídeo real para os benchmarks |
+| **1 — CPU** | Imagem CPU, OpenVINO, YOLOX-nano/tiny, portão de movimento | 3 câmeras no mini PC sem descarte sustentado, recall medido no vídeo real |
+| **2 — Sessão** | Estágio de sessão, zonas `porta`/`totem`/`produto`, sinais `porta_geladeira` e `presenca`, recorte provisório | Sessões batem com as visitas do vídeo, a olho, como o `--dump-tracks` fez com o tracking |
+| **3 — Conciliação** | Contrato v2, `POST/GET/PATCH /v1/sessoes`, um conector de venda, varredura da janela, subida condicionada, dashboard com lista de clipes e modo reposição | Loja piloto rodando com a Regra S conferida; FP por loja/dia medido |
+| **4 — Divergência** | Sinal `pulso` com pose sob demanda; "N interações · M itens" na triagem; métrica da divergência | Medição decide se a Regra D vira alerta ou se o caminho é a câmera do totem |
+
+A fase 0 vem antes de qualquer código pelo mesmo motivo que o R-1 é o risco número 1:
+sem dado de venda, o produto volta a ser a câmera adivinhando se alguém pagou.

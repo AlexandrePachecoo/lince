@@ -1,11 +1,13 @@
 # lince
 
-Detecção de situações de possível furto em mercados de bairro, reaproveitando as
-câmeras de CFTV já instaladas na loja.
+Detecção de situações de possível furto em mini markets autônomos de condomínio,
+com 2 a 3 câmeras por loja e um mini PC sem placa de vídeo.
 
-**A borda decide, a nuvem administra.** O vídeo nunca sai da loja — o que sobe é o
-evento (JSON) e um clipe de ~15 s. O sistema não decide nada sozinho: todo alerta
-passa por triagem humana.
+**A borda vê e suspeita; a nuvem confere a venda; um humano decide.** O vídeo nunca
+sai da loja — o que sobe é a sessão (JSON) e, só quando nenhuma venda a explica, os
+clipes curtos dela. O sistema não decide nada sozinho: todo alerta passa por triagem
+humana. O plano completo, e o que muda em relação ao foco anterior (mercados de
+bairro), está em [`docs/arquitetura.md`](docs/arquitetura.md) — §0 e §11.
 
 > **Status:** o caminho *pessoa cruza a linha → clipe → fila local → nuvem → clipe no
 > bucket* fecha ponta a ponta, sem andaime de gatilho. A borda tem os seis estágios da

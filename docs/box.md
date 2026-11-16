@@ -71,7 +71,7 @@ sudo tailscale up --ssh --hostname "lince-<loja>"
 ```
 
 `--ssh` liga o Tailscale SSH: dá para entrar no box pela tailnet sem abrir porta nenhuma
-no roteador da loja, que é o que mercado de bairro nunca vai ter (§3.8).
+no roteador da loja, que é o que mini market de condomínio nunca vai ter (§3.8).
 
 ## 4. O Lince
 
